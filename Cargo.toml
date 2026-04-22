@@ -1,0 +1,54 @@
+[workspace]
+members = [
+    "crates/getexec-desktop",
+    "crates/getexec-app",
+    "crates/getexec-auth",
+    "crates/getexec-cli",
+    "crates/getexec-config",
+    "crates/getexec-core",
+    "crates/getexec-modules",
+    "crates/getexec-output",
+    "crates/getexec-protocols",
+    "crates/getexec-runtime",
+    "crates/getexec-storage",
+    "crates/getexec-targets",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "BSD-2-Clause"
+version = "0.1.0"
+authors = ["GitHub Copilot"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+aes = "0.8"
+anyhow = "1.0"
+async-trait = "0.1"
+cbc = "0.1"
+cipher = { version = "0.4", features = ["block-padding"] }
+clap = { version = "4.5", features = ["derive"] }
+des = "0.8"
+eframe = "0.32"
+egui = "0.32"
+egui-snarl = { version = "0.8", features = ["serde"] }
+egui_graphs = "0.27"
+hmac = "0.12"
+md-5 = "0.10"
+md4 = "0.10"
+petgraph = "0.8"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

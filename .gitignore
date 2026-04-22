@@ -1,0 +1,29 @@
+target/
+Cargo.lock
+.idea/
+.vscode/
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Si c'est un binaire (recommandé)
+# garde Cargo.lock, sinon ignore-le pour lib
+# (décommente si besoin)
+# !Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Env
+.env
+*.yaml
+*.yml

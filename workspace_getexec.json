@@ -1,0 +1,22 @@
+{
+  "name": "workspace",
+  "credentials": [],
+  "networks": [],
+  "workflow": {
+    "name": "workspace",
+    "snarl": {
+      "nodes": {},
+      "wires": []
+    }
+  },
+  "logs": [
+    {
+      "level": "Success",
+      "message": "Workspace saved to workspace_getexec.json"
+    }
+  ],
+  "target_config": {
+    "target": "",
+    "protocol": "SMB"
+  }
+}

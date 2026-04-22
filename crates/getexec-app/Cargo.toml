@@ -1,0 +1,17 @@
+[package]
+name = "getexec-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+getexec-config = { path = "../getexec-config" }
+getexec-core = { path = "../getexec-core" }
+getexec-modules = { path = "../getexec-modules" }
+getexec-output = { path = "../getexec-output" }
+getexec-protocols = { path = "../getexec-protocols" }
+getexec-runtime = { path = "../getexec-runtime" }
+getexec-storage = { path = "../getexec-storage" }
+getexec-targets = { path = "../getexec-targets" }
