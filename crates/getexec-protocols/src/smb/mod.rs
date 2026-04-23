@@ -1,16 +1,67 @@
-pub mod connection;
-pub mod browser;
-mod shares;
-mod info;
-pub mod users;
+/// Error string returned by non-Windows stubs for features that haven't been
+/// ported to the pure-Rust SMB2 / DCE-RPC stack yet. Tracked in Phases 1–6 of
+/// the cross-platform portage plan.
+pub(crate) const NOT_PORTED: &str =
+    "SMB backend not yet ported to this platform — tracked in Phase 1-6 of the portage plan";
+
+// Portable modules — pure-Rust, compile on every platform.
 pub mod crypto;
 pub mod hive;
 pub mod sam;
-pub mod dump;
-pub mod enum_av;
 pub mod ntlm;
 pub mod smb2;
 pub mod fingerprint;
+
+// Platform-gated modules. The Windows versions use native APIs
+// (WNet / NetAPI / SCM / Registry). The Linux stubs mirror the exact public
+// API so the rest of the workspace compiles on every target; each stub call
+// fails with `NOT_PORTED` until the pure-Rust replacement lands.
+#[cfg(windows)]
+pub mod connection;
+#[cfg(not(windows))]
+#[path = "stubs/connection.rs"]
+pub mod connection;
+
+#[cfg(windows)]
+pub mod browser;
+#[cfg(not(windows))]
+#[path = "stubs/browser.rs"]
+pub mod browser;
+
+#[cfg(windows)]
+mod shares;
+#[cfg(not(windows))]
+#[path = "stubs/shares.rs"]
+mod shares;
+
+#[cfg(windows)]
+mod info;
+#[cfg(not(windows))]
+#[path = "stubs/info.rs"]
+mod info;
+
+#[cfg(windows)]
+pub mod users;
+#[cfg(not(windows))]
+#[path = "stubs/users.rs"]
+pub mod users;
+
+#[cfg(windows)]
+pub mod dump;
+#[cfg(not(windows))]
+#[path = "stubs/dump.rs"]
+pub mod dump;
+
+#[cfg(windows)]
+pub mod enum_av;
+#[cfg(not(windows))]
+#[path = "stubs/enum_av.rs"]
+pub mod enum_av;
+
+#[cfg(windows)]
+pub mod exec;
+#[cfg(not(windows))]
+#[path = "stubs/exec.rs"]
 pub mod exec;
 
 pub use connection::SmbCredential;

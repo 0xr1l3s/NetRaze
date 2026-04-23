@@ -6,6 +6,7 @@ members = [
     "crates/getexec-cli",
     "crates/getexec-config",
     "crates/getexec-core",
+    "crates/getexec-dcerpc",
     "crates/getexec-modules",
     "crates/getexec-output",
     "crates/getexec-protocols",
