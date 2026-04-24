@@ -137,7 +137,7 @@ phased delivery.
 No published crates yet. Build from source:
 
 ```shell
-git clone https://github.com/<your-org>/NetRaze.git
+git clone https://github.com/0xr1l3s/NetRaze.git
 cd NetRaze
 cargo build --release
 ```
