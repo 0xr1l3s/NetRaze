@@ -79,7 +79,7 @@ working — not what is planned.
 | WinRM | Scaffold | — | — | — |
 | MSSQL, SSH, RDP, FTP, NFS, VNC, WMI | Scaffold | — | — | — |
 
-### DCE/RPC stack (`getexec-dcerpc`)
+### DCE/RPC stack (`netraze-dcerpc`)
 
 - NDR20 reader/writer with BFS deferred-pointer walker (conformant arrays,
   unique/ref pointers, unions with pointer arms)
@@ -107,25 +107,25 @@ working — not what is planned.
 
 ## What's inside
 
-This is a Cargo workspace of 14 crates. The hard rule: **`getexec-core`
-depends on nothing applicative; `getexec-cli` contains no protocol
+This is a Cargo workspace of 14 crates. The hard rule: **`netraze-core`
+depends on nothing applicative; `netraze-cli` contains no protocol
 logic**. Everything else flows from those two constraints.
 
 | Crate | Purpose |
 |---|---|
-| `getexec-core` | Domain contracts: `ProtocolMetadata`, `ModuleMetadata`, `ScanRequest`, `Capability`, error types. |
-| `getexec-app` | Composition root. `GetexecApp::bootstrap()` wires registries and services. |
-| `getexec-cli` | Thin CLI binary (`clap`). Maps arguments to use-cases. |
-| `getexec-desktop` | `egui`/`eframe` GUI with `egui-snarl` workflow graph and `egui_graphs` network view. |
-| `getexec-protocols` | Wire-level protocol handlers (SMB is the only one significantly implemented). |
-| `getexec-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth, MS-SRVS interface. |
-| `getexec-modules` | Post-exploitation modules organised by category (`active_directory`, `credentials`, `reconnaissance`). |
-| `getexec-auth` | Credential types and authentication methods. |
-| `getexec-targets` | Target parsing and normalisation. |
-| `getexec-config` | `AppConfig`, `WorkspaceConfig`, `RuntimeConfig`. |
-| `getexec-storage` | `WorkspaceStore` trait with an in-memory implementation (SQLite backend planned). |
-| `getexec-output` | Console reporting, output events. |
-| `getexec-runtime` | Concurrency, timeouts, async orchestration. |
+| `netraze-core` | Domain contracts: `ProtocolMetadata`, `ModuleMetadata`, `ScanRequest`, `Capability`, error types. |
+| `netraze-app` | Composition root. `NetRazeApp::bootstrap()` wires registries and services. |
+| `netraze-cli` | Thin CLI binary (`clap`). Maps arguments to use-cases. |
+| `netraze-desktop` | `egui`/`eframe` GUI with `egui-snarl` workflow graph and `egui_graphs` network view. |
+| `netraze-protocols` | Wire-level protocol handlers (SMB is the only one significantly implemented). |
+| `netraze-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth, MS-SRVS interface. |
+| `netraze-modules` | Post-exploitation modules organised by category (`active_directory`, `credentials`, `reconnaissance`). |
+| `netraze-auth` | Credential types and authentication methods. |
+| `netraze-targets` | Target parsing and normalisation. |
+| `netraze-config` | `AppConfig`, `WorkspaceConfig`, `RuntimeConfig`. |
+| `netraze-storage` | `WorkspaceStore` trait with an in-memory implementation (SQLite backend planned). |
+| `netraze-output` | Console reporting, output events. |
+| `netraze-runtime` | Concurrency, timeouts, async orchestration. |
 | `xtask` | Build automation stub. |
 
 See [`docs/architecture.md`](docs/architecture.md) for the full dependency
@@ -142,8 +142,8 @@ cd NetRaze
 cargo build --release
 ```
 
-The CLI lands at `target/release/getexec-cli` and the desktop at
-`target/release/getexec-desktop` (Windows: `.exe`).
+The CLI lands at `target/release/netraze-cli` and the desktop at
+`target/release/netraze-desktop` (Windows: `.exe`).
 
 ### Linux prerequisites
 
@@ -168,14 +168,14 @@ system dependencies.
 ### List available protocols and modules
 
 ```shell
-cargo run -p getexec-cli -- protocols
-cargo run -p getexec-cli -- modules
+cargo run -p netraze-cli -- protocols
+cargo run -p netraze-cli -- modules
 ```
 
 ### Plan a scan
 
 ```shell
-cargo run -p getexec-cli -- plan smb 10.10.10.0/24 --module shares
+cargo run -p netraze-cli -- plan smb 10.10.10.0/24 --module shares
 ```
 
 The CLI today stops at **planning** (validating targets, resolving the
@@ -184,13 +184,13 @@ GUI for now; the headless execution path is part of the next milestone.
 
 ## Desktop GUI
 
-The GUI (`getexec-desktop`) is a node-graph workspace where each host,
+The GUI (`netraze-desktop`) is a node-graph workspace where each host,
 share listing, user listing, and post-exploitation action is a node
 connected by data-flow edges. This is the primary interface for
 interactive workflows today.
 
 ```shell
-cargo run -p getexec-desktop
+cargo run -p netraze-desktop
 ```
 
 Backend is `wgpu` by default, which works natively on Linux (Vulkan),
@@ -202,26 +202,26 @@ fallback).
 Layered, with one-way dependencies:
 
 ```
-               getexec-cli      getexec-desktop
+               netraze-cli      netraze-desktop
                      \             /
-                      getexec-app
+                      netraze-app
                            |
    ┌──────────────┬────────┼─────────┬──────────────┐
    |              |        |         |              |
-getexec-      getexec-  getexec-   getexec-     getexec-
+netraze-      netraze-  netraze-   netraze-     netraze-
 protocols     modules   dcerpc     auth         targets
    \              \        /         /             /
-    \──────────── getexec-core ──────────────────/
+    \──────────── netraze-core ──────────────────/
                            |
          (transversal: config, output, runtime, storage)
 ```
 
 Rules enforced in code review:
 
-- `getexec-core` has no applicative dependencies.
+- `netraze-core` has no applicative dependencies.
 - Protocol and module crates never depend on the CLI.
-- `getexec-app` is the only crate allowed to know almost everything.
-- Shared logic ratchets *up* into `getexec-core` or a transversal crate —
+- `netraze-app` is the only crate allowed to know almost everything.
+- Shared logic ratchets *up* into `netraze-core` or a transversal crate —
   never stays buried in a protocol crate.
 
 Full write-up in [`docs/architecture.md`](docs/architecture.md).
@@ -232,7 +232,7 @@ Full write-up in [`docs/architecture.md`](docs/architecture.md).
 
 ```shell
 cargo check --workspace              # type-check
-cargo clippy -p getexec-dcerpc -- -D warnings   # strict gate for new code
+cargo clippy -p netraze-dcerpc -- -D warnings   # strict gate for new code
 cargo test --workspace               # run all unit + integration tests
 cargo fmt --all                      # format
 ```
@@ -240,8 +240,8 @@ cargo fmt --all                      # format
 ### Per-crate testing
 
 ```shell
-cargo test -p getexec-dcerpc         # NDR / PDU / NTLMSSP / SRVSVC suites
-cargo test -p getexec-protocols      # SMB crypto, NTLM vectors
+cargo test -p netraze-dcerpc         # NDR / PDU / NTLMSSP / SRVSVC suites
+cargo test -p netraze-protocols      # SMB crypto, NTLM vectors
 ```
 
 ### CI gate
@@ -249,7 +249,7 @@ cargo test -p getexec-protocols      # SMB crypto, NTLM vectors
 `.github/workflows/ci.yml` enforces, on every push and PR:
 
 1. `cargo fmt --all --check` (Linux).
-2. Strict clippy on `getexec-dcerpc` (the new pure-Rust stack has zero
+2. Strict clippy on `netraze-dcerpc` (the new pure-Rust stack has zero
    warning tolerance); advisory clippy on the rest of the workspace.
 3. `cargo check --workspace --all-targets` on both **Ubuntu** and
    **Windows**.
@@ -268,14 +268,14 @@ Three independent layers protect the SMB/DCE-RPC stack:
    MS-NLMP test vectors. Any drift is caught before a single packet is
    built.
 2. **Impacket-pinned byte fixtures for NDR.** Python scripts in
-   `crates/getexec-dcerpc/tests/` use the Impacket library to generate
+   `crates/netraze-dcerpc/tests/` use the Impacket library to generate
    exact bytes for `NetrShareEnum` requests and responses, which are
    then baked into Rust tests. Any divergence in our encoder/decoder is
    a test failure with a clear byte-level diff.
 3. **Live Samba integration harness.** `tests/samba/` ships a
    `docker-compose.yml` + `smb.conf` that pin a Samba server with a
    known share inventory. Rust integration tests in
-   `crates/getexec-protocols/tests/samba_integration.rs` drive SMB2
+   `crates/netraze-protocols/tests/samba_integration.rs` drive SMB2
    Negotiate + NTLMv2 Session Setup + Tree Connect against the real
    daemon, proving the wire is not just internally consistent but
    actually interoperable.
@@ -290,7 +290,7 @@ integration suite locally.
 | Phase 0 | Workspace hygiene, wgpu backend, CI matrix | Done |
 | Phase 1 | DCE/RPC primitives, NTLMSSP, SMB2 auth, SRVSVC, Samba harness | Done |
 | Phase 2 | SMB2 IOCTL / FSCTL_PIPE_TRANSCEIVE, SMB signing, SAM RemoteOperations, SQLite workspace, CLI execution path | In progress |
-| Phase 3 | Split `getexec-protocols` per protocol, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
+| Phase 3 | Split `netraze-protocols` per protocol, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
 | Phase 4 | Integration test corpus, network fixtures, TUI or machine-friendly API, Kerberos | Planned |
 
 Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
@@ -304,12 +304,12 @@ This is an early-stage port. The highest-leverage contributions right now:
 - **SMB signing**, required to talk to hardened targets.
 - **Per-protocol crates** as NetRaze grows beyond SMB.
 - **Impacket-pinned fixtures** for each new DCE/RPC interface added
-  (see `crates/getexec-dcerpc/tests/gen_*.py` for the pattern).
+  (see `crates/netraze-dcerpc/tests/gen_*.py` for the pattern).
 
 Before opening a PR, please ensure:
 
 - `cargo fmt --all --check` passes.
-- `cargo clippy -p getexec-dcerpc -- -D warnings` passes.
+- `cargo clippy -p netraze-dcerpc -- -D warnings` passes.
 - `cargo test --workspace` passes on your OS. If you touched SMB2 or
   NTLMSSP code, run the Samba integration suite too.
 

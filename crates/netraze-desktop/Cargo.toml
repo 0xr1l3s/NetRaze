@@ -1,0 +1,25 @@
+[package]
+name = "netraze-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "netraze-desktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui-snarl.workspace = true
+netraze-protocols = { path = "../netraze-protocols" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Direct dep on wgpu to enable native backends — eframe's `wgpu` feature
+# alone only propagates `wgpu/wgsl`. See workspace Cargo.toml for the
+# full rationale (and the list of backends enabled here).
+wgpu.workspace = true

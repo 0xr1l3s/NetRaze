@@ -1,0 +1,17 @@
+[package]
+name = "netraze-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+netraze-config = { path = "../netraze-config" }
+netraze-core = { path = "../netraze-core" }
+netraze-modules = { path = "../netraze-modules" }
+netraze-output = { path = "../netraze-output" }
+netraze-protocols = { path = "../netraze-protocols" }
+netraze-runtime = { path = "../netraze-runtime" }
+netraze-storage = { path = "../netraze-storage" }
+netraze-targets = { path = "../netraze-targets" }
