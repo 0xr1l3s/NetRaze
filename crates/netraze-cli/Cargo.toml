@@ -1,0 +1,19 @@
+[package]
+name = "netraze-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "netraze"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+netraze-app = { path = "../netraze-app" }
+netraze-config = { path = "../netraze-config" }
+netraze-core = { path = "../netraze-core" }

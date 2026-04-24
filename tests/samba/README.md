@@ -45,11 +45,11 @@ the tests don't race the daemon's startup.
 
 ### Run the Rust integration tests
 
-The smoke tests are in `crates/getexec-protocols/tests/samba_integration.rs`
+The smoke tests are in `crates/netraze-protocols/tests/samba_integration.rs`
 and are `#[ignore]` by default — you need to pass `--ignored` to run them:
 
 ```shell
-cargo test -p getexec-protocols --test samba_integration -- --ignored --test-threads=1
+cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` is belt-and-braces: Samba handles concurrent sessions
@@ -67,7 +67,7 @@ races on the passdb lock in Samba 4.x.
 Not covered yet:
 - `FSCTL_PIPE_TRANSCEIVE` / DCE-RPC over named pipe — blocked on SMB2
   IOCTL support in `smb2.rs`. Once that lands, a follow-up suite in
-  `crates/getexec-dcerpc/tests/` will drive the full SRVSVC stack
+  `crates/netraze-dcerpc/tests/` will drive the full SRVSVC stack
   end-to-end against the same container.
 - SMB signing / encryption — we do the NTLM dance but don't yet negotiate
   signing against Samba.
@@ -96,7 +96,7 @@ The tests read `NETRAZE_SAMBA_ADDR` from the environment (default
 
 ```shell
 NETRAZE_SAMBA_ADDR=10.0.0.50:445 \
-  cargo test -p getexec-protocols --test samba_integration -- --ignored
+  cargo test -p netraze-protocols --test samba_integration -- --ignored
 ```
 
 ---
@@ -110,7 +110,7 @@ harness automatically on Linux runners, but **only** for:
 - Manual `workflow_dispatch` triggers
 
 Pull requests don't trigger it by default — the Impacket-pinned byte
-fixtures in `getexec-dcerpc` already catch most regressions, and
+fixtures in `netraze-dcerpc` already catch most regressions, and
 docker-in-Actions adds ~1 minute of cold-start per run. Trigger it
 manually from the Actions tab when a PR touches SMB2, NTLM, or DCE-RPC
 code paths.

@@ -2,18 +2,18 @@
 
 ## Phase 1
 
-- Stabiliser les types du coeur (`getexec-core`).
+- Stabiliser les types du coeur (`netraze-core`).
 - Formaliser la config, les cibles, l'output et le runtime.
 - Garder la CLI mince et testable.
 
 ## Phase 2
 
 - Extraire les protocoles critiques en crates dediees:
-  - `getexec-protocol-smb`
-  - `getexec-protocol-ldap`
-  - `getexec-protocol-winrm`
-  - `getexec-protocol-ssh`
-- Brancher un storage SQLite reel dans `getexec-storage`.
+  - `netraze-protocol-smb`
+  - `netraze-protocol-ldap`
+  - `netraze-protocol-winrm`
+  - `netraze-protocol-ssh`
+- Brancher un storage SQLite reel dans `netraze-storage`.
 
 ## Phase 3
 
@@ -29,6 +29,6 @@
 
 ## Regles d'evolution
 
-- Toute logique partagee monte vers `getexec-core` ou une crate transverse.
+- Toute logique partagee monte vers `netraze-core` ou une crate transverse.
 - Toute dependance protocolaire reste isolee dans la couche protocole.
 - Toute fonctionnalite orientee campagne ou workflow reste au-dessus du coeur.
