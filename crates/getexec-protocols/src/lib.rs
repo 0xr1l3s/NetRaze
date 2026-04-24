@@ -18,7 +18,12 @@ pub struct StaticProtocolFactory {
 }
 
 impl StaticProtocolFactory {
-    pub fn new(key: &str, display_name: &str, default_port: u16, capabilities: Vec<Capability>) -> Self {
+    pub fn new(
+        key: &str,
+        display_name: &str,
+        default_port: u16,
+        capabilities: Vec<Capability>,
+    ) -> Self {
         Self {
             metadata: ProtocolMetadata {
                 key: key.to_owned(),

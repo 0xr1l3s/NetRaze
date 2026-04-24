@@ -5,8 +5,7 @@ use std::path::Path;
 use crate::state::WorkspaceSave;
 
 pub fn save_workspace(path: &Path, save: &WorkspaceSave) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(save)
-        .context("Echec de serialisation du workspace")?;
+    let json = serde_json::to_string_pretty(save).context("Echec de serialisation du workspace")?;
     fs::write(path, json).with_context(|| format!("Echec d'ecriture de {}", path.display()))?;
     Ok(())
 }

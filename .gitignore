@@ -27,3 +27,5 @@ Thumbs.db
 .env
 *.yaml
 *.yml
+workspace_getexec.yaml
+workspace_getexec.yml

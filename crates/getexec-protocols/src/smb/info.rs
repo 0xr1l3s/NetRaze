@@ -1,7 +1,7 @@
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::NetworkManagement::NetManagement::{
-    NetServerGetInfo, NetApiBufferFree, SERVER_INFO_101,
+    NetApiBufferFree, NetServerGetInfo, SERVER_INFO_101,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -30,13 +30,7 @@ pub fn get_server_info(target: &str) -> Result<ServerInfo, String> {
     let server_wide = to_wide_null(target);
     let mut buf_ptr: *mut u8 = std::ptr::null_mut();
 
-    let status = unsafe {
-        NetServerGetInfo(
-            PCWSTR(server_wide.as_ptr()),
-            101,
-            &mut buf_ptr,
-        )
-    };
+    let status = unsafe { NetServerGetInfo(PCWSTR(server_wide.as_ptr()), 101, &mut buf_ptr) };
 
     if status != 0 {
         return Err(format!("NetServerGetInfo failed with error code {status}"));

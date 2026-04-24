@@ -141,11 +141,20 @@ impl AppState {
             module_categories: vec![
                 ModuleCategory {
                     name: "Enum".to_owned(),
-                    items: vec!["SMB".to_owned(), "LDAP".to_owned(), "RDP".to_owned(), "WinRM".to_owned()],
+                    items: vec![
+                        "SMB".to_owned(),
+                        "LDAP".to_owned(),
+                        "RDP".to_owned(),
+                        "WinRM".to_owned(),
+                    ],
                 },
                 ModuleCategory {
                     name: "Auth".to_owned(),
-                    items: vec!["Kerberos".to_owned(), "Pass Spray".to_owned(), "NTLM".to_owned()],
+                    items: vec![
+                        "Kerberos".to_owned(),
+                        "Pass Spray".to_owned(),
+                        "NTLM".to_owned(),
+                    ],
                 },
                 ModuleCategory {
                     name: "Exploit".to_owned(),
@@ -153,7 +162,14 @@ impl AppState {
                 },
                 ModuleCategory {
                     name: "Post".to_owned(),
-                    items: vec!["--shares".to_owned(), "--users".to_owned(), "--pass-pol".to_owned(), "--sam".to_owned(), "--lsa".to_owned(), "--dpapi".to_owned()],
+                    items: vec![
+                        "--shares".to_owned(),
+                        "--users".to_owned(),
+                        "--pass-pol".to_owned(),
+                        "--sam".to_owned(),
+                        "--lsa".to_owned(),
+                        "--dpapi".to_owned(),
+                    ],
                 },
             ],
             selected_module: "SMB".to_owned(),
@@ -239,7 +255,8 @@ impl AppState {
                 }
                 RuntimeEvent::ScanStarted { target_label } => {
                     // Create/reset the subnet for this scan
-                    if let Some(subnet) = self.networks.iter_mut().find(|n| n.cidr == target_label) {
+                    if let Some(subnet) = self.networks.iter_mut().find(|n| n.cidr == target_label)
+                    {
                         subnet.hosts.clear();
                         subnet.expanded = true;
                     } else {
@@ -262,7 +279,14 @@ impl AppState {
                     let shares: Vec<String> = result
                         .shares
                         .iter()
-                        .map(|s| format!("{} [{}] ({})", s.name, s.share_type.display_str(), s.access.display_str()))
+                        .map(|s| {
+                            format!(
+                                "{} [{}] ({})",
+                                s.name,
+                                s.share_type.display_str(),
+                                s.access.display_str()
+                            )
+                        })
                         .collect();
                     let users: Vec<String> = result
                         .users
@@ -296,7 +320,8 @@ impl AppState {
                     // Add to the most recent subnet (created by ScanStarted)
                     let subnet = self.networks.last_mut();
                     if let Some(subnet) = subnet {
-                        if let Some(host) = subnet.hosts.iter_mut().find(|h| h.ip == result.target) {
+                        if let Some(host) = subnet.hosts.iter_mut().find(|h| h.ip == result.target)
+                        {
                             *host = new_host;
                         } else {
                             subnet.hosts.push(new_host);
@@ -321,11 +346,22 @@ impl AppState {
                     self.progress_message = "Scan terminé".to_owned();
                     self.status_text = "Idle".to_owned();
                 }
-                RuntimeEvent::LoginResult { ip, cred_label, success, admin } => {
+                RuntimeEvent::LoginResult {
+                    ip,
+                    cred_label,
+                    success,
+                    admin,
+                } => {
                     if success {
                         // Find the HostNode in the workspace snarl and set logged_in_cred + admin
                         for node in self.workflow.snarl.nodes_mut() {
-                            if let WorkflowNode::HostNode { ip: node_ip, logged_in_cred, admin: node_admin, .. } = node {
+                            if let WorkflowNode::HostNode {
+                                ip: node_ip,
+                                logged_in_cred,
+                                admin: node_admin,
+                                ..
+                            } = node
+                            {
                                 if *node_ip == ip {
                                     *logged_in_cred = Some(cred_label.clone());
                                     *node_admin = admin;
@@ -336,12 +372,21 @@ impl AppState {
                         for net in &mut self.networks {
                             if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
                                 h.admin = admin;
-                                h.status = if admin { HostStatus::Accessible } else { HostStatus::Locked };
+                                h.status = if admin {
+                                    HostStatus::Accessible
+                                } else {
+                                    HostStatus::Locked
+                                };
                             }
                         }
                     }
                 }
-                RuntimeEvent::ShareEnumResult { host_node_id, ip, hostname, shares } => {
+                RuntimeEvent::ShareEnumResult {
+                    host_node_id,
+                    ip,
+                    hostname,
+                    shares,
+                } => {
                     // Sync shares back to networks
                     for net in &mut self.networks {
                         if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
@@ -371,24 +416,39 @@ impl AppState {
                         );
                         // Connect host → shares
                         let node_id = egui_snarl::NodeId(host_node_id);
-                        let from = egui_snarl::OutPinId { node: node_id, output: 0 };
-                        let to = egui_snarl::InPinId { node: new_id, input: 0 };
+                        let from = egui_snarl::OutPinId {
+                            node: node_id,
+                            output: 0,
+                        };
+                        let to = egui_snarl::InPinId {
+                            node: new_id,
+                            input: 0,
+                        };
                         self.workflow.snarl.connect(from, to);
                     }
                 }
-                RuntimeEvent::BrowseResult { browser_id, entries, error } => {
+                RuntimeEvent::BrowseResult {
+                    browser_id,
+                    entries,
+                    error,
+                } => {
                     if let Some(browser) = self.share_browsers.get_mut(browser_id) {
                         browser.loading = false;
                         browser.error = error;
-                        browser.entries = entries
-                            .into_iter()
-                            .map(|(name, is_dir, size)| {
-                                crate::ui::share_browser::BrowserEntry { name, is_dir, size }
-                            })
-                            .collect();
+                        browser.entries =
+                            entries
+                                .into_iter()
+                                .map(|(name, is_dir, size)| {
+                                    crate::ui::share_browser::BrowserEntry { name, is_dir, size }
+                                })
+                                .collect();
                     }
                 }
-                RuntimeEvent::FileOpResult { browser_id, success, message } => {
+                RuntimeEvent::FileOpResult {
+                    browser_id,
+                    success,
+                    message,
+                } => {
                     if let Some(browser) = self.share_browsers.get_mut(browser_id) {
                         browser.status = Some((message, success));
                         if success {
@@ -396,15 +456,29 @@ impl AppState {
                         }
                     }
                 }
-                RuntimeEvent::UserEnumResult { host_node_id, ip, hostname, users } => {
+                RuntimeEvent::UserEnumResult {
+                    host_node_id,
+                    ip,
+                    hostname,
+                    users,
+                } => {
                     use crate::workflow::{UserEntry, WorkflowNode};
                     // Sync users back to networks
                     for net in &mut self.networks {
                         if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
-                            h.users = users.iter().map(|(name, disabled, locked, _)| {
-                                let tag = if *disabled { " (disabled)" } else if *locked { " (locked)" } else { "" };
-                                format!("{name}{tag}")
-                            }).collect();
+                            h.users = users
+                                .iter()
+                                .map(|(name, disabled, locked, _)| {
+                                    let tag = if *disabled {
+                                        " (disabled)"
+                                    } else if *locked {
+                                        " (locked)"
+                                    } else {
+                                        ""
+                                    };
+                                    format!("{name}{tag}")
+                                })
+                                .collect();
                             if !hostname.is_empty() && h.hostname.is_empty() {
                                 h.hostname = hostname.clone();
                             }
@@ -420,9 +494,15 @@ impl AppState {
                             40.0 + (count % 4.0) * 280.0,
                             40.0 + (count / 4.0).floor() * 200.0,
                         );
-                        let user_entries: Vec<UserEntry> = users.into_iter().map(|(name, disabled, locked, priv_level)| {
-                            UserEntry { name, disabled, locked, privilege_level: priv_level }
-                        }).collect();
+                        let user_entries: Vec<UserEntry> = users
+                            .into_iter()
+                            .map(|(name, disabled, locked, priv_level)| UserEntry {
+                                name,
+                                disabled,
+                                locked,
+                                privilege_level: priv_level,
+                            })
+                            .collect();
                         let new_id = self.workflow.snarl.insert_node(
                             pos,
                             WorkflowNode::UsersNode {
@@ -433,12 +513,25 @@ impl AppState {
                         );
                         // Connect host → users
                         let node_id = egui_snarl::NodeId(host_node_id);
-                        let from = egui_snarl::OutPinId { node: node_id, output: 0 };
-                        let to = egui_snarl::InPinId { node: new_id, input: 0 };
+                        let from = egui_snarl::OutPinId {
+                            node: node_id,
+                            output: 0,
+                        };
+                        let to = egui_snarl::InPinId {
+                            node: new_id,
+                            input: 0,
+                        };
                         self.workflow.snarl.connect(from, to);
                     }
                 }
-                RuntimeEvent::DumpResult { host_node_id, ip, hostname, dump_type, entries, error } => {
+                RuntimeEvent::DumpResult {
+                    host_node_id,
+                    ip,
+                    hostname,
+                    dump_type,
+                    entries,
+                    error,
+                } => {
                     use crate::workflow::WorkflowNode;
                     let already_exists = self.workflow.snarl.nodes().any(|n| {
                         matches!(n, WorkflowNode::DumpNode { host_ip: existing, dump_type: dt, .. }
@@ -446,7 +539,14 @@ impl AppState {
                     });
                     if already_exists {
                         for node in self.workflow.snarl.nodes_mut() {
-                            if let WorkflowNode::DumpNode { host_ip: existing, dump_type: dt, entries: e, error: err, .. } = node {
+                            if let WorkflowNode::DumpNode {
+                                host_ip: existing,
+                                dump_type: dt,
+                                entries: e,
+                                error: err,
+                                ..
+                            } = node
+                            {
                                 if *existing == ip && *dt == dump_type {
                                     *e = entries.clone();
                                     *err = error.clone();
@@ -471,12 +571,24 @@ impl AppState {
                             },
                         );
                         let node_id = egui_snarl::NodeId(host_node_id);
-                        let from = egui_snarl::OutPinId { node: node_id, output: 0 };
-                        let to = egui_snarl::InPinId { node: new_id, input: 0 };
+                        let from = egui_snarl::OutPinId {
+                            node: node_id,
+                            output: 0,
+                        };
+                        let to = egui_snarl::InPinId {
+                            node: new_id,
+                            input: 0,
+                        };
                         self.workflow.snarl.connect(from, to);
                     }
                 }
-                RuntimeEvent::EnumAvResult { host_node_id, ip, hostname, products, error } => {
+                RuntimeEvent::EnumAvResult {
+                    host_node_id,
+                    ip,
+                    hostname,
+                    products,
+                    error,
+                } => {
                     use crate::workflow::WorkflowNode;
                     let already_exists = self.workflow.snarl.nodes().any(|n| {
                         matches!(n, WorkflowNode::EnumAvNode { host_ip: existing, .. }
@@ -484,7 +596,13 @@ impl AppState {
                     });
                     if already_exists {
                         for node in self.workflow.snarl.nodes_mut() {
-                            if let WorkflowNode::EnumAvNode { host_ip: existing, products: p, error: err, .. } = node {
+                            if let WorkflowNode::EnumAvNode {
+                                host_ip: existing,
+                                products: p,
+                                error: err,
+                                ..
+                            } = node
+                            {
                                 if *existing == ip {
                                     *p = products.clone();
                                     *err = error.clone();
@@ -508,61 +626,79 @@ impl AppState {
                             },
                         );
                         let node_id = egui_snarl::NodeId(host_node_id);
-                        let from = egui_snarl::OutPinId { node: node_id, output: 0 };
-                        let to = egui_snarl::InPinId { node: new_id, input: 0 };
+                        let from = egui_snarl::OutPinId {
+                            node: node_id,
+                            output: 0,
+                        };
+                        let to = egui_snarl::InPinId {
+                            node: new_id,
+                            input: 0,
+                        };
                         self.workflow.snarl.connect(from, to);
                     }
                 }
-            RuntimeEvent::FingerprintResult { ip, hostname, domain, os_info, signing, smbv1 } => {
-                // Update HostNode in workspace
-                for node in self.workflow.snarl.nodes_mut() {
-                    if let WorkflowNode::HostNode {
-                        ip: node_ip,
-                        hostname: node_hostname,
-                        os_info: node_os,
-                        domain: node_domain,
-                        signing: node_signing,
-                        smbv1: node_smbv1,
-                        ..
-                    } = node
-                    {
-                        if *node_ip == ip {
-                            if node_hostname.is_empty() && !hostname.is_empty() {
-                                *node_hostname = hostname.clone();
+                RuntimeEvent::FingerprintResult {
+                    ip,
+                    hostname,
+                    domain,
+                    os_info,
+                    signing,
+                    smbv1,
+                } => {
+                    // Update HostNode in workspace
+                    for node in self.workflow.snarl.nodes_mut() {
+                        if let WorkflowNode::HostNode {
+                            ip: node_ip,
+                            hostname: node_hostname,
+                            os_info: node_os,
+                            domain: node_domain,
+                            signing: node_signing,
+                            smbv1: node_smbv1,
+                            ..
+                        } = node
+                        {
+                            if *node_ip == ip {
+                                if node_hostname.is_empty() && !hostname.is_empty() {
+                                    *node_hostname = hostname.clone();
+                                }
+                                if node_os.is_empty() && !os_info.is_empty() {
+                                    *node_os = os_info.clone();
+                                }
+                                if node_domain.is_empty() && !domain.is_empty() {
+                                    *node_domain = domain.clone();
+                                }
+                                *node_signing = Some(signing);
+                                *node_smbv1 = Some(smbv1);
                             }
-                            if node_os.is_empty() && !os_info.is_empty() {
-                                *node_os = os_info.clone();
+                        }
+                    }
+                    // Update networks
+                    for net in &mut self.networks {
+                        if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
+                            if h.hostname.is_empty() && !hostname.is_empty() {
+                                h.hostname = hostname.clone();
                             }
-                            if node_domain.is_empty() && !domain.is_empty() {
-                                *node_domain = domain.clone();
+                            if h.os_info.is_empty() && !os_info.is_empty() {
+                                h.os_info = os_info.clone();
                             }
-                            *node_signing = Some(signing);
-                            *node_smbv1 = Some(smbv1);
+                            if h.domain.is_empty() && !domain.is_empty() {
+                                h.domain = domain.clone();
+                            }
+                            h.signing = Some(signing);
+                            h.smbv1 = Some(smbv1);
                         }
                     }
                 }
-                // Update networks
-                for net in &mut self.networks {
-                    if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
-                        if h.hostname.is_empty() && !hostname.is_empty() {
-                            h.hostname = hostname.clone();
-                        }
-                        if h.os_info.is_empty() && !os_info.is_empty() {
-                            h.os_info = os_info.clone();
-                        }
-                        if h.domain.is_empty() && !domain.is_empty() {
-                            h.domain = domain.clone();
-                        }
-                        h.signing = Some(signing);
-                        h.smbv1 = Some(smbv1);
+                RuntimeEvent::ExecResult {
+                    console_id,
+                    command,
+                    output,
+                    error,
+                } => {
+                    if let Some(c) = self.consoles.iter_mut().find(|c| c.id == console_id) {
+                        c.push_result(command, output, error);
                     }
                 }
-            }
-            RuntimeEvent::ExecResult { console_id, command, output, error } => {
-                if let Some(c) = self.consoles.iter_mut().find(|c| c.id == console_id) {
-                    c.push_result(command, output, error);
-                }
-            }
             }
         }
         if self.logs.len() > 2000 {
@@ -637,7 +773,13 @@ impl AppState {
 
         // Re-establish SMB sessions and auto-fingerprint hosts missing data
         for node in self.workflow.snarl.nodes() {
-            if let crate::workflow::WorkflowNode::HostNode { ip, logged_in_cred, signing, .. } = node {
+            if let crate::workflow::WorkflowNode::HostNode {
+                ip,
+                logged_in_cred,
+                signing,
+                ..
+            } = node
+            {
                 // Auto-fingerprint hosts missing fingerprint data
                 if signing.is_none() {
                     self.pending_fingerprints.push(ip.clone());
@@ -662,19 +804,17 @@ impl AppState {
     /// Save workspace to a JSON file.
     pub fn save_workspace(&self, path: &str) -> Result<(), String> {
         let data = self.to_save();
-        let json = serde_json::to_string_pretty(&data)
-            .map_err(|e| format!("Serialize error: {e}"))?;
-        std::fs::write(path, json)
-            .map_err(|e| format!("Write error: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&data).map_err(|e| format!("Serialize error: {e}"))?;
+        std::fs::write(path, json).map_err(|e| format!("Write error: {e}"))?;
         Ok(())
     }
 
     /// Load workspace from a JSON file.
     pub fn load_workspace(&mut self, path: &str) -> Result<(), String> {
-        let json = std::fs::read_to_string(path)
-            .map_err(|e| format!("Read error: {e}"))?;
-        let save: WorkspaceSave = serde_json::from_str(&json)
-            .map_err(|e| format!("Deserialize error: {e}"))?;
+        let json = std::fs::read_to_string(path).map_err(|e| format!("Read error: {e}"))?;
+        let save: WorkspaceSave =
+            serde_json::from_str(&json).map_err(|e| format!("Deserialize error: {e}"))?;
         self.load_from(save);
         Ok(())
     }

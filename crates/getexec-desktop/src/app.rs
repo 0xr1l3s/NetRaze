@@ -29,12 +29,12 @@ impl GetexecDesktopApp {
 fn setup_cobalt_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
 
-    let bg_dark = Color32::from_rgb(18, 21, 28);       // #12151c
-    let bg_panel = Color32::from_rgb(27, 34, 44);      // #1b222c
-    let bg_widget = Color32::from_rgb(25, 29, 38);     // #191d26
-    let bg_hover = Color32::from_rgb(35, 40, 52);      // slightly lighter widget
-    let accent = Color32::from_rgb(102, 27, 28);       // #661b1c
-    let accent_dark = Color32::from_rgb(83, 21, 22);   // #531516
+    let bg_dark = Color32::from_rgb(18, 21, 28); // #12151c
+    let bg_panel = Color32::from_rgb(27, 34, 44); // #1b222c
+    let bg_widget = Color32::from_rgb(25, 29, 38); // #191d26
+    let bg_hover = Color32::from_rgb(35, 40, 52); // slightly lighter widget
+    let accent = Color32::from_rgb(102, 27, 28); // #661b1c
+    let accent_dark = Color32::from_rgb(83, 21, 22); // #531516
     let text_primary = Color32::WHITE;
     let text_dim = Color32::from_rgb(160, 165, 175);
     let border = Color32::from_rgb(40, 46, 58);
@@ -94,7 +94,8 @@ impl eframe::App for GetexecDesktopApp {
         }
 
         // Process pending share enumeration requests
-        for (node_id, ip, hostname) in self.state.pending_share_enums.drain(..).collect::<Vec<_>>() {
+        for (node_id, ip, hostname) in self.state.pending_share_enums.drain(..).collect::<Vec<_>>()
+        {
             self.runtime.spawn_share_enum(node_id, ip, hostname);
         }
 
@@ -104,7 +105,9 @@ impl eframe::App for GetexecDesktopApp {
         }
 
         // Process pending dump requests
-        for (node_id, ip, hostname, dump_type) in self.state.pending_dumps.drain(..).collect::<Vec<_>>() {
+        for (node_id, ip, hostname, dump_type) in
+            self.state.pending_dumps.drain(..).collect::<Vec<_>>()
+        {
             match dump_type.as_str() {
                 "SAM" => self.runtime.spawn_dump_sam(node_id, ip, hostname),
                 "LSA" => self.runtime.spawn_dump_lsa(node_id, ip, hostname),
@@ -113,17 +116,30 @@ impl eframe::App for GetexecDesktopApp {
         }
 
         // Process pending AV enumeration requests
-        for (node_id, ip, hostname, username, domain, secret) in self.state.pending_enumav.drain(..).collect::<Vec<_>>() {
-            self.runtime.spawn_enum_av(node_id, ip, hostname, username, domain, secret);
+        for (node_id, ip, hostname, username, domain, secret) in
+            self.state.pending_enumav.drain(..).collect::<Vec<_>>()
+        {
+            self.runtime
+                .spawn_enum_av(node_id, ip, hostname, username, domain, secret);
         }
 
         // Process pending fingerprint requests
-        for ip in self.state.pending_fingerprints.drain(..).collect::<Vec<_>>() {
+        for ip in self
+            .state
+            .pending_fingerprints
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
             self.runtime.spawn_fingerprint(ip);
         }
 
         // Process pending console exec commands
-        for (console_id, ip, cred, command) in self.state.pending_exec_commands.drain(..).collect::<Vec<_>>() {
+        for (console_id, ip, cred, command) in self
+            .state
+            .pending_exec_commands
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
             self.runtime.spawn_exec_command(
                 console_id,
                 ip,
@@ -140,7 +156,12 @@ impl eframe::App for GetexecDesktopApp {
             let pending: Vec<String> = self.state.pending_browse.drain(..).collect();
             for unc_path in pending {
                 // Find the browser index for this UNC path
-                if let Some(idx) = self.state.share_browsers.iter().position(|b| b.current_unc() == unc_path) {
+                if let Some(idx) = self
+                    .state
+                    .share_browsers
+                    .iter()
+                    .position(|b| b.current_unc() == unc_path)
+                {
                     self.state.share_browsers[idx].loading = true;
                     self.state.share_browsers[idx].error = None;
                     self.runtime.spawn_browse_directory(idx, unc_path);
@@ -220,7 +241,8 @@ impl eframe::App for GetexecDesktopApp {
         }
 
         // Render console windows
-        let mut console_submissions: Vec<(u64, String, crate::state::CredentialRecord, String)> = Vec::new();
+        let mut console_submissions: Vec<(u64, String, crate::state::CredentialRecord, String)> =
+            Vec::new();
         for console in self.state.consoles.iter_mut() {
             match ui::console::show_console_window(ctx, console) {
                 ui::console::ConsoleAction::Submit(cmd) => {
@@ -246,7 +268,10 @@ impl eframe::App for GetexecDesktopApp {
 pub fn save_current_workspace(state: &mut AppState, runtime: &RuntimeServices) {
     let save = state.to_save();
     match workspace::save_workspace(std::path::Path::new(&state.workspace_path), &save) {
-        Ok(()) => state.add_log(LogLevel::Success, format!("Workspace saved to {}", state.workspace_path)),
+        Ok(()) => state.add_log(
+            LogLevel::Success,
+            format!("Workspace saved to {}", state.workspace_path),
+        ),
         Err(error) => runtime.emit_error(format!("Save failed: {error}")),
     }
 }
@@ -255,7 +280,10 @@ pub fn load_current_workspace(state: &mut AppState, runtime: &RuntimeServices) {
     match workspace::load_workspace(std::path::Path::new(&state.workspace_path)) {
         Ok(save) => {
             state.load_from(save);
-            state.add_log(LogLevel::Success, format!("Workspace loaded from {}", state.workspace_path));
+            state.add_log(
+                LogLevel::Success,
+                format!("Workspace loaded from {}", state.workspace_path),
+            );
         }
         Err(error) => runtime.emit_error(format!("Load failed: {error}")),
     }

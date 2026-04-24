@@ -14,7 +14,8 @@ pub fn expand_targets(raw: &str) -> Vec<String> {
 
     // CIDR notation
     if let Some((base, prefix_str)) = trimmed.split_once('/') {
-        if let (Ok(base_ip), Ok(prefix_len)) = (base.parse::<Ipv4Addr>(), prefix_str.parse::<u32>()) {
+        if let (Ok(base_ip), Ok(prefix_len)) = (base.parse::<Ipv4Addr>(), prefix_str.parse::<u32>())
+        {
             if prefix_len <= 32 {
                 return expand_cidr(base_ip, prefix_len);
             }
@@ -23,7 +24,10 @@ pub fn expand_targets(raw: &str) -> Vec<String> {
 
     // IP range: 192.168.1.1-192.168.1.50
     if let Some((start_str, end_str)) = trimmed.split_once('-') {
-        if let (Ok(start), Ok(end)) = (start_str.trim().parse::<Ipv4Addr>(), end_str.trim().parse::<Ipv4Addr>()) {
+        if let (Ok(start), Ok(end)) = (
+            start_str.trim().parse::<Ipv4Addr>(),
+            end_str.trim().parse::<Ipv4Addr>(),
+        ) {
             return expand_range(start, end);
         }
     }
@@ -38,7 +42,11 @@ fn expand_cidr(base: Ipv4Addr, prefix_len: u32) -> Vec<String> {
     }
 
     let base_u32 = u32::from(base);
-    let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
     let network = base_u32 & mask;
     let host_bits = 32 - prefix_len;
     let host_count = 1u32 << host_bits;

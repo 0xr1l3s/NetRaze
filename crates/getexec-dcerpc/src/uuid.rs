@@ -53,18 +53,19 @@ impl Uuid {
         let mut out = [0u8; 16];
 
         // Fields 1–3 are little-endian on the MS-RPCE wire.
-        let mut write_le = |dst_start: usize, dst_len: usize, group: &[u8]| -> Result<(), DceRpcError> {
-            // group length is always 2 * dst_len (e.g. 8 chars for 4 bytes)
-            for i in 0..dst_len {
-                let b0 = group[i * 2];
-                let b1 = group[i * 2 + 1];
-                // Write byte `i` of the integer to position
-                // (dst_start + dst_len - 1 - i) so the LSB of the
-                // big-endian hex string lands at the *lowest* wire offset.
-                out[dst_start + dst_len - 1 - i] = hex(b0, b1)?;
-            }
-            Ok(())
-        };
+        let mut write_le =
+            |dst_start: usize, dst_len: usize, group: &[u8]| -> Result<(), DceRpcError> {
+                // group length is always 2 * dst_len (e.g. 8 chars for 4 bytes)
+                for i in 0..dst_len {
+                    let b0 = group[i * 2];
+                    let b1 = group[i * 2 + 1];
+                    // Write byte `i` of the integer to position
+                    // (dst_start + dst_len - 1 - i) so the LSB of the
+                    // big-endian hex string lands at the *lowest* wire offset.
+                    out[dst_start + dst_len - 1 - i] = hex(b0, b1)?;
+                }
+                Ok(())
+            };
         write_le(0, 4, groups[0])?; // time_low
         write_le(4, 2, groups[1])?; // time_mid
         write_le(6, 2, groups[2])?; // time_hi_and_version
@@ -94,11 +95,22 @@ impl fmt::Debug for Uuid {
         write!(
             f,
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            b[3], b[2], b[1], b[0],
-            b[5], b[4],
-            b[7], b[6],
-            b[8], b[9],
-            b[10], b[11], b[12], b[13], b[14], b[15],
+            b[3],
+            b[2],
+            b[1],
+            b[0],
+            b[5],
+            b[4],
+            b[7],
+            b[6],
+            b[8],
+            b[9],
+            b[10],
+            b[11],
+            b[12],
+            b[13],
+            b[14],
+            b[15],
         )
     }
 }

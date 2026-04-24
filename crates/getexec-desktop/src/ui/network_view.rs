@@ -18,7 +18,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Find selected host data for detail panel
     let selected_host_data = state.selected_host.as_ref().and_then(|sel_ip| {
-        state.networks.iter().flat_map(|n| &n.hosts).find(|h| h.ip == *sel_ip).cloned()
+        state
+            .networks
+            .iter()
+            .flat_map(|n| &n.hosts)
+            .find(|h| h.ip == *sel_ip)
+            .cloned()
     });
 
     egui::ScrollArea::vertical()
@@ -192,22 +197,41 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 if !host.hostname.is_empty() && host.hostname != host.ip {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Name:").small().color(TEXT_DIM));
-                        ui.label(egui::RichText::new(&host.hostname).small().strong().color(egui::Color32::WHITE));
+                        ui.label(
+                            egui::RichText::new(&host.hostname)
+                                .small()
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        );
                     });
                 }
                 if !host.os_info.is_empty() {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("OS:").small().color(TEXT_DIM));
-                        ui.label(egui::RichText::new(&host.os_info).small().color(egui::Color32::WHITE));
+                        ui.label(
+                            egui::RichText::new(&host.os_info)
+                                .small()
+                                .color(egui::Color32::WHITE),
+                        );
                     });
                 }
                 if host.admin {
-                    ui.label(egui::RichText::new("⚡ ADMIN ACCESS").small().strong().color(GREEN));
+                    ui.label(
+                        egui::RichText::new("⚡ ADMIN ACCESS")
+                            .small()
+                            .strong()
+                            .color(GREEN),
+                    );
                 }
 
                 if !host.shares.is_empty() {
                     ui.add_space(2.0);
-                    ui.label(egui::RichText::new("Shares:").small().strong().color(ACCENT));
+                    ui.label(
+                        egui::RichText::new("Shares:")
+                            .small()
+                            .strong()
+                            .color(ACCENT),
+                    );
                     for share_str in &host.shares {
                         // Parse access tag from the share string: "NAME [TYPE] (ACCESS)"
                         let access_color = if share_str.contains("(RW)") {

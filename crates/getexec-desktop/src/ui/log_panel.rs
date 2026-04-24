@@ -20,16 +20,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             .monospace()
             .size(22.0)
             .strong()
-            .color(if state.is_running {
-                ACCENT
-            } else {
-                TEXT_DIM
-            }),
+            .color(if state.is_running { ACCENT } else { TEXT_DIM }),
     );
     ui.add_space(4.0);
 
-    let bar = egui::ProgressBar::new(progress)
-        .fill(ACCENT);
+    let bar = egui::ProgressBar::new(progress).fill(ACCENT);
     ui.add(bar);
     ui.add_space(4.0);
 
@@ -48,11 +43,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Quick stats
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Hosts:")
-                .small()
-                .color(TEXT_DIM),
-        );
+        ui.label(egui::RichText::new("Hosts:").small().color(TEXT_DIM));
         ui.label(
             egui::RichText::new(format!("{}", state.discovered_hosts_count()))
                 .small()
@@ -61,11 +52,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         );
     });
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Creds:")
-                .small()
-                .color(TEXT_DIM),
-        );
+        ui.label(egui::RichText::new("Creds:").small().color(TEXT_DIM));
         ui.label(
             egui::RichText::new(format!("{}", state.credentials_count()))
                 .small()
@@ -74,11 +61,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         );
     });
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Elapsed:")
-                .small()
-                .color(TEXT_DIM),
-        );
+        ui.label(egui::RichText::new("Elapsed:").small().color(TEXT_DIM));
         let secs = state.elapsed_seconds();
         ui.label(
             egui::RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60))

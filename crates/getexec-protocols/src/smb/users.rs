@@ -1,8 +1,8 @@
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::NetworkManagement::NetManagement::{
-    NetUserEnum, NetApiBufferFree, USER_INFO_1, FILTER_NORMAL_ACCOUNT,
-    UF_ACCOUNTDISABLE, UF_LOCKOUT,
+    FILTER_NORMAL_ACCOUNT, NetApiBufferFree, NetUserEnum, UF_ACCOUNTDISABLE, UF_LOCKOUT,
+    USER_INFO_1,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

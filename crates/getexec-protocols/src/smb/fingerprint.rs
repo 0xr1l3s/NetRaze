@@ -37,7 +37,11 @@ impl SmbFingerprint {
             self.hostname,
             self.os_info,
             self.hostname,
-            if self.dns_domain.is_empty() { &self.domain } else { &self.dns_domain },
+            if self.dns_domain.is_empty() {
+                &self.domain
+            } else {
+                &self.dns_domain
+            },
         )
     }
 }
@@ -64,9 +68,9 @@ pub fn fingerprint(target: &str) -> Result<SmbFingerprint, String> {
 
     // ── Step 3: Extract info from AV_PAIRs ──
     let hostname = av_pair_string(&challenge.target_info, 0x0001); // MsvAvNbComputerName
-    let domain = av_pair_string(&challenge.target_info, 0x0002);   // MsvAvNbDomainName
+    let domain = av_pair_string(&challenge.target_info, 0x0002); // MsvAvNbDomainName
     let dns_hostname = av_pair_string(&challenge.target_info, 0x0003); // MsvAvDnsComputerName
-    let dns_domain = av_pair_string(&challenge.target_info, 0x0004);   // MsvAvDnsDomainName
+    let dns_domain = av_pair_string(&challenge.target_info, 0x0004); // MsvAvDnsDomainName
 
     // ── Step 4: OS version from NTLM Version field ──
     let (os_major, os_minor, os_build) = challenge.version.unwrap_or((0, 0, 0));
@@ -106,7 +110,7 @@ fn smb2_negotiate(stream: &mut TcpStream) -> Result<NegotiateResult, String> {
     let mut hdr = vec![0u8; SMB2_HEADER_SIZE];
     hdr[0..4].copy_from_slice(SMB2_MAGIC);
     hdr[4..6].copy_from_slice(&64u16.to_le_bytes()); // StructureSize
-    hdr[6..8].copy_from_slice(&1u16.to_le_bytes());  // CreditCharge
+    hdr[6..8].copy_from_slice(&1u16.to_le_bytes()); // CreditCharge
     // Command = NEGOTIATE (0)
     hdr[14..16].copy_from_slice(&31u16.to_le_bytes()); // CreditRequest
 
@@ -145,7 +149,10 @@ fn smb2_negotiate(stream: &mut TcpStream) -> Result<NegotiateResult, String> {
     })
 }
 
-fn ntlmssp_round1(stream: &mut TcpStream, _negotiate_session_id: u64) -> Result<ntlm::ChallengeMessage, String> {
+fn ntlmssp_round1(
+    stream: &mut TcpStream,
+    _negotiate_session_id: u64,
+) -> Result<ntlm::ChallengeMessage, String> {
     let negotiate_msg = ntlm::build_negotiate();
     let spnego = ntlm::wrap_spnego_init(&negotiate_msg);
 
@@ -176,7 +183,9 @@ fn ntlmssp_round1(stream: &mut TcpStream, _negotiate_session_id: u64) -> Result<
     let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
     // STATUS_MORE_PROCESSING_REQUIRED (0xC0000016) is expected
     if status != 0xC0000016 {
-        return Err(format!("Session Setup round 1 unexpected status: 0x{status:08x}"));
+        return Err(format!(
+            "Session Setup round 1 unexpected status: 0x{status:08x}"
+        ));
     }
 
     // Extract NTLMSSP challenge from SPNEGO
@@ -189,8 +198,8 @@ fn ntlmssp_round1(stream: &mut TcpStream, _negotiate_session_id: u64) -> Result<
     }
     let spnego_data = &resp[sec_off..sec_off + sec_len];
 
-    let challenge_data = ntlm::extract_ntlmssp(spnego_data)
-        .ok_or("No NTLMSSP in server challenge response")?;
+    let challenge_data =
+        ntlm::extract_ntlmssp(spnego_data).ok_or("No NTLMSSP in server challenge response")?;
     ntlm::parse_challenge(challenge_data)
 }
 

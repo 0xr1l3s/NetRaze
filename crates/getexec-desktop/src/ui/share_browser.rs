@@ -94,10 +94,11 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                 ui.spacing_mut().item_spacing.x = 2.0;
 
                 let can_go_back = !browser.path_stack.is_empty();
-                let back_btn = egui::Button::new(
-                    egui::RichText::new("⬅")
-                        .color(if can_go_back { Color32::WHITE } else { SEPARATOR }),
-                )
+                let back_btn = egui::Button::new(egui::RichText::new("⬅").color(if can_go_back {
+                    Color32::WHITE
+                } else {
+                    SEPARATOR
+                }))
                 .fill(if can_go_back { ACCENT } else { SEPARATOR })
                 .corner_radius(egui::CornerRadius::same(3));
                 if ui.add(back_btn).clicked() && can_go_back {
@@ -157,11 +158,9 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                 ui.spacing_mut().item_spacing.x = 4.0;
 
                 let btn = |text: &str| {
-                    egui::Button::new(
-                        egui::RichText::new(text).small().color(Color32::WHITE),
-                    )
-                    .fill(Color32::from_rgb(40, 46, 58))
-                    .corner_radius(egui::CornerRadius::same(3))
+                    egui::Button::new(egui::RichText::new(text).small().color(Color32::WHITE))
+                        .fill(Color32::from_rgb(40, 46, 58))
+                        .corner_radius(egui::CornerRadius::same(3))
                 };
 
                 if ui.add(btn("⬆ Upload")).clicked() {
@@ -193,21 +192,16 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                     if browser.new_folder_name.is_empty() {
                         resp.request_focus();
                     }
-                    let enter =
-                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let create_clicked = ui
                         .add(
-                            egui::Button::new(
-                                egui::RichText::new("✓").small().color(GREEN),
-                            )
-                            .fill(Color32::from_rgb(40, 46, 58))
-                            .corner_radius(egui::CornerRadius::same(3)),
+                            egui::Button::new(egui::RichText::new("✓").small().color(GREEN))
+                                .fill(Color32::from_rgb(40, 46, 58))
+                                .corner_radius(egui::CornerRadius::same(3)),
                         )
                         .clicked();
 
-                    if (enter || create_clicked)
-                        && !browser.new_folder_name.trim().is_empty()
-                    {
+                    if (enter || create_clicked) && !browser.new_folder_name.trim().is_empty() {
                         let folder_name = browser.new_folder_name.trim().to_string();
                         let unc = browser.child_unc(&folder_name);
                         action = BrowserAction::CreateFolder(unc);
@@ -217,11 +211,9 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
 
                     if ui
                         .add(
-                            egui::Button::new(
-                                egui::RichText::new("✕").small().color(TEXT_DIM),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .corner_radius(egui::CornerRadius::same(3)),
+                            egui::Button::new(egui::RichText::new("✕").small().color(TEXT_DIM))
+                                .fill(Color32::TRANSPARENT)
+                                .corner_radius(egui::CornerRadius::same(3)),
                         )
                         .clicked()
                     {
@@ -252,8 +244,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
             } else if let Some(err) = &browser.error {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(format!("⚠ {err}"))
-                        .color(Color32::from_rgb(220, 80, 80)),
+                    egui::RichText::new(format!("⚠ {err}")).color(Color32::from_rgb(220, 80, 80)),
                 );
                 ui.add_space(8.0);
                 ui.label(
@@ -291,8 +282,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                             );
 
                             if *is_dir && row_response.hovered() {
-                                ui.ctx()
-                                    .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
 
                             if row_response.hovered() {
@@ -313,10 +303,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 Color32::WHITE,
                             );
                             ui.painter().galley(
-                                egui::pos2(
-                                    cursor_x,
-                                    text_y - icon_galley.size().y / 2.0,
-                                ),
+                                egui::pos2(cursor_x, text_y - icon_galley.size().y / 2.0),
                                 icon_galley.clone(),
                                 Color32::WHITE,
                             );
@@ -336,29 +323,21 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 name_color,
                             );
                             ui.painter().galley(
-                                egui::pos2(
-                                    cursor_x,
-                                    text_y - name_galley.size().y / 2.0,
-                                ),
+                                egui::pos2(cursor_x, text_y - name_galley.size().y / 2.0),
                                 name_galley,
                                 name_color,
                             );
 
                             if !is_dir {
-                                let size_str =
-                                    getexec_protocols::smb::format_size(*entry_size);
+                                let size_str = getexec_protocols::smb::format_size(*entry_size);
                                 let size_galley = ui.painter().layout_no_wrap(
                                     size_str,
                                     egui::FontId::proportional(10.0),
                                     TEXT_DIM,
                                 );
-                                let size_x =
-                                    row_rect.right() - size_galley.size().x - 6.0;
+                                let size_x = row_rect.right() - size_galley.size().x - 6.0;
                                 ui.painter().galley(
-                                    egui::pos2(
-                                        size_x,
-                                        text_y - size_galley.size().y / 2.0,
-                                    ),
+                                    egui::pos2(size_x, text_y - size_galley.size().y / 2.0),
                                     size_galley,
                                     TEXT_DIM,
                                 );
@@ -369,8 +348,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 browser.path_stack.push(entry_name.clone());
                                 browser.error = None;
                                 browser.status = None;
-                                action =
-                                    BrowserAction::Navigate(browser.current_unc());
+                                action = BrowserAction::Navigate(browser.current_unc());
                             }
 
                             // Right-click context menu
@@ -378,10 +356,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 if *is_dir {
                                     if ui.button("🗑 Delete folder").clicked() {
                                         let unc = browser.child_unc(entry_name);
-                                        action = BrowserAction::Delete {
-                                            unc,
-                                            is_dir: true,
-                                        };
+                                        action = BrowserAction::Delete { unc, is_dir: true };
                                         ui.close();
                                     }
                                 } else {
@@ -395,10 +370,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                     }
                                     if ui.button("🗑 Delete file").clicked() {
                                         let unc = browser.child_unc(entry_name);
-                                        action = BrowserAction::Delete {
-                                            unc,
-                                            is_dir: false,
-                                        };
+                                        action = BrowserAction::Delete { unc, is_dir: false };
                                         ui.close();
                                     }
                                 }

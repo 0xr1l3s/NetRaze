@@ -7,9 +7,9 @@
 //! exactly where the chain breaks.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::DeleteFileW;
 use windows::Win32::System::Services::*;
+use windows::core::PCWSTR;
 
 use super::connection;
 use super::smb2::{Smb2Session, SmbReadError};
@@ -57,11 +57,7 @@ fn query_service_state(target: &str, svc_name: &str) -> &'static str {
     let target_w = wide(&format!("\\\\{target}"));
     let svc_name_w = wide(svc_name);
     unsafe {
-        let scm = match OpenSCManagerW(
-            PCWSTR(target_w.as_ptr()),
-            None,
-            SC_MANAGER_CONNECT,
-        ) {
+        let scm = match OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT) {
             Ok(h) => h,
             Err(_) => return "scm_err",
         };
@@ -175,18 +171,18 @@ pub fn execute_command_live(
     log!("bin_path={bin_path}");
 
     let target_w = wide(&format!("\\\\{target}"));
-    let scm = match unsafe {
-        OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CREATE_SERVICE)
-    } {
-        Ok(h) => {
-            log!("OpenSCManager OK");
-            h
-        }
-        Err(e) => {
-            log!("OpenSCManager FAILED: {e}");
-            return (Err(format!("OpenSCManager: {e}")), trace);
-        }
-    };
+    let scm =
+        match unsafe { OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CREATE_SERVICE) }
+        {
+            Ok(h) => {
+                log!("OpenSCManager OK");
+                h
+            }
+            Err(e) => {
+                log!("OpenSCManager FAILED: {e}");
+                return (Err(format!("OpenSCManager: {e}")), trace);
+            }
+        };
 
     let svc_name_w = wide(&svc_name);
     let bin_path_w = wide(&bin_path);
@@ -324,9 +320,8 @@ pub fn execute_command_live(
     }
 
     // 5. Cleanup.
-    let stop_res = unsafe {
-        ControlService(svc, SERVICE_CONTROL_STOP, &mut SERVICE_STATUS::default())
-    };
+    let stop_res =
+        unsafe { ControlService(svc, SERVICE_CONTROL_STOP, &mut SERVICE_STATUS::default()) };
     log!("ControlService(STOP) -> {:?}", stop_res);
     let del_res = unsafe { DeleteService(svc) };
     log!("DeleteService -> {:?}", del_res);

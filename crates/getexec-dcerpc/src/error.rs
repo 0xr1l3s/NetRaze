@@ -16,10 +16,7 @@ pub enum DceRpcError {
     /// A header field carried a value we don't recognise (bad ptype,
     /// unknown auth type, wrong rpc_vers, …).
     #[error("invalid field `{field}`: {detail}")]
-    InvalidField {
-        field: &'static str,
-        detail: String,
-    },
+    InvalidField { field: &'static str, detail: String },
 
     /// Decoded an NDR pointer we've never seen on the wire before, or a
     /// conformance count that exceeds the containing buffer.
