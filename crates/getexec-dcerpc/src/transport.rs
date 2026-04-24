@@ -58,7 +58,9 @@ impl Default for LoopbackTransport {
 
 impl LoopbackTransport {
     pub fn new() -> Self {
-        Self { queue: Mutex::new(VecDeque::new()) }
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Inject a canned response so the next `recv` returns it. Handy for
@@ -80,9 +82,11 @@ impl RpcTransport for LoopbackTransport {
             .lock()
             .expect("queue mutex")
             .pop_front()
-            .ok_or_else(|| crate::error::DceRpcError::Transport(
-                "LoopbackTransport::recv — queue empty (call inject_response first)".into(),
-            ))
+            .ok_or_else(|| {
+                crate::error::DceRpcError::Transport(
+                    "LoopbackTransport::recv — queue empty (call inject_response first)".into(),
+                )
+            })
     }
 }
 

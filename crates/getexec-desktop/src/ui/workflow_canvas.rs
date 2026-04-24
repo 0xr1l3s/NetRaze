@@ -18,22 +18,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Collect share enum requests — dispatched to runtime in app.rs
     for (host_node_id, host_ip, hostname) in viewer.shares_requests.drain(..) {
-        state.pending_share_enums.push((host_node_id.0, host_ip, hostname));
+        state
+            .pending_share_enums
+            .push((host_node_id.0, host_ip, hostname));
     }
 
     // Collect user enum requests — dispatched to runtime in app.rs
     for (host_node_id, host_ip, hostname) in viewer.users_requests.drain(..) {
-        state.pending_user_enums.push((host_node_id.0, host_ip, hostname));
+        state
+            .pending_user_enums
+            .push((host_node_id.0, host_ip, hostname));
     }
 
     // Collect dump requests — dispatched to runtime in app.rs
     for (host_node_id, host_ip, hostname, dump_type) in viewer.dump_requests.drain(..) {
-        state.pending_dumps.push((host_node_id.0, host_ip, hostname, dump_type));
+        state
+            .pending_dumps
+            .push((host_node_id.0, host_ip, hostname, dump_type));
     }
 
     // Collect AV enum requests — dispatched to runtime in app.rs
-    for (host_node_id, host_ip, hostname, username, domain, secret) in viewer.enumav_requests.drain(..) {
-        state.pending_enumav.push((host_node_id.0, host_ip, hostname, username, domain, secret));
+    for (host_node_id, host_ip, hostname, username, domain, secret) in
+        viewer.enumav_requests.drain(..)
+    {
+        state
+            .pending_enumav
+            .push((host_node_id.0, host_ip, hostname, username, domain, secret));
     }
 
     // Collect fingerprint requests
@@ -50,9 +60,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     for (host_ip, share_name) in viewer.browse_requests.drain(..) {
         use crate::ui::share_browser::ShareBrowserState;
         // Check if already open for this share
-        let already_open = state.share_browsers.iter().any(|b| {
-            b.open && b.host_ip == host_ip && b.share_name == share_name
-        });
+        let already_open = state
+            .share_browsers
+            .iter()
+            .any(|b| b.open && b.host_ip == host_ip && b.share_name == share_name);
         if !already_open {
             let browser = ShareBrowserState::new(host_ip, share_name);
             let unc = browser.current_unc();

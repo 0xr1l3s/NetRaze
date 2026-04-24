@@ -12,10 +12,10 @@ use crate::app;
 use crate::runtime::RuntimeServices;
 use crate::state::AppState;
 
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(102, 27, 28);      // #661b1c
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(102, 27, 28); // #661b1c
 const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(160, 165, 175);
 const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(40, 46, 58);
-const BAR_BG: egui::Color32 = egui::Color32::from_rgb(18, 21, 28);      // #12151c
+const BAR_BG: egui::Color32 = egui::Color32::from_rgb(18, 21, 28); // #12151c
 
 pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &RuntimeServices) {
     egui::TopBottomPanel::top("top_bar")
@@ -75,17 +75,13 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                 );
 
                 if ui
-                    .add(egui::Button::new(
-                        egui::RichText::new("💾 Save").small(),
-                    ))
+                    .add(egui::Button::new(egui::RichText::new("💾 Save").small()))
                     .clicked()
                 {
                     app::save_current_workspace(state, runtime);
                 }
                 if ui
-                    .add(egui::Button::new(
-                        egui::RichText::new("📂 Load").small(),
-                    ))
+                    .add(egui::Button::new(egui::RichText::new("📂 Load").small()))
                     .clicked()
                 {
                     app::load_current_workspace(state, runtime);
@@ -97,12 +93,7 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                     } else {
                         ("○ IDLE", TEXT_DIM)
                     };
-                    ui.label(
-                        egui::RichText::new(indicator)
-                            .color(color)
-                            .strong()
-                            .small(),
-                    );
+                    ui.label(egui::RichText::new(indicator).color(color).strong().small());
                 });
             });
         });
@@ -184,22 +175,15 @@ pub fn show_status_bar(ctx: &egui::Context, state: &mut AppState) {
                 };
                 ui.colored_label(color, indicator);
                 ui.label(
-                    egui::RichText::new(if state.is_running {
-                        "Running"
-                    } else {
-                        "Idle"
-                    })
-                    .small()
-                    .color(TEXT_DIM),
+                    egui::RichText::new(if state.is_running { "Running" } else { "Idle" })
+                        .small()
+                        .color(TEXT_DIM),
                 );
                 ui.colored_label(SEPARATOR, "|");
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Hosts: {}",
-                        state.discovered_hosts_count()
-                    ))
-                    .small()
-                    .color(TEXT_DIM),
+                    egui::RichText::new(format!("Hosts: {}", state.discovered_hosts_count()))
+                        .small()
+                        .color(TEXT_DIM),
                 );
                 ui.colored_label(SEPARATOR, "|");
                 ui.label(

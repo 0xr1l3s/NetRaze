@@ -222,16 +222,17 @@ pub fn encode_bind(
     let auth_len = match auth_verifier {
         Some(av) => {
             buf.extend_from_slice(av);
-            u16::try_from(av.len()).map_err(|_| {
-                DceRpcError::invalid("auth_verifier", "length exceeds u16")
-            })?
+            u16::try_from(av.len())
+                .map_err(|_| DceRpcError::invalid("auth_verifier", "length exceeds u16"))?
         }
         None => 0,
     };
 
     // Total must fit in u16. Typical max is 4280 (Windows default).
-    let frag_len = u16::try_from(buf.len())
-        .map_err(|_| DceRpcError::FragmentTooLarge { size: buf.len(), limit: u16::MAX as usize })?;
+    let frag_len = u16::try_from(buf.len()).map_err(|_| DceRpcError::FragmentTooLarge {
+        size: buf.len(),
+        limit: u16::MAX as usize,
+    })?;
     hdr.frag_length = frag_len;
     hdr.auth_length = auth_len;
 
@@ -268,15 +269,16 @@ pub fn encode_request(
     let auth_len = match auth_verifier {
         Some(av) => {
             buf.extend_from_slice(av);
-            u16::try_from(av.len()).map_err(|_| {
-                DceRpcError::invalid("auth_verifier", "length exceeds u16")
-            })?
+            u16::try_from(av.len())
+                .map_err(|_| DceRpcError::invalid("auth_verifier", "length exceeds u16"))?
         }
         None => 0,
     };
 
-    let frag_len = u16::try_from(buf.len())
-        .map_err(|_| DceRpcError::FragmentTooLarge { size: buf.len(), limit: u16::MAX as usize })?;
+    let frag_len = u16::try_from(buf.len()).map_err(|_| DceRpcError::FragmentTooLarge {
+        size: buf.len(),
+        limit: u16::MAX as usize,
+    })?;
     hdr.frag_length = frag_len;
     hdr.auth_length = auth_len;
     let mut hdr_buf = Vec::with_capacity(CommonHeader::SIZE);
@@ -392,7 +394,13 @@ mod tests {
         bytes[0] = 7;
         bytes[2] = PacketType::Request as u8;
         let err = CommonHeader::decode(&bytes).unwrap_err();
-        assert!(matches!(err, DceRpcError::InvalidField { field: "rpc_vers", .. }));
+        assert!(matches!(
+            err,
+            DceRpcError::InvalidField {
+                field: "rpc_vers",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -400,7 +408,10 @@ mod tests {
         let srvsvc = Uuid::parse("4b324fc8-1670-01d3-1278-5a47bf6ee188").unwrap();
         let ctx = PresentationContext {
             context_id: 0,
-            abstract_syntax: PresentationSyntax { uuid: srvsvc, version: 3 },
+            abstract_syntax: PresentationSyntax {
+                uuid: srvsvc,
+                version: 3,
+            },
             transfer_syntax: ndr20_transfer_syntax(),
         };
         let pdu = encode_bind(1, 4280, 4280, 0, &[ctx], None).expect("encode_bind");

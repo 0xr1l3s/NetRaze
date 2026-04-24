@@ -1,9 +1,9 @@
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
 use windows::Win32::Storage::FileSystem::{
-    GetFileAttributesW, NetShareEnum, SHARE_INFO_1, SHARE_TYPE,
-    STYPE_DEVICE, STYPE_DISKTREE, STYPE_IPC, STYPE_PRINTQ, STYPE_SPECIAL,
+    GetFileAttributesW, NetShareEnum, SHARE_INFO_1, SHARE_TYPE, STYPE_DEVICE, STYPE_DISKTREE,
+    STYPE_IPC, STYPE_PRINTQ, STYPE_SPECIAL,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -145,11 +145,11 @@ pub fn check_share_access(target: &str, share_name: &str) -> ShareAccess {
     // We can read. Try to probe write by checking directory attributes.
     // CreateFileW with GENERIC_WRITE | OPEN_EXISTING on a directory checks write perms
     // without modifying anything.
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_ATTRIBUTE_DIRECTORY,
-    };
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
@@ -163,7 +163,9 @@ pub fn check_share_access(target: &str, share_name: &str) -> ShareAccess {
     };
     match handle {
         Ok(h) => {
-            unsafe { let _ = CloseHandle(h); }
+            unsafe {
+                let _ = CloseHandle(h);
+            }
             ShareAccess::ReadWrite
         }
         Err(_) => ShareAccess::Read,

@@ -153,12 +153,14 @@ fn decrypt_syskey_aes(f: &[u8], bootkey: &[u8; 16]) -> Result<[u8; 16], String> 
     if f.len() < 0x88 {
         return Err("F value too short for AES syskey header".into());
     }
-    let data_len =
-        u32::from_le_bytes(f[0x74..0x78].try_into().unwrap()) as usize;
+    let data_len = u32::from_le_bytes(f[0x74..0x78].try_into().unwrap()) as usize;
     let salt = &f[0x78..0x88];
     let end = 0x88 + data_len;
     if f.len() < end {
-        return Err(format!("F value too short for AES syskey data: need {end}, have {}", f.len()));
+        return Err(format!(
+            "F value too short for AES syskey data: need {end}, have {}",
+            f.len()
+        ));
     }
     let encrypted = &f[0x88..end];
 
@@ -302,9 +304,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     }
     (0..s.len())
         .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("Bad hex at {i}: {e}"))
-        })
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("Bad hex at {i}: {e}")))
         .collect()
 }
 

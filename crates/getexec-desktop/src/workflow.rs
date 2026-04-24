@@ -1,6 +1,6 @@
 use egui::{Color32, Pos2, Rect, Stroke, Style, Ui};
-use egui_snarl::{InPin, NodeId, OutPin, Snarl, ui::PinInfo};
 use egui_snarl::ui::{BackgroundPattern, SnarlStyle, SnarlViewer};
+use egui_snarl::{InPin, NodeId, OutPin, Snarl, ui::PinInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::state::CredentialRecord;
@@ -25,12 +25,25 @@ const HOST_BODY_W: f32 = 240.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowNode {
-    TargetInput { target: String },
-    ProtocolModule { protocol: String },
-    CredentialNode { username: String, secret: String },
-    ActionNode { action: String },
-    OutputNode { format: String },
-    GenericModule { name: String },
+    TargetInput {
+        target: String,
+    },
+    ProtocolModule {
+        protocol: String,
+    },
+    CredentialNode {
+        username: String,
+        secret: String,
+    },
+    ActionNode {
+        action: String,
+    },
+    OutputNode {
+        format: String,
+    },
+    GenericModule {
+        name: String,
+    },
     HostNode {
         ip: String,
         hostname: String,
@@ -88,7 +101,12 @@ pub struct UserEntry {
 fn host_status_color(node: &WorkflowNode) -> Option<Color32> {
     const UNKNOWN: Color32 = Color32::from_rgb(80, 90, 105);
     match node {
-        WorkflowNode::HostNode { admin, smbv1, logged_in_cred, .. } => {
+        WorkflowNode::HostNode {
+            admin,
+            smbv1,
+            logged_in_cred,
+            ..
+        } => {
             if *admin {
                 Some(HOST_OK)
             } else if matches!(smbv1, Some(true)) {
@@ -112,12 +130,7 @@ fn host_chip(ui: &mut Ui, text: &str, fg: Color32) {
         .corner_radius(egui::CornerRadius::same(3))
         .inner_margin(egui::Margin::symmetric(5, 1))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(text)
-                    .small()
-                    .strong()
-                    .color(fg),
-            );
+            ui.label(egui::RichText::new(text).small().strong().color(fg));
         });
 }
 
@@ -156,11 +169,7 @@ fn render_host_card(
     // Bloc 2 — chips status + compteurs sur une seule rangée wrappée.
     let show_signing = matches!(signing, Some(true));
     let show_smbv1 = matches!(smbv1, Some(true));
-    let any_chip = admin
-        || show_signing
-        || show_smbv1
-        || !shares.is_empty()
-        || !users.is_empty();
+    let any_chip = admin || show_signing || show_smbv1 || !shares.is_empty() || !users.is_empty();
     if any_chip {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
@@ -217,21 +226,56 @@ impl WorkflowNode {
                     format!("🖥 {ip} ({hostname})")
                 }
             }
-            WorkflowNode::SharesNode { host_ip, hostname, shares: _ } => {
-                let host = if hostname.is_empty() { host_ip.as_str() } else { hostname.as_str() };
+            WorkflowNode::SharesNode {
+                host_ip,
+                hostname,
+                shares: _,
+            } => {
+                let host = if hostname.is_empty() {
+                    host_ip.as_str()
+                } else {
+                    hostname.as_str()
+                };
                 format!("📂 Shares — {host}")
             }
-            WorkflowNode::UsersNode { host_ip, hostname, users } => {
-                let host = if hostname.is_empty() { host_ip.as_str() } else { hostname.as_str() };
+            WorkflowNode::UsersNode {
+                host_ip,
+                hostname,
+                users,
+            } => {
+                let host = if hostname.is_empty() {
+                    host_ip.as_str()
+                } else {
+                    hostname.as_str()
+                };
                 format!("👥 Users ({}) — {host}", users.len())
             }
-            WorkflowNode::DumpNode { host_ip, hostname, dump_type, entries, .. } => {
-                let host = if hostname.is_empty() { host_ip.as_str() } else { hostname.as_str() };
+            WorkflowNode::DumpNode {
+                host_ip,
+                hostname,
+                dump_type,
+                entries,
+                ..
+            } => {
+                let host = if hostname.is_empty() {
+                    host_ip.as_str()
+                } else {
+                    hostname.as_str()
+                };
                 let icon = if dump_type == "SAM" { "🔑" } else { "🔓" };
                 format!("{icon} {dump_type} ({}) — {host}", entries.len())
             }
-            WorkflowNode::EnumAvNode { host_ip, hostname, products, .. } => {
-                let host = if hostname.is_empty() { host_ip.as_str() } else { hostname.as_str() };
+            WorkflowNode::EnumAvNode {
+                host_ip,
+                hostname,
+                products,
+                ..
+            } => {
+                let host = if hostname.is_empty() {
+                    host_ip.as_str()
+                } else {
+                    hostname.as_str()
+                };
                 format!("🛡 AV/EDR ({}) — {host}", products.len())
             }
         }
@@ -411,16 +455,39 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         }
     }
 
-    fn show_input(&mut self, pin: &InPin, ui: &mut Ui, snarl: &mut Snarl<WorkflowNode>) -> impl egui_snarl::ui::SnarlPin + 'static {
+    fn show_input(
+        &mut self,
+        pin: &InPin,
+        ui: &mut Ui,
+        snarl: &mut Snarl<WorkflowNode>,
+    ) -> impl egui_snarl::ui::SnarlPin + 'static {
         match &snarl[pin.id.node] {
-            WorkflowNode::ProtocolModule { .. } => { ui.label("target"); },
-            WorkflowNode::CredentialNode { .. } => { ui.label("-"); },
-            WorkflowNode::ActionNode { .. } => { ui.label("protocol"); },
-            WorkflowNode::OutputNode { .. } => { ui.label("results"); },
-            WorkflowNode::GenericModule { .. } => { ui.label("in"); },
-            WorkflowNode::TargetInput { .. } => { ui.label("-"); },
-            WorkflowNode::HostNode { .. } => { ui.label("-"); },
-            WorkflowNode::SharesNode { host_ip: _, hostname: _, shares } => {
+            WorkflowNode::ProtocolModule { .. } => {
+                ui.label("target");
+            }
+            WorkflowNode::CredentialNode { .. } => {
+                ui.label("-");
+            }
+            WorkflowNode::ActionNode { .. } => {
+                ui.label("protocol");
+            }
+            WorkflowNode::OutputNode { .. } => {
+                ui.label("results");
+            }
+            WorkflowNode::GenericModule { .. } => {
+                ui.label("in");
+            }
+            WorkflowNode::TargetInput { .. } => {
+                ui.label("-");
+            }
+            WorkflowNode::HostNode { .. } => {
+                ui.label("-");
+            }
+            WorkflowNode::SharesNode {
+                host_ip: _,
+                hostname: _,
+                shares,
+            } => {
                 ui.set_min_width(200.0);
                 ui.set_max_width(280.0);
                 ui.vertical(|ui| {
@@ -443,10 +510,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
 
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(
-                                    egui::RichText::new("📁")
-                                        .small(),
-                                );
+                                ui.label(egui::RichText::new("📁").small());
                                 ui.label(
                                     egui::RichText::new(name)
                                         .small()
@@ -474,7 +538,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                 });
             }
-            WorkflowNode::UsersNode { host_ip: _, hostname: _, users } => {
+            WorkflowNode::UsersNode {
+                host_ip: _,
+                hostname: _,
+                users,
+            } => {
                 ui.set_min_width(180.0);
                 ui.set_max_width(250.0);
                 ui.vertical(|ui| {
@@ -529,17 +597,20 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                                     );
                                 }
                                 if user.locked {
-                                    ui.label(
-                                        egui::RichText::new("🔒")
-                                            .small(),
-                                    );
+                                    ui.label(egui::RichText::new("🔒").small());
                                 }
                             });
                         }
                     }
                 });
             }
-            WorkflowNode::DumpNode { host_ip: _, hostname: _, dump_type, entries, error } => {
+            WorkflowNode::DumpNode {
+                host_ip: _,
+                hostname: _,
+                dump_type,
+                entries,
+                error,
+            } => {
                 ui.set_min_width(280.0);
                 ui.set_max_width(400.0);
                 ui.vertical(|ui| {
@@ -580,10 +651,13 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                                             .family(egui::FontFamily::Monospace),
                                     );
                                     ui.label(
-                                        egui::RichText::new(format!(":{}:{}:::", parts[2], parts[3]))
-                                            .small()
-                                            .color(Color32::from_rgb(80, 200, 120))
-                                            .family(egui::FontFamily::Monospace),
+                                        egui::RichText::new(format!(
+                                            ":{}:{}:::",
+                                            parts[2], parts[3]
+                                        ))
+                                        .small()
+                                        .color(Color32::from_rgb(80, 200, 120))
+                                        .family(egui::FontFamily::Monospace),
                                     );
                                 } else {
                                     ui.label(
@@ -606,7 +680,9 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                 });
             }
-            WorkflowNode::EnumAvNode { products, error, .. } => {
+            WorkflowNode::EnumAvNode {
+                products, error, ..
+            } => {
                 ui.set_min_width(260.0);
                 ui.set_max_width(380.0);
                 ui.vertical(|ui| {
@@ -627,7 +703,8 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                     for product_line in products.iter() {
                         // Format: "ProductName|status"
-                        let (name, status) = product_line.split_once('|').unwrap_or((product_line, ""));
+                        let (name, status) =
+                            product_line.split_once('|').unwrap_or((product_line, ""));
                         let (icon, color) = match status {
                             "INSTALLED and RUNNING" => ("🟢", Color32::from_rgb(80, 200, 120)),
                             "RUNNING" => ("🔵", Color32::from_rgb(80, 170, 255)),
@@ -636,20 +713,14 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                         };
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(
-                                egui::RichText::new(icon).small(),
-                            );
+                            ui.label(egui::RichText::new(icon).small());
                             ui.label(
                                 egui::RichText::new(name)
                                     .small()
                                     .strong()
                                     .color(Color32::WHITE),
                             );
-                            ui.label(
-                                egui::RichText::new(status)
-                                    .small()
-                                    .color(color),
-                            );
+                            ui.label(egui::RichText::new(status).small().color(color));
                         });
                     }
                     if products.is_empty() && error.is_some() {
@@ -665,16 +736,26 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         };
         let is_output_node = matches!(
             &snarl[pin.id.node],
-            WorkflowNode::SharesNode { .. } | WorkflowNode::UsersNode { .. } | WorkflowNode::DumpNode { .. } | WorkflowNode::EnumAvNode { .. }
+            WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
         );
         if is_output_node {
-            PinInfo::circle().with_fill(Color32::TRANSPARENT).with_stroke(egui::Stroke::NONE)
+            PinInfo::circle()
+                .with_fill(Color32::TRANSPARENT)
+                .with_stroke(egui::Stroke::NONE)
         } else {
             PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
         }
     }
 
-    fn show_output(&mut self, pin: &OutPin, ui: &mut Ui, snarl: &mut Snarl<WorkflowNode>) -> impl egui_snarl::ui::SnarlPin + 'static {
+    fn show_output(
+        &mut self,
+        pin: &OutPin,
+        ui: &mut Ui,
+        snarl: &mut Snarl<WorkflowNode>,
+    ) -> impl egui_snarl::ui::SnarlPin + 'static {
         match &snarl[pin.id.node] {
             WorkflowNode::TargetInput { target } => {
                 ui.label(format!("{target}"));
@@ -1008,7 +1089,10 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         let is_host = matches!(&snarl[node], WorkflowNode::HostNode { .. });
 
         if is_shares {
-            if let WorkflowNode::SharesNode { host_ip, shares, .. } = &snarl[node] {
+            if let WorkflowNode::SharesNode {
+                host_ip, shares, ..
+            } = &snarl[node]
+            {
                 for s in shares {
                     let (name, _stype, access) = parse_share_string(s);
                     if access == "NO ACCESS" {
@@ -1016,7 +1100,8 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                     let label = format!("🔍 Browse {name}");
                     if ui.button(&label).clicked() {
-                        self.browse_requests.push((host_ip.clone(), name.to_string()));
+                        self.browse_requests
+                            .push((host_ip.clone(), name.to_string()));
                         ui.close();
                     }
                 }
@@ -1036,7 +1121,8 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             // "List Shares" — spawn a SharesNode
             if ui.button("📂 List Shares").clicked() {
                 if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                    self.shares_requests.push((node, ip.clone(), hostname.clone()));
+                    self.shares_requests
+                        .push((node, ip.clone(), hostname.clone()));
                 }
                 ui.close();
             }
@@ -1044,7 +1130,8 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             // "List Users" — spawn a UsersNode
             if ui.button("👥 List Users").clicked() {
                 if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                    self.users_requests.push((node, ip.clone(), hostname.clone()));
+                    self.users_requests
+                        .push((node, ip.clone(), hostname.clone()));
                 }
                 ui.close();
             }
@@ -1054,13 +1141,23 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 ui.set_min_width(140.0);
                 if ui.button("🔑 SAM Hashes").clicked() {
                     if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                        self.dump_requests.push((node, ip.clone(), hostname.clone(), "SAM".to_string()));
+                        self.dump_requests.push((
+                            node,
+                            ip.clone(),
+                            hostname.clone(),
+                            "SAM".to_string(),
+                        ));
                     }
                     ui.close();
                 }
                 if ui.button("🔓 LSA Secrets").clicked() {
                     if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                        self.dump_requests.push((node, ip.clone(), hostname.clone(), "LSA".to_string()));
+                        self.dump_requests.push((
+                            node,
+                            ip.clone(),
+                            hostname.clone(),
+                            "LSA".to_string(),
+                        ));
                     }
                     ui.close();
                 }
@@ -1068,25 +1165,38 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
 
             // "Get Console" — only offered on pwned hosts (admin == true)
             let (is_pwned, pwned_ip, pwned_hostname, pwned_cred_label) =
-                if let WorkflowNode::HostNode { ip, hostname, admin, logged_in_cred, .. } = &snarl[node] {
-                    (*admin && logged_in_cred.is_some(),
-                     ip.clone(),
-                     hostname.clone(),
-                     logged_in_cred.clone())
+                if let WorkflowNode::HostNode {
+                    ip,
+                    hostname,
+                    admin,
+                    logged_in_cred,
+                    ..
+                } = &snarl[node]
+                {
+                    (
+                        *admin && logged_in_cred.is_some(),
+                        ip.clone(),
+                        hostname.clone(),
+                        logged_in_cred.clone(),
+                    )
                 } else {
                     (false, String::new(), String::new(), None)
                 };
             if is_pwned {
                 if ui.button("🖥 Get Console").clicked() {
                     if let Some(label) = pwned_cred_label.as_deref() {
-                        let cred_opt = self.credentials.iter().find(|c| {
-                            let cl = if c.domain.is_empty() {
-                                format!(".\\{}", c.username)
-                            } else {
-                                format!("{}\\{}", c.domain, c.username)
-                            };
-                            cl == label
-                        }).cloned();
+                        let cred_opt = self
+                            .credentials
+                            .iter()
+                            .find(|c| {
+                                let cl = if c.domain.is_empty() {
+                                    format!(".\\{}", c.username)
+                                } else {
+                                    format!("{}\\{}", c.domain, c.username)
+                                };
+                                cl == label
+                            })
+                            .cloned();
                         if let Some(cred) = cred_opt {
                             self.console_requests.push((pwned_ip, pwned_hostname, cred));
                         }
@@ -1097,7 +1207,13 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
 
             // "Enum AV" — detect installed AV/EDR
             if ui.button("🛡 Enum AV").clicked() {
-                if let WorkflowNode::HostNode { ip, hostname, logged_in_cred, .. } = &snarl[node] {
+                if let WorkflowNode::HostNode {
+                    ip,
+                    hostname,
+                    logged_in_cred,
+                    ..
+                } = &snarl[node]
+                {
                     // Resolve credential from logged_in_cred label
                     let mut cred_found = None;
                     if let Some(label) = logged_in_cred {
@@ -1114,9 +1230,23 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                         }
                     }
                     if let Some(cred) = cred_found {
-                        self.enumav_requests.push((node, ip.clone(), hostname.clone(), cred.username, cred.domain, cred.secret));
+                        self.enumav_requests.push((
+                            node,
+                            ip.clone(),
+                            hostname.clone(),
+                            cred.username,
+                            cred.domain,
+                            cred.secret,
+                        ));
                     } else if let Some(first) = self.credentials.first() {
-                        self.enumav_requests.push((node, ip.clone(), hostname.clone(), first.username.clone(), first.domain.clone(), first.secret.clone()));
+                        self.enumav_requests.push((
+                            node,
+                            ip.clone(),
+                            hostname.clone(),
+                            first.username.clone(),
+                            first.domain.clone(),
+                            first.secret.clone(),
+                        ));
                     }
                 }
                 ui.close();
@@ -1162,12 +1292,15 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                             Color32::WHITE
                         };
 
-                        if ui.add(
-                            egui::Button::new(
-                                egui::RichText::new(&label).size(12.0).color(text_color),
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(&label).size(12.0).color(text_color),
+                                )
+                                .min_size(egui::vec2(150.0, 22.0)),
                             )
-                            .min_size(egui::vec2(150.0, 22.0)),
-                        ).clicked() {
+                            .clicked()
+                        {
                             if !is_active {
                                 // Get IP from the node
                                 if let WorkflowNode::HostNode { ip, .. } = &snarl[node] {

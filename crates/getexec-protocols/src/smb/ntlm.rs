@@ -29,16 +29,16 @@ pub struct NtlmV2Auth {
 }
 
 // ── NTLMSSP Negotiate flags ──
-const NTLMSSP_NEGOTIATE_UNICODE: u32       = 0x00000001;
-const NTLMSSP_REQUEST_TARGET: u32          = 0x00000004;
-const NTLMSSP_NEGOTIATE_SIGN: u32          = 0x00000010;
-const NTLMSSP_NEGOTIATE_SEAL: u32          = 0x00000020;
-const NTLMSSP_NEGOTIATE_NTLM: u32         = 0x00000200;
-const NTLMSSP_NEGOTIATE_ALWAYS_SIGN: u32   = 0x00008000;
-const NTLMSSP_NEGOTIATE_EXTENDED_SS: u32   = 0x00080000;
-const NTLMSSP_NEGOTIATE_128: u32           = 0x20000000;
-const NTLMSSP_NEGOTIATE_KEY_EXCH: u32      = 0x40000000;
-const NTLMSSP_NEGOTIATE_56: u32            = 0x80000000;
+const NTLMSSP_NEGOTIATE_UNICODE: u32 = 0x00000001;
+const NTLMSSP_REQUEST_TARGET: u32 = 0x00000004;
+const NTLMSSP_NEGOTIATE_SIGN: u32 = 0x00000010;
+const NTLMSSP_NEGOTIATE_SEAL: u32 = 0x00000020;
+const NTLMSSP_NEGOTIATE_NTLM: u32 = 0x00000200;
+const NTLMSSP_NEGOTIATE_ALWAYS_SIGN: u32 = 0x00008000;
+const NTLMSSP_NEGOTIATE_EXTENDED_SS: u32 = 0x00080000;
+const NTLMSSP_NEGOTIATE_128: u32 = 0x20000000;
+const NTLMSSP_NEGOTIATE_KEY_EXCH: u32 = 0x40000000;
+const NTLMSSP_NEGOTIATE_56: u32 = 0x80000000;
 
 const NEGOTIATE_FLAGS: u32 = NTLMSSP_NEGOTIATE_56
     | NTLMSSP_NEGOTIATE_KEY_EXCH
@@ -94,8 +94,8 @@ pub fn parse_challenge(data: &[u8]) -> Result<ChallengeMessage, String> {
     };
 
     // Extract timestamp from AV_PAIRs (AvId = 7 = MsvAvTimestamp)
-    let timestamp = extract_av_pair(&target_info, 7)
-        .and_then(|t| <[u8; 8]>::try_from(t.as_slice()).ok());
+    let timestamp =
+        extract_av_pair(&target_info, 7).and_then(|t| <[u8; 8]>::try_from(t.as_slice()).ok());
 
     // Parse Version field at offset 48 (8 bytes) if NTLMSSP_NEGOTIATE_VERSION (0x02000000) is set
     let version = if data.len() >= 56 {
@@ -189,14 +189,21 @@ pub fn build_authenticate(
     domain: &str,
     _server_flags: u32,
 ) -> Vec<u8> {
-    let domain_utf16: Vec<u8> = domain.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-    let user_utf16: Vec<u8> = username.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let domain_utf16: Vec<u8> = domain
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let user_utf16: Vec<u8> = username
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
     let workstation_utf16: Vec<u8> = Vec::new();
 
     // Encrypted random session key (KEY_EXCH)
     let random_session_key = rand_bytes::<16>();
-    let encrypted_session_key = super::crypto::rc4_transform(&random_session_key, &auth.session_base_key)
-        .unwrap_or_else(|_| random_session_key.to_vec());
+    let encrypted_session_key =
+        super::crypto::rc4_transform(&random_session_key, &auth.session_base_key)
+            .unwrap_or_else(|_| random_session_key.to_vec());
 
     // Payload offset = 8 (sig) + 4 (type) + 6×8 (fields) + 4 (flags) + 8 (version) = 72
     let payload_offset = 72u32;
@@ -240,7 +247,9 @@ pub fn build_authenticate(
 /// Wrap NTLMSSP in SPNEGO NegTokenInit (first Session Setup).
 pub fn wrap_spnego_init(ntlmssp: &[u8]) -> Vec<u8> {
     // OID 1.3.6.1.4.1.311.2.2.10 (NTLMSSP)
-    let ntlmssp_oid: &[u8] = &[0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a];
+    let ntlmssp_oid: &[u8] = &[
+        0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    ];
     // OID 1.3.6.1.5.5.2 (SPNEGO)
     let spnego_oid: &[u8] = &[0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 
@@ -320,8 +329,7 @@ fn current_filetime() -> [u8; 8] {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
-    let filetime = (now.as_secs() + 11_644_473_600) * 10_000_000
-        + now.subsec_nanos() as u64 / 100;
+    let filetime = (now.as_secs() + 11_644_473_600) * 10_000_000 + now.subsec_nanos() as u64 / 100;
     filetime.to_le_bytes()
 }
 

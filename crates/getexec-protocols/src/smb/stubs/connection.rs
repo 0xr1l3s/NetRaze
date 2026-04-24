@@ -29,7 +29,10 @@ impl SmbCredential {
     pub fn with_hash(username: &str, domain: &str, hash_hex: &str) -> Result<Self, String> {
         let hash_hex = hash_hex.trim();
         if hash_hex.len() != 32 {
-            return Err(format!("NT hash must be 32 hex chars, got {}", hash_hex.len()));
+            return Err(format!(
+                "NT hash must be 32 hex chars, got {}",
+                hash_hex.len()
+            ));
         }
         let mut hash = [0u8; 16];
         for i in 0..16 {

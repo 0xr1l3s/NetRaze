@@ -41,8 +41,8 @@ pub fn md5(data: &[u8]) -> Result<[u8; 16], String> {
 pub fn hmac_md5(key: &[u8], data: &[u8]) -> Result<[u8; 16], String> {
     // `HmacMd5::new_from_slice` is ambiguous between the `Mac` and `KeyInit`
     // traits — both are in scope. Disambiguate via the trait we actually want.
-    let mut mac = <HmacMd5 as Mac>::new_from_slice(key)
-        .map_err(|e| format!("HMAC-MD5 key: {e}"))?;
+    let mut mac =
+        <HmacMd5 as Mac>::new_from_slice(key).map_err(|e| format!("HMAC-MD5 key: {e}"))?;
     mac.update(data);
     let out = mac.finalize().into_bytes();
     let mut buf = [0u8; 16];
@@ -147,8 +147,8 @@ mod tests {
         assert_eq!(
             h,
             [
-                0x31, 0xd6, 0xcf, 0xe0, 0xd1, 0x6a, 0xe9, 0x31, 0xb7, 0x3c, 0x59, 0xd7, 0xe0,
-                0xc0, 0x89, 0xc0,
+                0x31, 0xd6, 0xcf, 0xe0, 0xd1, 0x6a, 0xe9, 0x31, 0xb7, 0x3c, 0x59, 0xd7, 0xe0, 0xc0,
+                0x89, 0xc0,
             ]
         );
     }
@@ -160,8 +160,8 @@ mod tests {
         assert_eq!(
             h,
             [
-                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec,
-                0xf8, 0x42, 0x7e,
+                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+                0x42, 0x7e,
             ]
         );
     }
@@ -174,8 +174,8 @@ mod tests {
         assert_eq!(
             mac,
             [
-                0x92, 0x94, 0x72, 0x7a, 0x36, 0x38, 0xbb, 0x1c, 0x13, 0xf4, 0x8e, 0xf8, 0x15,
-                0x8b, 0xfc, 0x9d,
+                0x92, 0x94, 0x72, 0x7a, 0x36, 0x38, 0xbb, 0x1c, 0x13, 0xf4, 0x8e, 0xf8, 0x15, 0x8b,
+                0xfc, 0x9d,
             ]
         );
     }
@@ -206,7 +206,9 @@ mod tests {
         let plaintext = [0x11u8; 32];
         let mut buf = plaintext;
         let enc = Aes128CbcEnc::new_from_slices(&key, &iv).unwrap();
-        let _ = enc.encrypt_padded_mut::<NoPadding>(&mut buf, plaintext.len()).unwrap();
+        let _ = enc
+            .encrypt_padded_mut::<NoPadding>(&mut buf, plaintext.len())
+            .unwrap();
         let pt = aes_128_cbc_decrypt(&buf, &key, &iv).unwrap();
         assert_eq!(pt, plaintext.to_vec());
     }

@@ -55,9 +55,27 @@ pub struct Smb2Session {
 }
 
 impl Smb2Session {
-    /// Connect to target:445 and authenticate using NT hash (pass-the-hash).
-    pub fn connect(target: &str, nt_hash: &[u8; 16], username: &str, domain: &str) -> Result<Self, String> {
-        let addr = format!("{target}:445");
+    /// Connect to `target` and authenticate using NT hash (pass-the-hash).
+    ///
+    /// `target` may be:
+    /// - a bare host (`dc01.corp.lan`, `10.0.0.5`) — port 445 is assumed
+    /// - a `host:port` string — used verbatim (required by the Samba
+    ///   integration harness which binds the test container on 1445 so it
+    ///   doesn't collide with the OS SMB client on dev machines)
+    pub fn connect(
+        target: &str,
+        nt_hash: &[u8; 16],
+        username: &str,
+        domain: &str,
+    ) -> Result<Self, String> {
+        // Heuristic: IPv6 literals contain `:` too, but always come wrapped in
+        // `[…]` when a port is attached. A bare `:` indicates "host already
+        // has a port" — anything else gets the default 445 tacked on.
+        let addr = if target.starts_with('[') || !target.contains(':') {
+            format!("{target}:445")
+        } else {
+            target.to_owned()
+        };
         let sock_addr = addr
             .to_socket_addrs()
             .map_err(|e| format!("DNS resolve failed: {e}"))?
@@ -258,9 +276,8 @@ impl Smb2Session {
         }
         let body_off = SMB2_HEADER_SIZE;
         let data_offset = resp[body_off + 2] as usize; // from start of header
-        let data_length = u32::from_le_bytes(
-            resp[body_off + 4..body_off + 8].try_into().unwrap(),
-        ) as usize;
+        let data_length =
+            u32::from_le_bytes(resp[body_off + 4..body_off + 8].try_into().unwrap()) as usize;
 
         if data_offset + data_length > resp.len() {
             return Err(SmbReadError::Other(0, "read data out of bounds".into()));
@@ -426,8 +443,8 @@ impl Smb2Session {
         }
         let spnego_data = &resp1[sec_offset..sec_offset + sec_len];
 
-        let challenge_data = ntlm::extract_ntlmssp(spnego_data)
-            .ok_or("No NTLMSSP in server challenge response")?;
+        let challenge_data =
+            ntlm::extract_ntlmssp(spnego_data).ok_or("No NTLMSSP in server challenge response")?;
         let challenge = ntlm::parse_challenge(challenge_data)?;
 
         // === Round 2: NTLMv2 Authenticate ===

@@ -5,11 +5,11 @@
 //! 1. Querying service existence/status via Service Control Manager
 //! 2. Listing named pipes on IPC$ to detect running processes
 
-use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
     FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Services::*;
+use windows::core::PCWSTR;
 
 use super::connection::{SmbCredential, connect_ipc};
 
@@ -69,11 +69,13 @@ pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult
     match query_services(target) {
         Ok(found) => {
             for (product_name, _svc_name) in found {
-                let entry = product_map.entry(product_name.clone()).or_insert(AvProduct {
-                    name: product_name,
-                    installed: false,
-                    running: false,
-                });
+                let entry = product_map
+                    .entry(product_name.clone())
+                    .or_insert(AvProduct {
+                        name: product_name,
+                        installed: false,
+                        running: false,
+                    });
                 entry.installed = true;
             }
         }
@@ -85,11 +87,13 @@ pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult
     match list_pipes(target) {
         Ok(pipes) => {
             for (product_name, _pipe) in match_pipes(&pipes) {
-                let entry = product_map.entry(product_name.clone()).or_insert(AvProduct {
-                    name: product_name,
-                    installed: false,
-                    running: false,
-                });
+                let entry = product_map
+                    .entry(product_name.clone())
+                    .or_insert(AvProduct {
+                        name: product_name,
+                        installed: false,
+                        running: false,
+                    });
                 entry.running = true;
             }
         }
@@ -106,27 +110,15 @@ pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult
 
 fn query_services(target: &str) -> Result<Vec<(String, String)>, String> {
     let target_w = wide(&format!("\\\\{target}"));
-    let scm = unsafe {
-        OpenSCManagerW(
-            PCWSTR(target_w.as_ptr()),
-            None,
-            SC_MANAGER_CONNECT,
-        )
-    }
-    .map_err(|e| format!("OpenSCManager: {e}"))?;
+    let scm = unsafe { OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT) }
+        .map_err(|e| format!("OpenSCManager: {e}"))?;
 
     let mut found = Vec::new();
 
     for product in AV_PRODUCTS {
         for svc_name in product.services {
             let svc_w = wide(svc_name);
-            let svc = unsafe {
-                OpenServiceW(
-                    scm,
-                    PCWSTR(svc_w.as_ptr()),
-                    SERVICE_QUERY_STATUS,
-                )
-            };
+            let svc = unsafe { OpenServiceW(scm, PCWSTR(svc_w.as_ptr()), SERVICE_QUERY_STATUS) };
             match svc {
                 Ok(handle) => {
                     // Service exists → installed
@@ -239,14 +231,26 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     },
     AvProductDef {
         name: "Avast / AVG",
-        services: &["AvastWscReporter", "aswbIDSAgent", "AVGWscReporter", "avgbIDSAgent"],
+        services: &[
+            "AvastWscReporter",
+            "aswbIDSAgent",
+            "AVGWscReporter",
+            "avgbIDSAgent",
+        ],
         pipes: &["aswCallbackPipe*", "avgCallbackPipe*"],
     },
     AvProductDef {
         name: "Bitdefender",
         services: &[
-            "bdredline_agent", "BDAuxSrv", "UPDATESRV", "VSSERV", "bdredline",
-            "EPRedline", "EPUpdateService", "EPSecurityService", "EPProtectedService",
+            "bdredline_agent",
+            "BDAuxSrv",
+            "UPDATESRV",
+            "VSSERV",
+            "bdredline",
+            "EPRedline",
+            "EPUpdateService",
+            "EPSecurityService",
+            "EPProtectedService",
             "EPIntegrationService",
         ],
         pipes: &[
@@ -277,7 +281,10 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     AvProductDef {
         name: "Cybereason",
         services: &["CybereasonActiveProbe", "CybereasonCRS", "CybereasonBlocki"],
-        pipes: &["CybereasonAPConsoleMinionHostIpc_*", "CybereasonAPServerProxyIpc_*"],
+        pipes: &[
+            "CybereasonAPConsoleMinionHostIpc_*",
+            "CybereasonAPServerProxyIpc_*",
+        ],
     },
     AvProductDef {
         name: "Elastic EDR",
@@ -286,7 +293,16 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     },
     AvProductDef {
         name: "ESET",
-        services: &["ekm", "epfw", "epfwlwf", "epfwwfp", "EraAgentSvc", "ERAAgent", "efwd", "ehttpsrv"],
+        services: &[
+            "ekm",
+            "epfw",
+            "epfwlwf",
+            "epfwwfp",
+            "EraAgentSvc",
+            "ERAAgent",
+            "efwd",
+            "ehttpsrv",
+        ],
         pipes: &["nod_scriptmon_pipe"],
     },
     AvProductDef {
@@ -306,7 +322,13 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     },
     AvProductDef {
         name: "HarfangLab EDR",
-        services: &["hurukai", "Hurukai agent", "HarfangLab Hurukai agent", "hurukai-av", "hurukai-ui"],
+        services: &[
+            "hurukai",
+            "Hurukai agent",
+            "HarfangLab Hurukai agent",
+            "hurukai-av",
+            "hurukai-ui",
+        ],
         pipes: &["hurukai-control", "hurukai-servicing", "hurukai-amsi"],
     },
     AvProductDef {
@@ -341,17 +363,36 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     },
     AvProductDef {
         name: "SentinelOne",
-        services: &["SentinelAgent", "SentinelStaticEngine", "LogProcessorService"],
-        pipes: &["SentinelAgentWorkerCert.*", "DFIScanner.Etw.*", "DFIScanner.Inline.*"],
+        services: &[
+            "SentinelAgent",
+            "SentinelStaticEngine",
+            "LogProcessorService",
+        ],
+        pipes: &[
+            "SentinelAgentWorkerCert.*",
+            "DFIScanner.Etw.*",
+            "DFIScanner.Inline.*",
+        ],
     },
     AvProductDef {
         name: "Sophos Intercept X",
         services: &[
-            "SntpService", "Sophos Endpoint Defense Service", "Sophos File Scanner Service",
-            "Sophos Health Service", "Sophos Live Query", "Sophos Managed Threat Response",
-            "Sophos MCS Agent", "Sophos MCS Client", "Sophos System Protection Service",
+            "SntpService",
+            "Sophos Endpoint Defense Service",
+            "Sophos File Scanner Service",
+            "Sophos Health Service",
+            "Sophos Live Query",
+            "Sophos Managed Threat Response",
+            "Sophos MCS Agent",
+            "Sophos MCS Client",
+            "Sophos System Protection Service",
         ],
-        pipes: &["SophosUI", "SophosEventStore", "sophos_deviceencryption", "sophoslivequery_*"],
+        pipes: &[
+            "SophosUI",
+            "SophosEventStore",
+            "sophos_deviceencryption",
+            "sophoslivequery_*",
+        ],
     },
     AvProductDef {
         name: "Symantec Endpoint Protection",
@@ -361,21 +402,43 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     AvProductDef {
         name: "Trellix / McAfee EDR",
         services: &[
-            "McAfee Endpoint Security Platform Service", "mfemactl", "mfemms",
-            "mfefire", "masvc", "macmnsvc", "mfetp", "mfewc", "mfeaack",
+            "McAfee Endpoint Security Platform Service",
+            "mfemactl",
+            "mfemms",
+            "mfefire",
+            "masvc",
+            "macmnsvc",
+            "mfetp",
+            "mfewc",
+            "mfeaack",
         ],
-        pipes: &["TrellixEDR_Pipe_*", "mfemactl_*", "mfefire_*", "McAfeeAgent_Pipe_*", "mfetp_*"],
+        pipes: &[
+            "TrellixEDR_Pipe_*",
+            "mfemactl_*",
+            "mfefire_*",
+            "McAfeeAgent_Pipe_*",
+            "mfetp_*",
+        ],
     },
     AvProductDef {
         name: "Trend Micro",
         services: &[
-            "Trend Micro Endpoint Basecamp", "TMBMServer",
-            "Trend Micro Web Service Communicator", "TMiACAgentSvc",
-            "CETASvc", "iVPAgent", "ds_agent", "ds_monitor", "ds_notifier",
+            "Trend Micro Endpoint Basecamp",
+            "TMBMServer",
+            "Trend Micro Web Service Communicator",
+            "TMiACAgentSvc",
+            "CETASvc",
+            "iVPAgent",
+            "ds_agent",
+            "ds_monitor",
+            "ds_notifier",
         ],
         pipes: &[
-            "IPC_XBC_XBC_AGENT_PIPE_*", "iacagent_*", "OIPC_LWCS_PIPE_*",
-            "Log_ServerNamePipe", "OIPC_NTRTSCAN_PIPE_*",
+            "IPC_XBC_XBC_AGENT_PIPE_*",
+            "iacagent_*",
+            "OIPC_LWCS_PIPE_*",
+            "Log_ServerNamePipe",
+            "OIPC_NTRTSCAN_PIPE_*",
         ],
     },
     AvProductDef {
@@ -386,8 +449,13 @@ static AV_PRODUCTS: &[AvProductDef] = &[
     AvProductDef {
         name: "WithSecure Elements",
         services: &[
-            "fsdevcon", "fshoster", "fsnethoster", "fsulhoster",
-            "fsulnethoster", "fsulprothoster", "wsulavprohoster",
+            "fsdevcon",
+            "fshoster",
+            "fsnethoster",
+            "fsulhoster",
+            "fsulnethoster",
+            "fsulprothoster",
+            "wsulavprohoster",
         ],
         pipes: &["FS_CCFIPC_*"],
     },

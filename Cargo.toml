@@ -32,7 +32,38 @@ cbc = "0.1"
 cipher = { version = "0.4", features = ["block-padding"] }
 clap = { version = "4.5", features = ["derive"] }
 des = "0.8"
-eframe = "0.32"
+# eframe: bascule sur le backend `wgpu` au lieu du `glow` par défaut.
+# Rationale: `glow` (OpenGL via glutin) tombe en `NoGlutinConfigs` sous WSL
+# quand la stack EGL n'expose aucun config compatible. `wgpu` passe par
+# Vulkan → Lavapipe en software si besoin, ce qui est bien plus fiable dans
+# les environnements virtualisés / CI headless.
+eframe = { version = "0.32", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
+# wgpu en dépendance directe avec les backends natifs activés — eframe
+# 0.32 active `egui-wgpu` avec la feature `winit` seule, ce qui ne
+# propage PAS `wgpu/default`. Résultat : sans cette ligne, `wgpu` se
+# retrouve avec uniquement `wgsl` activé et panique au démarrage avec
+# "No wgpu backend feature that is implemented for the target platform
+# was enabled". On liste explicitement tous les backends pertinents pour
+# notre matrice de plateformes (Windows/Linux/macOS) :
+#   - dx12   : Windows natif
+#   - vulkan : Linux natif, fallback Windows, WSL via Lavapipe
+#   - metal  : macOS/iOS
+#   - gles   : fallback OpenGL (Linux headless, vieux drivers)
+#   - wgsl   : parser de shaders (requis côté compile par egui-wgpu)
+# On exclut volontairement `webgpu` qui nécessite wasm-bindgen.
+wgpu = { version = "25", default-features = false, features = [
+    "dx12",
+    "vulkan",
+    "metal",
+    "gles",
+    "wgsl",
+] }
 egui = "0.32"
 egui-snarl = { version = "0.8", features = ["serde"] }
 egui_graphs = "0.27"

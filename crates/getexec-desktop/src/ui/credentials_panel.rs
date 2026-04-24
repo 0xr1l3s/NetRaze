@@ -62,17 +62,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 .color(type_color),
                         );
                         ui.label(
-                            egui::RichText::new(format!(
-                                "{}\\{}",
-                                cred.domain, cred.username
-                            ))
-                            .monospace()
-                            .size(10.5)
-                            .color(if is_selected {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgb(200, 205, 215)
-                            }),
+                            egui::RichText::new(format!("{}\\{}", cred.domain, cred.username))
+                                .monospace()
+                                .size(10.5)
+                                .color(if is_selected {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_rgb(200, 205, 215)
+                                }),
                         );
                     });
 
@@ -151,12 +148,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         }
 
         let can_add = !state.new_cred_username.is_empty() && !state.new_cred_secret.is_empty();
-        let btn = egui::Button::new(egui::RichText::new("+ Add").small().color(egui::Color32::WHITE))
-            .fill(if can_add {
-                ACCENT
-            } else {
-                egui::Color32::from_rgb(40, 46, 58)
-            });
+        let btn = egui::Button::new(
+            egui::RichText::new("+ Add")
+                .small()
+                .color(egui::Color32::WHITE),
+        )
+        .fill(if can_add {
+            ACCENT
+        } else {
+            egui::Color32::from_rgb(40, 46, 58)
+        });
         if ui.add(btn).clicked() && can_add {
             state.credentials.push(crate::state::CredentialRecord {
                 username: state.new_cred_username.drain(..).collect(),

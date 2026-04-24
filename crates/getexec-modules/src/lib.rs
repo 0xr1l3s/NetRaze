@@ -10,12 +10,20 @@ pub struct StaticModuleFactory {
 }
 
 impl StaticModuleFactory {
-    pub fn new(key: &str, description: &str, supported_protocols: &[&str], category: ModuleCategory) -> Self {
+    pub fn new(
+        key: &str,
+        description: &str,
+        supported_protocols: &[&str],
+        category: ModuleCategory,
+    ) -> Self {
         Self {
             metadata: ModuleMetadata {
                 key: key.to_owned(),
                 description: description.to_owned(),
-                supported_protocols: supported_protocols.iter().map(|item| (*item).to_owned()).collect(),
+                supported_protocols: supported_protocols
+                    .iter()
+                    .map(|item| (*item).to_owned())
+                    .collect(),
                 category,
             },
         }

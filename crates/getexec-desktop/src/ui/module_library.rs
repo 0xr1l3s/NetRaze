@@ -10,7 +10,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             .strong()
             .color(egui::Color32::WHITE),
     );
-    ui.label(egui::RichText::new("Drag to canvas").small().color(TEXT_DIM));
+    ui.label(
+        egui::RichText::new("Drag to canvas")
+            .small()
+            .color(TEXT_DIM),
+    );
     ui.add_space(6.0);
 
     let categories = state.module_categories.clone();
@@ -36,9 +40,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 } else {
                                     egui::Color32::from_rgb(200, 210, 240)
                                 });
-                            let response = ui.add(
-                                egui::Label::new(text).sense(egui::Sense::click_and_drag()),
-                            );
+                            let response =
+                                ui.add(egui::Label::new(text).sense(egui::Sense::click_and_drag()));
 
                             if response.clicked() {
                                 state.selected_module = item.clone();

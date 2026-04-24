@@ -1,9 +1,8 @@
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::NetworkManagement::WNet::{
-    WNetAddConnection2W, WNetCancelConnection2W, NETRESOURCEW,
-    CONNECT_TEMPORARY, NET_CONNECT_FLAGS,
-};
 use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::NetworkManagement::WNet::{
+    CONNECT_TEMPORARY, NET_CONNECT_FLAGS, NETRESOURCEW, WNetAddConnection2W, WNetCancelConnection2W,
+};
+use windows::core::{PCWSTR, PWSTR};
 
 /// Credentials for SMB authentication.
 #[derive(Debug, Clone)]
@@ -29,7 +28,10 @@ impl SmbCredential {
     pub fn with_hash(username: &str, domain: &str, hash_hex: &str) -> Result<Self, String> {
         let hash_hex = hash_hex.trim();
         if hash_hex.len() != 32 {
-            return Err(format!("NT hash must be 32 hex chars, got {}", hash_hex.len()));
+            return Err(format!(
+                "NT hash must be 32 hex chars, got {}",
+                hash_hex.len()
+            ));
         }
         let mut hash = [0u8; 16];
         for i in 0..16 {
@@ -74,22 +76,12 @@ pub fn connect_ipc(target: &str, credential: Option<&SmbCredential>) -> Result<(
         Some(cred) => {
             user_wide = to_wide_null(&cred.qualified_username());
             pass_wide = to_wide_null(&cred.password);
-            (
-                PCWSTR(user_wide.as_ptr()),
-                PCWSTR(pass_wide.as_ptr()),
-            )
+            (PCWSTR(user_wide.as_ptr()), PCWSTR(pass_wide.as_ptr()))
         }
         None => (PCWSTR::null(), PCWSTR::null()),
     };
 
-    let result = unsafe {
-        WNetAddConnection2W(
-            &nr,
-            pass_ptr,
-            user_ptr,
-            CONNECT_TEMPORARY,
-        )
-    };
+    let result = unsafe { WNetAddConnection2W(&nr, pass_ptr, user_ptr, CONNECT_TEMPORARY) };
 
     match result {
         WIN32_ERROR(0) => Ok(()),
@@ -105,14 +97,7 @@ pub fn connect_ipc(target: &str, credential: Option<&SmbCredential>) -> Result<(
                 lpRemoteName: PWSTR(remote_wide2.as_mut_ptr()),
                 ..Default::default()
             };
-            let retry = unsafe {
-                WNetAddConnection2W(
-                    &nr2,
-                    pass_ptr,
-                    user_ptr,
-                    CONNECT_TEMPORARY,
-                )
-            };
+            let retry = unsafe { WNetAddConnection2W(&nr2, pass_ptr, user_ptr, CONNECT_TEMPORARY) };
             match retry {
                 WIN32_ERROR(0) => Ok(()),
                 err => Err(format!(
@@ -138,7 +123,7 @@ fn disconnect_all(target: &str) {
             let _ = WNetCancelConnection2W(
                 PCWSTR(wide.as_ptr()),
                 NET_CONNECT_FLAGS(0),
-                true,  // force
+                true, // force
             );
         }
     }
@@ -149,13 +134,8 @@ pub fn disconnect_ipc(target: &str) -> Result<(), String> {
     let remote_name = format!("\\\\{}\\IPC$", target);
     let remote_wide = to_wide_null(&remote_name);
 
-    let result = unsafe {
-        WNetCancelConnection2W(
-            PCWSTR(remote_wide.as_ptr()),
-            NET_CONNECT_FLAGS(0),
-            true,
-        )
-    };
+    let result =
+        unsafe { WNetCancelConnection2W(PCWSTR(remote_wide.as_ptr()), NET_CONNECT_FLAGS(0), true) };
 
     match result {
         WIN32_ERROR(0) | WIN32_ERROR(2250) => Ok(()), // 2250 = not connected

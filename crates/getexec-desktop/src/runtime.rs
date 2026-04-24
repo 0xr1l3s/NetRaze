@@ -3,8 +3,12 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Duration, sleep};
 
-use getexec_protocols::smb::{SmbClient, SmbCredential, SmbScanResult, list_directory, download_file, upload_file, create_directory, delete_remote_file, delete_remote_directory, remote_dump_sam, remote_dump_lsa, enum_av, smb_fingerprint, execute_command_live};
 use getexec_protocols::smb::connection::is_port_open;
+use getexec_protocols::smb::{
+    SmbClient, SmbCredential, SmbScanResult, create_directory, delete_remote_directory,
+    delete_remote_file, download_file, enum_av, execute_command_live, list_directory,
+    remote_dump_lsa, remote_dump_sam, smb_fingerprint, upload_file,
+};
 use getexec_protocols::targets::parse_target_list;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,10 +21,18 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
-    Log { level: LogLevel, message: String },
+    Log {
+        level: LogLevel,
+        message: String,
+    },
     SmbResult(Box<SmbScanResult>),
-    ScanProgress { done: usize, total: usize },
-    ScanStarted { target_label: String },
+    ScanProgress {
+        done: usize,
+        total: usize,
+    },
+    ScanStarted {
+        target_label: String,
+    },
     ScanFinished,
     LoginResult {
         ip: String,
@@ -218,12 +230,7 @@ impl RuntimeServices {
             for (idx, target) in live_hosts.iter().enumerate() {
                 let _ = tx.send(RuntimeEvent::Log {
                     level: LogLevel::Info,
-                    message: format!(
-                        "[{}/{}] SMB scan: {}...",
-                        idx + 1,
-                        total_live,
-                        target
-                    ),
+                    message: format!("[{}/{}] SMB scan: {}...", idx + 1, total_live, target),
                 });
 
                 let mut client = SmbClient::new(target);
@@ -235,7 +242,8 @@ impl RuntimeServices {
                 {
                     let fp_target = target.clone();
                     let fp_tx = tx.clone();
-                    let fp_result = tokio::task::spawn_blocking(move || smb_fingerprint(&fp_target)).await;
+                    let fp_result =
+                        tokio::task::spawn_blocking(move || smb_fingerprint(&fp_target)).await;
                     if let Ok(Ok(fp)) = fp_result {
                         let nxc_line = fp.nxc_line(target);
                         let _ = fp_tx.send(RuntimeEvent::Log {
@@ -245,7 +253,11 @@ impl RuntimeServices {
                         let _ = fp_tx.send(RuntimeEvent::FingerprintResult {
                             ip: target.clone(),
                             hostname: fp.hostname,
-                            domain: if fp.dns_domain.is_empty() { fp.domain } else { fp.dns_domain },
+                            domain: if fp.dns_domain.is_empty() {
+                                fp.domain
+                            } else {
+                                fp.dns_domain
+                            },
                             os_info: fp.os_info,
                             signing: fp.signing,
                             smbv1: fp.smbv1,
@@ -374,10 +386,7 @@ impl RuntimeServices {
                     message: format!(
                         "{}: {} - {} partage(s){}",
                         target,
-                        server_info
-                            .as_ref()
-                            .map(|s| s.name.as_str())
-                            .unwrap_or("?"),
+                        server_info.as_ref().map(|s| s.name.as_str()).unwrap_or("?"),
                         shares.len(),
                         admin_tag
                     ),
@@ -458,9 +467,7 @@ impl RuntimeServices {
                         }
                     }
                 }
-                crate::state::CredType::Password => {
-                    SmbCredential::new(&username, &domain, &secret)
-                }
+                crate::state::CredType::Password => SmbCredential::new(&username, &domain, &secret),
             };
             let mut client = SmbClient::new(&ip).with_credential(smb_cred);
             let success = client.connect().await.is_ok();
@@ -473,9 +480,16 @@ impl RuntimeServices {
 
             let admin_tag = if admin { " (Pwn3d!)" } else { "" };
             let _ = tx.send(RuntimeEvent::Log {
-                level: if success { LogLevel::Success } else { LogLevel::Error },
+                level: if success {
+                    LogLevel::Success
+                } else {
+                    LogLevel::Error
+                },
                 message: if success {
-                    format!("{}: ✔ login réussi en tant que {cred_label_clone}{admin_tag}", ip)
+                    format!(
+                        "{}: ✔ login réussi en tant que {cred_label_clone}{admin_tag}",
+                        ip
+                    )
                 } else {
                     format!("{}: ✘ login échoué pour {cred_label_clone}", ip)
                 },
@@ -491,12 +505,7 @@ impl RuntimeServices {
     }
 
     /// Enumerate shares on a host and send result back.
-    pub fn spawn_share_enum(
-        &self,
-        host_node_id: usize,
-        ip: String,
-        hostname: String,
-    ) {
+    pub fn spawn_share_enum(&self, host_node_id: usize, ip: String, hostname: String) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -511,9 +520,17 @@ impl RuntimeServices {
             let shares = if result.is_ok() {
                 match client.enum_shares_with_access().await {
                     Ok(shares) => {
-                        let formatted: Vec<String> = shares.iter().map(|s| {
-                            format!("{} [{}] ({})", s.name, s.share_type.display_str(), s.access.display_str())
-                        }).collect();
+                        let formatted: Vec<String> = shares
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    "{} [{}] ({})",
+                                    s.name,
+                                    s.share_type.display_str(),
+                                    s.access.display_str()
+                                )
+                            })
+                            .collect();
                         let _ = tx.send(RuntimeEvent::Log {
                             level: LogLevel::Success,
                             message: format!("{ip_clone}: {} share(s) trouvé(s)", formatted.len()),
@@ -560,15 +577,22 @@ impl RuntimeServices {
             let target = format!("\\\\{ip_clone}");
             let result = tokio::task::spawn_blocking(move || {
                 getexec_protocols::smb::users::enum_users(&target)
-            }).await;
+            })
+            .await;
 
             let users = match result {
                 Ok(Ok(user_list)) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
-                        message: format!("{ip_clone}: {} utilisateur(s) trouvé(s)", user_list.len()),
+                        message: format!(
+                            "{ip_clone}: {} utilisateur(s) trouvé(s)",
+                            user_list.len()
+                        ),
                     });
-                    user_list.into_iter().map(|u| (u.name, u.disabled, u.locked, u.privilege_level)).collect()
+                    user_list
+                        .into_iter()
+                        .map(|u| (u.name, u.disabled, u.locked, u.privilege_level))
+                        .collect()
                 }
                 Ok(Err(e)) => {
                     let _ = tx.send(RuntimeEvent::Log {
@@ -702,7 +726,15 @@ impl RuntimeServices {
         });
     }
 
-    pub fn spawn_enum_av(&self, host_node_id: usize, ip: String, hostname: String, username: String, domain: String, secret: String) {
+    pub fn spawn_enum_av(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        username: String,
+        domain: String,
+        secret: String,
+    ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -718,7 +750,8 @@ impl RuntimeServices {
 
             let (products, error) = match result {
                 Ok(av_result) => {
-                    let lines: Vec<String> = av_result.products.iter().map(|p| p.to_line()).collect();
+                    let lines: Vec<String> =
+                        av_result.products.iter().map(|p| p.to_line()).collect();
                     if lines.is_empty() {
                         let _ = tx.send(RuntimeEvent::Log {
                             level: LogLevel::Warning,
@@ -898,7 +931,8 @@ impl RuntimeServices {
                 } else {
                     delete_remote_file(&p)
                 }
-            }).await;
+            })
+            .await;
             match result {
                 Ok(Ok(())) => {
                     let _ = tx.send(RuntimeEvent::FileOpResult {
@@ -947,7 +981,11 @@ impl RuntimeServices {
                     let _ = tx.send(RuntimeEvent::FingerprintResult {
                         ip,
                         hostname: fp.hostname,
-                        domain: if fp.dns_domain.is_empty() { fp.domain } else { fp.dns_domain },
+                        domain: if fp.dns_domain.is_empty() {
+                            fp.domain
+                        } else {
+                            fp.dns_domain
+                        },
                         os_info: fp.os_info,
                         signing: fp.signing,
                         smbv1: fp.smbv1,
@@ -1002,10 +1040,7 @@ impl RuntimeServices {
                         match SmbCredential::with_hash(&username, &domain, &secret) {
                             Ok(c) => c,
                             Err(e) => {
-                                return (
-                                    Err(format!("hash invalide: {e}")),
-                                    Vec::<String>::new(),
-                                );
+                                return (Err(format!("hash invalide: {e}")), Vec::<String>::new());
                             }
                         }
                     }

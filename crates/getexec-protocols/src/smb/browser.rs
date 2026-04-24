@@ -1,8 +1,8 @@
-use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
-    CopyFileW, CreateDirectoryW, DeleteFileW, FindClose, FindFirstFileW,
-    FindNextFileW, RemoveDirectoryW, WIN32_FIND_DATAW, FILE_ATTRIBUTE_DIRECTORY,
+    CopyFileW, CreateDirectoryW, DeleteFileW, FILE_ATTRIBUTE_DIRECTORY, FindClose, FindFirstFileW,
+    FindNextFileW, RemoveDirectoryW, WIN32_FIND_DATAW,
 };
+use windows::core::PCWSTR;
 
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -47,11 +47,15 @@ pub fn list_directory(unc_path: &str) -> Result<Vec<RemoteEntry>, String> {
         }
     }
 
-    unsafe { let _ = FindClose(handle); }
+    unsafe {
+        let _ = FindClose(handle);
+    }
 
     // Sort: directories first, then alphabetical
     entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
     Ok(entries)
@@ -96,13 +100,7 @@ pub fn download_file(remote_path: &str, local_path: &str) -> Result<(), String> 
 pub fn upload_file(local_path: &str, remote_path: &str) -> Result<(), String> {
     let wide_src = to_wide_null(local_path);
     let wide_dst = to_wide_null(remote_path);
-    let ok = unsafe {
-        CopyFileW(
-            PCWSTR(wide_src.as_ptr()),
-            PCWSTR(wide_dst.as_ptr()),
-            false,
-        )
-    };
+    let ok = unsafe { CopyFileW(PCWSTR(wide_src.as_ptr()), PCWSTR(wide_dst.as_ptr()), false) };
     match ok {
         Ok(()) => Ok(()),
         Err(e) => Err(format!("Upload failed: {e}")),
@@ -112,9 +110,7 @@ pub fn upload_file(local_path: &str, remote_path: &str) -> Result<(), String> {
 /// Create a directory at a remote UNC path.
 pub fn create_directory(unc_path: &str) -> Result<(), String> {
     let wide = to_wide_null(unc_path);
-    let ok = unsafe {
-        CreateDirectoryW(PCWSTR(wide.as_ptr()), None)
-    };
+    let ok = unsafe { CreateDirectoryW(PCWSTR(wide.as_ptr()), None) };
     match ok {
         Ok(()) => Ok(()),
         Err(e) => Err(format!("CreateDirectory failed: {e}")),

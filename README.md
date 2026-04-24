@@ -1,38 +1,350 @@
-# getexec-rs
+# NetRaze
 
-Workspace Rust pour un portage progressif et industrialisable de Getexec.
+[![CI](https://img.shields.io/badge/CI-Linux%20%2B%20Windows-brightgreen)](.github/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-BSD--2--Clause-blue)](#license)
+[![Rust Edition](https://img.shields.io/badge/rust-2024%20edition%20%28MSRV%201.85%29-orange)](rust-toolchain.toml)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20port%20in%20progress-yellow)](#current-status)
 
-## Principes d'architecture
+**NetRaze** is an offensive network-execution toolkit, rewritten from scratch
+in pure Rust. It is the spiritual successor to the NetExec / CrackMapExec
+lineage — same workflow (enumerate, authenticate, execute, post-exploit),
+but with a memory-safe backend, a single static binary, and a built-in
+desktop workflow graph.
 
-- `getexec-core` expose le langage commun du domaine: targets, auth, protocoles, modules, résultats.
-- `getexec-app` orchestre le bootstrap, l'injection des services et les registres.
-- `getexec-cli` reste mince: parsing des arguments, sélection des workflows, rendu utilisateur.
-- `getexec-protocols` regroupe les implémentations natives par protocole, avec un registre extensible.
-- `getexec-modules` sépare les modules métier des protocoles et prépare un futur système de plugins.
-- `getexec-storage`, `getexec-config`, `getexec-output`, `getexec-runtime`, `getexec-targets`, `getexec-auth` isolent les préoccupations transversales.
-- `xtask` porte l'automatisation de build, génération et qualité.
+This repository is the **active port**. The mature Python reference
+([NetExec](https://github.com/Pennyw0rth/NetExec)) lives alongside it in the
+sibling directory and remains the tool you should use for real engagements
+while the Rust port catches up.
 
-## Objectif
+---
 
-Cette structure est pensée pour supporter:
+## Table of contents
 
-- un portage incrémental protocole par protocole;
-- une croissance vers plusieurs binaires et services internes;
-- l'ajout futur de plugins, exports, workflows distribués et intégrations CI.
+- [Why NetRaze](#why-netraze)
+- [Current status](#current-status)
+- [What's inside](#whats-inside)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Desktop GUI](#desktop-gui)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Validation methodology](#validation-methodology)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Related projects](#related-projects)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
+- [Legal disclaimer](#legal-disclaimer)
 
-## Démarrage
+---
 
-```powershell
-cargo run -p getexec-cli -- --help
-cargo run -p getexec-desktop
-cargo check
+## Why NetRaze
+
+NetExec and Impacket are the de-facto standard for Windows network
+post-exploitation, and they are excellent. The Python stack has two
+long-term pain points that get worse as the tool grows:
+
+1. **Cold-start latency.** A Python import chain of ~200 modules means every
+   `nxc` invocation pays 400–800 ms before the first packet goes out.
+   Disruptive during iteration on large target sets.
+2. **Packaging and deployment.** Operator laptops, red-team C2 relays, and
+   CI runners all want a single static artifact. A Python tree with native
+   extensions (Impacket, pycryptodome, LDAP3) is hostile to that.
+
+NetRaze keeps the NetExec model — protocol handlers, post-auth modules,
+workspace-per-engagement — and rebases it on:
+
+- **Pure Rust wire code.** No FFI bindings to Impacket or Samba. The
+  DCE/RPC NDR walker, NTLMSSP, and SMB2 framing are re-implemented and
+  validated byte-for-byte against Impacket-generated fixtures.
+- **Single-binary distribution.** `cargo build --release` produces one
+  executable per binary crate.
+- **Async I/O from the ground up.** `tokio` across the board, not retrofitted
+  onto a synchronous Python core.
+- **Desktop workflow graph.** An `egui`/`egui-snarl` canvas for composing
+  offensive workflows visually, complementing the headless CLI.
+
+## Current status
+
+NetRaze is **alpha**. The core engineering foundations are solid, but the
+protocol coverage is narrow. This table reflects what is actually
+working — not what is planned.
+
+### Protocol stack
+
+| Protocol | Wire layer | Auth | Enumeration | Execution |
+|---|---|---|---|---|
+| SMB2 / SMB3 | Negotiate, TreeConnect | NTLMv2 (validated against Samba) | Shares (SRVSVC), Users | Not yet |
+| LDAP | Scaffold | — | — | — |
+| WinRM | Scaffold | — | — | — |
+| MSSQL, SSH, RDP, FTP, NFS, VNC, WMI | Scaffold | — | — | — |
+
+### DCE/RPC stack (`getexec-dcerpc`)
+
+- NDR20 reader/writer with BFS deferred-pointer walker (conformant arrays,
+  unique/ref pointers, unions with pointer arms)
+- MS-RPCE PDU framing (Bind, Request, Response, Fault)
+- NTLMSSP auth verifier including seal/unseal (RC4 + HMAC-MD5 v2)
+- MS-SRVS interface: `NetrShareEnum` request/response validated against
+  Impacket-generated byte fixtures
+
+### Post-exploitation primitives (SMB-gated)
+
+- Host fingerprinting
+- Share enumeration
+- User enumeration
+- SAM hive access (Windows host)
+- AV enumeration (Windows host)
+
+### What is explicitly **not yet** implemented
+
+- `FSCTL_PIPE_TRANSCEIVE` — blocks full DCE/RPC over SMB named pipes.
+  This is the next major milestone.
+- SMB signing and encryption negotiation against the target.
+- Kerberos / AES-based authentication (only NTLMv2 today).
+- Relay attacks, coercion, ADCS abuse (planned as modules once the
+  DCE/RPC-over-pipe path is unblocked).
+
+## What's inside
+
+This is a Cargo workspace of 14 crates. The hard rule: **`getexec-core`
+depends on nothing applicative; `getexec-cli` contains no protocol
+logic**. Everything else flows from those two constraints.
+
+| Crate | Purpose |
+|---|---|
+| `getexec-core` | Domain contracts: `ProtocolMetadata`, `ModuleMetadata`, `ScanRequest`, `Capability`, error types. |
+| `getexec-app` | Composition root. `GetexecApp::bootstrap()` wires registries and services. |
+| `getexec-cli` | Thin CLI binary (`clap`). Maps arguments to use-cases. |
+| `getexec-desktop` | `egui`/`eframe` GUI with `egui-snarl` workflow graph and `egui_graphs` network view. |
+| `getexec-protocols` | Wire-level protocol handlers (SMB is the only one significantly implemented). |
+| `getexec-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth, MS-SRVS interface. |
+| `getexec-modules` | Post-exploitation modules organised by category (`active_directory`, `credentials`, `reconnaissance`). |
+| `getexec-auth` | Credential types and authentication methods. |
+| `getexec-targets` | Target parsing and normalisation. |
+| `getexec-config` | `AppConfig`, `WorkspaceConfig`, `RuntimeConfig`. |
+| `getexec-storage` | `WorkspaceStore` trait with an in-memory implementation (SQLite backend planned). |
+| `getexec-output` | Console reporting, output events. |
+| `getexec-runtime` | Concurrency, timeouts, async orchestration. |
+| `xtask` | Build automation stub. |
+
+See [`docs/architecture.md`](docs/architecture.md) for the full dependency
+graph and [`docs/migration-roadmap.md`](docs/migration-roadmap.md) for
+phased delivery.
+
+## Installation
+
+No published crates yet. Build from source:
+
+```shell
+git clone https://github.com/<your-org>/NetRaze.git
+cd NetRaze
+cargo build --release
 ```
 
-## GUI Desktop
+The CLI lands at `target/release/getexec-cli` and the desktop at
+`target/release/getexec-desktop` (Windows: `.exe`).
 
-La GUI native cross-platform est dans [crates/getexec-desktop](crates/getexec-desktop) et utilise:
+### Linux prerequisites
 
-- `egui` + `eframe` pour l'application desktop
-- `egui-snarl` pour le canvas node graph de workflow offensif
-- `egui_graphs` pour la vue réseau interactive
-- `tokio` + channels pour les tâches asynchrones et les logs temps réel
+The desktop GUI links against X11/Wayland/GTK headers. On Debian/Ubuntu:
+
+```shell
+sudo apt install -y \
+  libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libwayland-dev libgtk-3-dev build-essential pkg-config
+```
+
+The CLI-only build needs none of these.
+
+### Windows prerequisites
+
+Rust toolchain 1.85+ via `rustup`, and the MSVC build tools. No other
+system dependencies.
+
+## Quick start
+
+### List available protocols and modules
+
+```shell
+cargo run -p getexec-cli -- protocols
+cargo run -p getexec-cli -- modules
+```
+
+### Plan a scan
+
+```shell
+cargo run -p getexec-cli -- plan smb 10.10.10.0/24 --module shares
+```
+
+The CLI today stops at **planning** (validating targets, resolving the
+protocol handler, computing concurrency). Execution is wired through the
+GUI for now; the headless execution path is part of the next milestone.
+
+## Desktop GUI
+
+The GUI (`getexec-desktop`) is a node-graph workspace where each host,
+share listing, user listing, and post-exploitation action is a node
+connected by data-flow edges. This is the primary interface for
+interactive workflows today.
+
+```shell
+cargo run -p getexec-desktop
+```
+
+Backend is `wgpu` by default, which works natively on Linux (Vulkan),
+Windows (DX12), macOS (Metal), and in WSL (via Lavapipe software
+fallback).
+
+## Architecture
+
+Layered, with one-way dependencies:
+
+```
+               getexec-cli      getexec-desktop
+                     \             /
+                      getexec-app
+                           |
+   ┌──────────────┬────────┼─────────┬──────────────┐
+   |              |        |         |              |
+getexec-      getexec-  getexec-   getexec-     getexec-
+protocols     modules   dcerpc     auth         targets
+   \              \        /         /             /
+    \──────────── getexec-core ──────────────────/
+                           |
+         (transversal: config, output, runtime, storage)
+```
+
+Rules enforced in code review:
+
+- `getexec-core` has no applicative dependencies.
+- Protocol and module crates never depend on the CLI.
+- `getexec-app` is the only crate allowed to know almost everything.
+- Shared logic ratchets *up* into `getexec-core` or a transversal crate —
+  never stays buried in a protocol crate.
+
+Full write-up in [`docs/architecture.md`](docs/architecture.md).
+
+## Development
+
+### Daily commands
+
+```shell
+cargo check --workspace              # type-check
+cargo clippy -p getexec-dcerpc -- -D warnings   # strict gate for new code
+cargo test --workspace               # run all unit + integration tests
+cargo fmt --all                      # format
+```
+
+### Per-crate testing
+
+```shell
+cargo test -p getexec-dcerpc         # NDR / PDU / NTLMSSP / SRVSVC suites
+cargo test -p getexec-protocols      # SMB crypto, NTLM vectors
+```
+
+### CI gate
+
+`.github/workflows/ci.yml` enforces, on every push and PR:
+
+1. `cargo fmt --all --check` (Linux).
+2. Strict clippy on `getexec-dcerpc` (the new pure-Rust stack has zero
+   warning tolerance); advisory clippy on the rest of the workspace.
+3. `cargo check --workspace --all-targets` on both **Ubuntu** and
+   **Windows**.
+4. Full `cargo test --workspace` on both OS.
+5. An opt-in `samba-integration` job that spins up the pinned Samba
+   container (see below) and runs the live SMB2 smoke tests. Triggered
+   by `workflow_dispatch` or pushes to `main`.
+
+## Validation methodology
+
+A wire-level offensive toolkit is only as trustworthy as its test harness.
+Three independent layers protect the SMB/DCE-RPC stack:
+
+1. **Known-answer vectors for crypto.** NTLMv2 response, NTOWFv2,
+   SIGN/SEAL key derivation, and RC4 keystream are validated against
+   MS-NLMP test vectors. Any drift is caught before a single packet is
+   built.
+2. **Impacket-pinned byte fixtures for NDR.** Python scripts in
+   `crates/getexec-dcerpc/tests/` use the Impacket library to generate
+   exact bytes for `NetrShareEnum` requests and responses, which are
+   then baked into Rust tests. Any divergence in our encoder/decoder is
+   a test failure with a clear byte-level diff.
+3. **Live Samba integration harness.** `tests/samba/` ships a
+   `docker-compose.yml` + `smb.conf` that pin a Samba server with a
+   known share inventory. Rust integration tests in
+   `crates/getexec-protocols/tests/samba_integration.rs` drive SMB2
+   Negotiate + NTLMv2 Session Setup + Tree Connect against the real
+   daemon, proving the wire is not just internally consistent but
+   actually interoperable.
+
+See [`tests/samba/README.md`](tests/samba/README.md) for how to run the
+integration suite locally.
+
+## Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| Phase 0 | Workspace hygiene, wgpu backend, CI matrix | Done |
+| Phase 1 | DCE/RPC primitives, NTLMSSP, SMB2 auth, SRVSVC, Samba harness | Done |
+| Phase 2 | SMB2 IOCTL / FSCTL_PIPE_TRANSCEIVE, SMB signing, SAM RemoteOperations, SQLite workspace, CLI execution path | In progress |
+| Phase 3 | Split `getexec-protocols` per protocol, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
+| Phase 4 | Integration test corpus, network fixtures, TUI or machine-friendly API, Kerberos | Planned |
+
+Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
+
+## Contributing
+
+This is an early-stage port. The highest-leverage contributions right now:
+
+- **SMB2 IOCTL support**, unlocking the full DCE/RPC-over-named-pipe
+  path and most of the interesting post-exploitation surface.
+- **SMB signing**, required to talk to hardened targets.
+- **Per-protocol crates** as NetRaze grows beyond SMB.
+- **Impacket-pinned fixtures** for each new DCE/RPC interface added
+  (see `crates/getexec-dcerpc/tests/gen_*.py` for the pattern).
+
+Before opening a PR, please ensure:
+
+- `cargo fmt --all --check` passes.
+- `cargo clippy -p getexec-dcerpc -- -D warnings` passes.
+- `cargo test --workspace` passes on your OS. If you touched SMB2 or
+  NTLMSSP code, run the Samba integration suite too.
+
+## Related projects
+
+- **[NetExec](https://github.com/Pennyw0rth/NetExec)** — the mature Python
+  tool this port descends from. Use it today for real engagements.
+- **[CrackMapExec](https://github.com/byt3bl33d3r/CrackMapExec)** — the
+  original project by @byt3bl33d3r (2015), which NetExec forked from in
+  2023.
+- **[Impacket](https://github.com/fortra/impacket)** — the reference
+  Python library for MS-RPCE, DCE/RPC interfaces (SRVSVC, SAMR, LSAD,
+  WKSSVC, RPRN, …), NTLMv2, and Kerberos. NetRaze validates its wire
+  output against Impacket-generated byte fixtures.
+
+## Acknowledgments
+
+Technical inspiration and protocol know-how come from the years of work
+put into **CrackMapExec** by @byt3bl33d3r and subsequent maintainers, and
+into **NetExec** by @NeffIsBack, @Marshall-Hallenbeck, @zblurx, @mpgn,
+and the wider contributor community. The MS-RPCE / MS-NLMP / MS-SMB2
+specs from Microsoft, plus Impacket's reference implementation, have
+been essential ground truth throughout the port.
+
+## License
+
+Licensed under the BSD 2-Clause License. See the `license` field in
+[`Cargo.toml`](Cargo.toml).
+
+## Legal disclaimer
+
+NetRaze is intended **exclusively** for authorised security assessments
+— your own infrastructure, engagements covered by a signed statement of
+work, or purpose-built lab environments. Running it against systems you
+do not own or do not have explicit written permission to test is
+illegal in virtually every jurisdiction and will not be supported by
+the maintainers. You are solely responsible for how you use this
+software.

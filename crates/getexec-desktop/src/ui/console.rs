@@ -35,12 +35,7 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
-    pub fn new(
-        id: u64,
-        host_ip: String,
-        hostname: String,
-        credential: CredentialRecord,
-    ) -> Self {
+    pub fn new(id: u64, host_ip: String, hostname: String, credential: CredentialRecord) -> Self {
         let cred_label = if credential.domain.is_empty() || credential.domain == "." {
             format!(".\\{}", credential.username)
         } else {
@@ -61,7 +56,11 @@ impl ConsoleState {
     }
 
     pub fn push_result(&mut self, command: String, output: String, error: Option<String>) {
-        self.history.push(ConsoleEntry { command, output, error });
+        self.history.push(ConsoleEntry {
+            command,
+            output,
+            error,
+        });
         self.pending = false;
         self.request_focus = true;
     }
@@ -172,8 +171,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                 );
                 let button_width = 54.0;
                 let spacing = 12.0;
-                let edit_width =
-                    (ui.available_width() - button_width - spacing).max(120.0);
+                let edit_width = (ui.available_width() - button_width - spacing).max(120.0);
                 let resp = ui.add_enabled(
                     !console.pending,
                     egui::TextEdit::singleline(&mut console.input)

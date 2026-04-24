@@ -33,11 +33,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
             for proto in [
                 "SMB", "LDAP", "RDP", "WinRM", "MSSQL", "SSH", "FTP", "Kerberos",
             ] {
-                ui.selectable_value(
-                    &mut state.target_config.protocol,
-                    proto.to_owned(),
-                    proto,
-                );
+                ui.selectable_value(&mut state.target_config.protocol, proto.to_owned(), proto);
             }
         });
 
@@ -180,12 +176,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
             .filter(|s| !s.is_empty())
             .collect();
 
-        runtime.spawn_smb_scan(
-            targets,
-            credential,
-            state.threads,
-            state.timeout_seconds,
-        );
+        runtime.spawn_smb_scan(targets, credential, state.threads, state.timeout_seconds);
     }
 
     // -- Selected host details --

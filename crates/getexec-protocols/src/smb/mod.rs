@@ -6,11 +6,11 @@ pub(crate) const NOT_PORTED: &str =
 
 // Portable modules — pure-Rust, compile on every platform.
 pub mod crypto;
-pub mod hive;
-pub mod sam;
-pub mod ntlm;
-pub mod smb2;
 pub mod fingerprint;
+pub mod hive;
+pub mod ntlm;
+pub mod sam;
+pub mod smb2;
 
 // Platform-gated modules. The Windows versions use native APIs
 // (WNet / NetAPI / SCM / Registry). The Linux stubs mirror the exact public
@@ -64,16 +64,19 @@ pub mod exec;
 #[path = "stubs/exec.rs"]
 pub mod exec;
 
+pub use browser::{
+    RemoteEntry, create_directory, delete_remote_directory, delete_remote_file, download_file,
+    format_size, list_directory, upload_file,
+};
 pub use connection::SmbCredential;
-pub use exec::{execute_command, execute_command_live, execute_command_traced};
-pub use shares::{ShareInfo, ShareAccess};
-pub use browser::{RemoteEntry, list_directory, format_size, download_file, upload_file, create_directory, delete_remote_file, delete_remote_directory};
-pub use info::ServerInfo;
-pub use users::UserInfo;
-pub use sam::SamHash;
-pub use dump::{SamDumpResult, LsaDumpResult, remote_dump_sam, remote_dump_lsa};
+pub use dump::{LsaDumpResult, SamDumpResult, remote_dump_lsa, remote_dump_sam};
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
+pub use exec::{execute_command, execute_command_live, execute_command_traced};
 pub use fingerprint::{SmbFingerprint, fingerprint as smb_fingerprint};
+pub use info::ServerInfo;
+pub use sam::SamHash;
+pub use shares::{ShareAccess, ShareInfo};
+pub use users::UserInfo;
 
 use crate::StaticProtocolFactory;
 use getexec_core::Capability;
@@ -158,11 +161,10 @@ impl SmbClient {
         }
 
         // Standard WNet path for password-based auth
-        let result = tokio::task::spawn_blocking(move || {
-            connection::connect_ipc(&target, cred.as_ref())
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+        let result =
+            tokio::task::spawn_blocking(move || connection::connect_ipc(&target, cred.as_ref()))
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
         match result {
             Ok(()) => {
@@ -183,10 +185,7 @@ impl SmbClient {
         }
         if self.connected {
             let target = self.target.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                connection::disconnect_ipc(&target)
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || connection::disconnect_ipc(&target)).await;
             self.connected = false;
         }
     }
