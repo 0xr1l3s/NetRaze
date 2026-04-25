@@ -183,12 +183,19 @@ pub fn compute_ntlmv2(
 }
 
 /// Build NTLMSSP Authenticate message (Type 3).
+///
+/// Returns `(message_bytes, exported_session_key)`. The exported session key is
+/// the random 16-byte key generated client-side for `NEGOTIATE_KEY_EXCH`; it is
+/// the actual NTLMv2 ExportedSessionKey per MS-NLMP §3.4.5.3 and is what every
+/// downstream consumer (SMB signing, DCE/RPC NTLMSSP seal/sign) must derive
+/// from. The session_base_key only ever encrypts this random key inside the
+/// AUTHENTICATE message — never use it directly outside of this function.
 pub fn build_authenticate(
     auth: &NtlmV2Auth,
     username: &str,
     domain: &str,
     _server_flags: u32,
-) -> Vec<u8> {
+) -> (Vec<u8>, [u8; 16]) {
     let domain_utf16: Vec<u8> = domain
         .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
@@ -199,7 +206,9 @@ pub fn build_authenticate(
         .collect();
     let workstation_utf16: Vec<u8> = Vec::new();
 
-    // Encrypted random session key (KEY_EXCH)
+    // Encrypted random session key (KEY_EXCH). The random key here IS the
+    // ExportedSessionKey — we return it to the caller so SMB signing /
+    // DCE-RPC sealing can derive their own keys from it.
     let random_session_key = rand_bytes::<16>();
     let encrypted_session_key =
         super::crypto::rc4_transform(&random_session_key, &auth.session_base_key)
@@ -239,7 +248,7 @@ pub fn build_authenticate(
     msg.extend_from_slice(&workstation_utf16);
     msg.extend_from_slice(&encrypted_session_key);
 
-    msg
+    (msg, random_session_key)
 }
 
 // ── SPNEGO wrappers ──

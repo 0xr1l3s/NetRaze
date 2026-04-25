@@ -79,6 +79,11 @@ pub struct Smb2Session {
     stream: TcpStream,
     session_id: u64,
     message_id: u64,
+    /// NTLMv2 ExportedSessionKey captured during `session_setup`. Required by
+    /// `RpcChannel::bind_authenticated` to derive the NTLMSSP seal/sign keys
+    /// for DCE/RPC PKT_PRIVACY over the named-pipe transport. `None` until
+    /// the handshake completes; cleared by `logoff`.
+    session_key: Option<[u8; 16]>,
 }
 
 impl Smb2Session {
@@ -118,6 +123,7 @@ impl Smb2Session {
             stream,
             session_id: 0,
             message_id: 0,
+            session_key: None,
         };
 
         session.negotiate()?;
@@ -481,6 +487,18 @@ impl Smb2Session {
         packet.extend_from_slice(&body);
         let _ = self.send_packet(&packet);
         let _ = self.recv_packet();
+        // Drop the session key — any subsequent RPC bind would have nothing
+        // valid to seal with anyway, and we don't want a stale key sitting
+        // in memory after the session is closed.
+        self.session_key = None;
+    }
+
+    /// NTLMv2 ExportedSessionKey for this session, or `None` if the handshake
+    /// hasn't completed (or if `logoff` was called). DCE/RPC layers (Phase A
+    /// and beyond) seed `NtlmAuthenticator` from this value to derive the
+    /// PKT_PRIVACY seal/sign keys.
+    pub fn exported_session_key(&self) -> Option<[u8; 16]> {
+        self.session_key
     }
 
     // ── Internal protocol methods ──
@@ -560,7 +578,8 @@ impl Smb2Session {
 
         // === Round 2: NTLMv2 Authenticate ===
         let auth = ntlm::compute_ntlmv2(nt_hash, username, domain, &challenge)?;
-        let auth_msg = ntlm::build_authenticate(&auth, username, domain, challenge.negotiate_flags);
+        let (auth_msg, exported_session_key) =
+            ntlm::build_authenticate(&auth, username, domain, challenge.negotiate_flags);
         let spnego2 = ntlm::wrap_spnego_resp(&auth_msg);
 
         let hdr2 = self.build_header(SMB2_SESSION_SETUP, 0);
@@ -579,6 +598,11 @@ impl Smb2Session {
             self.session_id = 0;
             return Err(format!("Authentication failed: 0x{status2:08x}"));
         }
+
+        // Stash the ExportedSessionKey now that the server has confirmed the
+        // AUTHENTICATE message. `RpcChannel::bind_authenticated` will read it
+        // back via `exported_session_key()` to build its NTLMSSP authenticator.
+        self.session_key = Some(exported_session_key);
 
         Ok(())
     }
