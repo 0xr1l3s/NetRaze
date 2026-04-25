@@ -2,10 +2,10 @@ pub mod config_panel;
 pub mod console;
 pub mod credentials_panel;
 pub mod log_panel;
-pub mod module_library;
 pub mod network_view;
 pub mod share_browser;
 pub mod targets_table;
+pub mod credential_manager;
 pub mod workflow_canvas;
 
 use crate::app;
@@ -37,8 +37,8 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
 
                 let tabs = [
                     (crate::state::NavTab::Workspace, "Workspace"),
-                    (crate::state::NavTab::Modules, "Modules"),
-                    (crate::state::NavTab::Targets, "Targets"),
+                    (crate::state::NavTab::Target, "Target"),
+                    (crate::state::NavTab::Module, "Module"),
                     (crate::state::NavTab::Settings, "Settings"),
                 ];
                 for (tab, label) in tabs {
@@ -62,6 +62,31 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                         state.nav_tab = tab;
                     }
                 }
+
+                // Tools dropdown menu (styled exactly like the other tabs)
+                let tools_selected = state.nav_tab == crate::state::NavTab::CredentialManager;
+                let tools_text = if tools_selected {
+                    egui::RichText::new("Tools")
+                        .strong()
+                        .color(egui::Color32::WHITE)
+                } else {
+                    egui::RichText::new("Tools").color(TEXT_DIM)
+                };
+                let tools_btn = egui::Button::new(tools_text)
+                    .fill(if tools_selected {
+                        ACCENT
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .corner_radius(egui::CornerRadius::same(3))
+                    .stroke(egui::Stroke::NONE);
+                let tools_response = ui.add(tools_btn);
+                egui::Popup::menu(&tools_response).show(|ui| {
+                    if ui.button("🔐 Credential Manager").clicked() {
+                        state.nav_tab = crate::state::NavTab::CredentialManager;
+                        ui.close();
+                    }
+                });
 
                 ui.add_space(12.0);
                 ui.colored_label(SEPARATOR, "|");
@@ -96,22 +121,6 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                     ui.label(egui::RichText::new(indicator).color(color).strong().small());
                 });
             });
-        });
-}
-
-pub fn show_left_panel(ctx: &egui::Context, state: &mut AppState, _runtime: &RuntimeServices) {
-    egui::SidePanel::left("left_panel")
-        .default_width(175.0)
-        .width_range(130.0..=260.0)
-        .resizable(true)
-        .frame(egui::Frame {
-            fill: BAR_BG,
-            inner_margin: egui::Margin::same(8),
-            stroke: egui::Stroke::new(0.5, SEPARATOR),
-            ..Default::default()
-        })
-        .show(ctx, |ui| {
-            module_library::show(ui, state);
         });
 }
 

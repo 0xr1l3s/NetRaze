@@ -174,7 +174,6 @@ impl eframe::App for NetRazeDesktopApp {
         ui::show_top_bar(ctx, &mut self.state, &self.runtime);
         ui::show_status_bar(ctx, &mut self.state);
         ui::show_bottom_panel(ctx, &mut self.state);
-        ui::show_left_panel(ctx, &mut self.state, &self.runtime);
         ui::show_right_panel(ctx, &mut self.state, &self.runtime);
 
         egui::CentralPanel::default()
@@ -182,8 +181,11 @@ impl eframe::App for NetRazeDesktopApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 match self.state.nav_tab {
-                    crate::state::NavTab::Targets => {
+                    crate::state::NavTab::Target => {
                         ui::targets_table::show(ui, &mut self.state);
+                    }
+                    crate::state::NavTab::CredentialManager => {
+                        ui::credential_manager::show(ui, &mut self.state);
                     }
                     _ => {
                         ui::workflow_canvas::show(ui, &mut self.state);

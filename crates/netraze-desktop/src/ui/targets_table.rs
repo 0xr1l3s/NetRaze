@@ -9,9 +9,9 @@ const SEPARATOR: Color32 = Color32::from_rgb(40, 46, 58);
 const GREEN: Color32 = Color32::from_rgb(80, 200, 120);
 const BLUE: Color32 = Color32::from_rgb(80, 170, 255);
 const YELLOW: Color32 = Color32::from_rgb(220, 200, 60);
-const DOT_COLOR: Color32 = Color32::from_rgb(38, 44, 56);
+const DOT_COLOR: Color32 = Color32::from_rgb(40, 46, 58);
 const DOT_SPACING: f32 = 20.0;
-const DOT_RADIUS: f32 = 1.0;
+const DOT_RADIUS: f32 = 0.8;
 const ROW_H: f32 = 30.0;
 
 struct FlatHost {
@@ -30,6 +30,8 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     // ── Draw dot-grid background (same as workspace canvas) ──
     let full_rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
+    // Fill with the same dark base color used by the workspace snarl canvas
+    painter.rect_filled(full_rect, 0.0, Color32::from_rgb(18, 21, 28));
     let min_x = (full_rect.min.x / DOT_SPACING).floor() as i32;
     let max_x = (full_rect.max.x / DOT_SPACING).ceil() as i32;
     let min_y = (full_rect.min.y / DOT_SPACING).floor() as i32;
