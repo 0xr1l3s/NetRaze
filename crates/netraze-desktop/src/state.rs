@@ -7,8 +7,9 @@ use crate::workflow::{WorkflowDocument, WorkflowNode};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavTab {
     Workspace,
-    Modules,
-    Targets,
+    Target,
+    Module,
+    CredentialManager,
     Settings,
 }
 
@@ -60,12 +61,6 @@ pub struct CredentialRecord {
     pub valid: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ModuleCategory {
-    pub name: String,
-    pub items: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub level: LogLevel,
@@ -91,7 +86,6 @@ pub struct AppState {
     pub nav_tab: NavTab,
     pub workflow: WorkflowDocument,
     pub logs: Vec<LogLine>,
-    pub module_categories: Vec<ModuleCategory>,
     pub selected_module: String,
     pub dragged_module: Option<String>,
     pub credentials: Vec<CredentialRecord>,
@@ -138,40 +132,6 @@ impl AppState {
             nav_tab: NavTab::Workspace,
             workflow: WorkflowDocument::with_default_chain(),
             logs: Vec::new(),
-            module_categories: vec![
-                ModuleCategory {
-                    name: "Enum".to_owned(),
-                    items: vec![
-                        "SMB".to_owned(),
-                        "LDAP".to_owned(),
-                        "RDP".to_owned(),
-                        "WinRM".to_owned(),
-                    ],
-                },
-                ModuleCategory {
-                    name: "Auth".to_owned(),
-                    items: vec![
-                        "Kerberos".to_owned(),
-                        "Pass Spray".to_owned(),
-                        "NTLM".to_owned(),
-                    ],
-                },
-                ModuleCategory {
-                    name: "Exploit".to_owned(),
-                    items: vec!["MSSQL".to_owned(), "SSH".to_owned(), "FTP".to_owned()],
-                },
-                ModuleCategory {
-                    name: "Post".to_owned(),
-                    items: vec![
-                        "--shares".to_owned(),
-                        "--users".to_owned(),
-                        "--pass-pol".to_owned(),
-                        "--sam".to_owned(),
-                        "--lsa".to_owned(),
-                        "--dpapi".to_owned(),
-                    ],
-                },
-            ],
             selected_module: "SMB".to_owned(),
             dragged_module: None,
             credentials: Vec::new(),

@@ -129,7 +129,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
     let run_text = if state.is_running {
         "⏳ Running..."
     } else {
-        "▶ Run Workflow"
+        "▶ Run"
     };
     let run_color = if state.is_running {
         egui::Color32::from_rgb(40, 46, 58)
