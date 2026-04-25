@@ -7,6 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 netraze-core = { path = "../netraze-core" }
+# Pure-Rust DCE/RPC v5 stack — required by `smb::rpc::SmbPipeTransport`,
+# the Phase 3 carrier that lets DCE/RPC PDUs ride over SMB2 named pipes.
+netraze-dcerpc = { path = "../netraze-dcerpc" }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 
 # Pure-Rust crypto stack — replaces `windows::Win32::Security::Cryptography::BCrypt*`.

@@ -28,13 +28,17 @@
 //! - NTLMSSP Negotiate → Challenge → Authenticate dance against real Samba
 //! - NTLMv2 response computed from the NT-hash of `"wonderland"` is accepted
 //! - Tree Connect to `\\server\IPC$` (the RPC-named-pipe entrypoint)
+//! - **Phase 3**: SMB2 CREATE / IOCTL (FSCTL_PIPE_TRANSCEIVE) / CLOSE on
+//!   `\PIPE\srvsvc`, with a hand-rolled DCE/RPC Bind PDU pushed through the
+//!   pipe and a Bind Ack expected back. End-to-end proof that the carrier
+//!   that every Phase 4-6 RPC interface will ride on actually works.
 //!
 //! Does NOT cover (yet):
-//! - FSCTL_PIPE_TRANSCEIVE / DCE-RPC over named pipe — blocked on SMB2 IOCTL
-//!   support in `smb2.rs`. Once that lands, a follow-up integration test in
-//!   `netraze-dcerpc/tests/` will drive the full SRVSVC stack end-to-end.
 //! - SMB signing / encryption — our session-setup path does the NTLM dance
 //!   but does not yet negotiate/enforce SMB signing against Samba.
+//! - Higher-level SRVSVC opnums (NetrShareEnum) — those land in Phase 4
+//!   once the encoder/decoder in `netraze-dcerpc::interfaces::srvsvc` is
+//!   wired through the new pipe transport.
 
 use std::net::TcpStream;
 use std::time::Duration;
@@ -164,4 +168,124 @@ fn bad_password_is_rejected() {
         res.is_err(),
         "Samba accepted a bogus password — NTLMv2 path is broken"
     );
+}
+
+// ─── Phase 3: FSCTL_PIPE_TRANSCEIVE end-to-end against Samba ────────────
+
+/// Hand-roll a DCE/RPC v5 Bind PDU for SRVSVC v3.0 over NDR20.
+///
+/// We craft the bytes here rather than going through `netraze-dcerpc::pdu`
+/// so this test stays a pure protocol-level smoke check — if the dcerpc
+/// PDU encoder later regresses, this test still independently proves the
+/// SMB pipe carrier is correct.
+///
+/// Wire layout (MS-RPCE §2.2.2.13):
+///   header (16 B): rpc_vers=5, type=11 (BIND), pfc_flags=0x03,
+///     drep=10000000 (NDR20 LE/ASCII/IEEE), frag_len, auth_len=0, call_id=1
+///   body  (56 B): max_xmit=4280, max_recv=4280, assoc_group=0,
+///     n_ctx=1 + 3-byte pad, then one ctx item:
+///       ctx_id=0, n_xfer=1 + 1 reserved,
+///       abstract_syntax = SRVSVC UUID (16 LE) + version (3.0 = 4 B),
+///       transfer_syntax = NDR20 UUID (16 LE) + version (2 = 4 B)
+fn build_srvsvc_bind_pdu() -> Vec<u8> {
+    // SRVSVC: 4B324FC8-1670-01D3-1278-5A47BF6EE188 — first 3 fields LE.
+    const SRVSVC_UUID_LE: [u8; 16] = [
+        0xC8, 0x4F, 0x32, 0x4B, 0x70, 0x16, 0xD3, 0x01, 0x12, 0x78, 0x5A, 0x47, 0xBF, 0x6E, 0xE1,
+        0x88,
+    ];
+    // NDR20: 8A885D04-1CEB-11C9-9FE8-08002B104860 — first 3 fields LE.
+    const NDR20_UUID_LE: [u8; 16] = [
+        0x04, 0x5D, 0x88, 0x8A, 0xEB, 0x1C, 0xC9, 0x11, 0x9F, 0xE8, 0x08, 0x00, 0x2B, 0x10, 0x48,
+        0x60,
+    ];
+
+    let mut body = Vec::with_capacity(56);
+    body.extend_from_slice(&4280u16.to_le_bytes()); // max_xmit_frag
+    body.extend_from_slice(&4280u16.to_le_bytes()); // max_recv_frag
+    body.extend_from_slice(&0u32.to_le_bytes()); // assoc_group_id
+    body.push(1); // n_context_elem
+    body.extend_from_slice(&[0u8; 3]); // pad
+    // context item 0
+    body.extend_from_slice(&0u16.to_le_bytes()); // context_id
+    body.push(1); // n_transfer_syn
+    body.push(0); // reserved
+    body.extend_from_slice(&SRVSVC_UUID_LE); // abstract_syntax UUID
+    body.extend_from_slice(&3u16.to_le_bytes()); // version major
+    body.extend_from_slice(&0u16.to_le_bytes()); // version minor
+    body.extend_from_slice(&NDR20_UUID_LE); // transfer_syntax UUID
+    body.extend_from_slice(&2u32.to_le_bytes()); // transfer version
+    debug_assert_eq!(body.len(), 56, "DCE/RPC Bind body must be 56 bytes");
+
+    let frag_len = (16 + body.len()) as u16;
+    let mut pdu = Vec::with_capacity(16 + body.len());
+    pdu.push(5); // rpc_vers
+    pdu.push(0); // rpc_vers_minor
+    pdu.push(11); // PTYPE = BIND
+    pdu.push(0x03); // pfc_flags = FIRST | LAST
+    pdu.extend_from_slice(&[0x10, 0x00, 0x00, 0x00]); // drep: NDR20 LE
+    pdu.extend_from_slice(&frag_len.to_le_bytes());
+    pdu.extend_from_slice(&0u16.to_le_bytes()); // auth_length
+    pdu.extend_from_slice(&1u32.to_le_bytes()); // call_id
+    pdu.extend_from_slice(&body);
+    debug_assert_eq!(pdu.len(), 72);
+    pdu
+}
+
+/// End-to-end: open `\PIPE\srvsvc`, push a SRVSVC Bind PDU through
+/// FSCTL_PIPE_TRANSCEIVE, assert the response is a Bind Ack.
+///
+/// This is the load-bearing Phase 3 smoke test — it exercises every line of
+/// SMB2 CREATE / IOCTL / CLOSE we just added, against a real Samba server.
+#[test]
+#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
+fn pipe_transceive_drives_srvsvc_bind_to_bindack() {
+    if !samba_reachable() {
+        panic!(
+            "Samba container not running at {}. See tests/samba/README.md",
+            samba_addr()
+        );
+    }
+
+    let addr = samba_addr();
+    let mut session =
+        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+            .expect("session_setup must succeed against live Samba");
+
+    let host_only = addr.split(':').next().unwrap_or(&addr);
+    let ipc = session
+        .tree_connect(host_only, "IPC$")
+        .expect("tree_connect IPC$ must succeed");
+
+    // Open the SRVSVC pipe over the IPC$ tree.
+    let pipe = session
+        .pipe_open(ipc, "srvsvc")
+        .expect("pipe_open(srvsvc) must succeed against live Samba");
+    assert_ne!(pipe.file_id, [0u8; 16], "FileId must be non-zero");
+
+    // Transceive a SRVSVC Bind PDU; expect a Bind Ack back.
+    let bind = build_srvsvc_bind_pdu();
+    let resp = session
+        .pipe_transceive(&pipe, &bind)
+        .expect("FSCTL_PIPE_TRANSCEIVE must succeed");
+
+    assert!(
+        resp.len() >= 16,
+        "DCE/RPC response too short for a header: {} bytes",
+        resp.len()
+    );
+    // PDU type at byte offset 2: 12 = BIND_ACK, 13 = BIND_NAK, 11 = BIND.
+    let ptype = resp[2];
+    assert_eq!(
+        ptype,
+        12,
+        "expected BIND_ACK (12), got PTYPE={ptype} (full header: {:02x?})",
+        &resp[..16]
+    );
+    // call_id @ offset 12 must echo our 1.
+    let call_id = u32::from_le_bytes(resp[12..16].try_into().unwrap());
+    assert_eq!(call_id, 1, "Bind Ack must echo call_id=1");
+
+    // Clean shutdown.
+    session.pipe_close(&pipe).expect("pipe_close must succeed");
+    let _ = session.tree_disconnect(ipc);
 }

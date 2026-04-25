@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod fingerprint;
 pub mod hive;
 pub mod ntlm;
+pub mod rpc;
 pub mod sam;
 pub mod smb2;
 
