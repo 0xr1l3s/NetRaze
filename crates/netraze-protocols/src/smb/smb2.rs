@@ -22,12 +22,30 @@ const SMB2_TREE_DISCONNECT: u16 = 4;
 const SMB2_CREATE: u16 = 5;
 const SMB2_CLOSE: u16 = 6;
 const SMB2_READ: u16 = 8;
+const SMB2_IOCTL: u16 = 11;
+
+/// MS-FSCC §2.3 — bidirectional named-pipe transceive. Carrier for DCE/RPC
+/// PDUs over SMB2 (\PIPE\srvsvc, \PIPE\samr, \PIPE\svcctl, \PIPE\wkssvc).
+/// This is the Phase 3 unblocker.
+pub const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_C017;
+
+/// MS-SMB2 §2.2.31 — IOCTL Request flag indicating the CtlCode is an FSCTL
+/// (as opposed to a device-specific IOCTL code).
+pub const SMB2_0_IOCTL_IS_FSCTL: u32 = 0x0000_0001;
+
+/// DesiredAccess we ask for when opening a named pipe over IPC$:
+/// FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_EA
+/// | FILE_WRITE_EA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
+/// | READ_CONTROL | SYNCHRONIZE — matches what Windows / Impacket request.
+const PIPE_DESIRED_ACCESS: u32 = 0x0012_019F;
 
 pub const STATUS_SUCCESS: u32 = 0;
 pub const STATUS_MORE_PROCESSING: u32 = 0xC0000016;
 pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC0000034;
 pub const STATUS_SHARING_VIOLATION: u32 = 0xC0000043;
 pub const STATUS_END_OF_FILE: u32 = 0xC0000011;
+pub const STATUS_PIPE_DISCONNECTED: u32 = 0xC000_00B0;
+pub const STATUS_PIPE_BROKEN: u32 = 0xC000_014B;
 
 /// Error from a raw SMB2 file read.
 #[derive(Debug, Clone)]
@@ -45,6 +63,15 @@ impl SmbReadError {
             SmbReadError::Other(s, ctx) => format!("0x{s:08x} ({ctx})"),
         }
     }
+}
+
+/// Open handle on an SMB2 named pipe. Carries the IPC$ tree id and the
+/// 16-byte pipe FileId — enough to drive `pipe_transceive` and `pipe_close`
+/// with no further state. `Copy` because both fields are POD.
+#[derive(Debug, Clone, Copy)]
+pub struct PipeHandle {
+    pub file_id: [u8; 16],
+    pub tree_id: u32,
 }
 
 /// A minimal raw SMB2 session for pass-the-hash authentication.
@@ -358,6 +385,90 @@ impl Smb2Session {
         Ok(())
     }
 
+    /// Open `\PIPE\<name>` on an already-connected IPC$ tree.
+    ///
+    /// `tree_id` must come from a prior `tree_connect(target, "IPC$")`.
+    /// `name` is the bare pipe leaf with no leading backslash — `"srvsvc"`,
+    /// `"samr"`, `"svcctl"`, `"wkssvc"`, etc.
+    ///
+    /// Returns a `PipeHandle` you pass to `pipe_transceive` and `pipe_close`.
+    /// Phase 3 of the cross-platform portage plan: this is the carrier
+    /// every Phase 4-6 RPC interface (MS-SRVS, MS-SAMR, MS-SVCCTL, MS-WKSSVC,
+    /// MS-WINREG) rides on.
+    pub fn pipe_open(&mut self, tree_id: u32, name: &str) -> Result<PipeHandle, String> {
+        let (body, name_utf16) = build_pipe_create_body(name);
+        let hdr = self.build_header(SMB2_CREATE, tree_id);
+
+        let mut packet = Vec::with_capacity(hdr.len() + body.len() + name_utf16.len());
+        packet.extend_from_slice(&hdr);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(&name_utf16);
+
+        self.send_packet(&packet)?;
+        let resp = self.recv_packet()?;
+
+        let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
+        if status != STATUS_SUCCESS {
+            return Err(format!("pipe_open(\\PIPE\\{name}): 0x{status:08x}"));
+        }
+
+        let file_id = parse_pipe_create_response(&resp)?;
+        Ok(PipeHandle { file_id, tree_id })
+    }
+
+    /// SMB2 IOCTL with `FSCTL_PIPE_TRANSCEIVE`: write `request` to the pipe
+    /// and return whatever the server writes back, all in one round-trip.
+    ///
+    /// This is intentionally synchronous and one-shot — DCE/RPC fragmentation
+    /// happens at a higher layer (in `netraze-dcerpc`), not here. The wire
+    /// `MaxOutputResponse` we ask for is `u16::MAX` worth of bytes, which is
+    /// what Windows pipes negotiate by default; bigger responses come back
+    /// as multiple PDU fragments and the caller drives the loop.
+    pub fn pipe_transceive(
+        &mut self,
+        handle: &PipeHandle,
+        request: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let body = build_pipe_transceive_body(&handle.file_id, request.len() as u32);
+        let hdr = self.build_header(SMB2_IOCTL, handle.tree_id);
+
+        let mut packet = Vec::with_capacity(hdr.len() + body.len() + request.len());
+        packet.extend_from_slice(&hdr);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(request);
+
+        self.send_packet(&packet)?;
+        let resp = self.recv_packet()?;
+
+        let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
+        if status != STATUS_SUCCESS {
+            return Err(format!("pipe_transceive: 0x{status:08x}"));
+        }
+
+        parse_pipe_transceive_response(&resp)
+    }
+
+    /// SMB2 CLOSE on a pipe handle. Idempotent at the protocol level — the
+    /// server returns `STATUS_FILE_CLOSED` (0xC0000128) on a double-close,
+    /// which we surface as an error so the caller can spot the bug.
+    pub fn pipe_close(&mut self, handle: &PipeHandle) -> Result<(), String> {
+        let body = build_pipe_close_body(&handle.file_id);
+        let hdr = self.build_header(SMB2_CLOSE, handle.tree_id);
+
+        let mut packet = Vec::with_capacity(hdr.len() + body.len());
+        packet.extend_from_slice(&hdr);
+        packet.extend_from_slice(&body);
+
+        self.send_packet(&packet)?;
+        let resp = self.recv_packet()?;
+
+        let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
+        if status != STATUS_SUCCESS {
+            return Err(format!("pipe_close: 0x{status:08x}"));
+        }
+        Ok(())
+    }
+
     /// Send SMB2 Logoff.
     pub fn logoff(&mut self) {
         if self.session_id == 0 {
@@ -530,5 +641,273 @@ impl Smb2Session {
 impl Drop for Smb2Session {
     fn drop(&mut self) {
         self.logoff();
+    }
+}
+
+// ─────────────────────────── Pipe helpers ───────────────────────────
+//
+// Pure functions — no `&self`, no IO — so we can unit-test the wire layouts
+// without a TcpStream. The `pipe_*` methods on `Smb2Session` are thin
+// orchestration wrappers around these.
+
+/// Build the fixed 56-byte CREATE Request body for opening a named pipe.
+/// `name` is the bare leaf (`"srvsvc"`, `"samr"`, …) — no leading backslash.
+/// Returns `(body, name_utf16)` so the caller can append the name buffer
+/// after the body when assembling the full SMB2 packet.
+fn build_pipe_create_body(name: &str) -> (Vec<u8>, Vec<u8>) {
+    let name_utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+
+    let mut body = vec![0u8; 56];
+    body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+    // body[2]      SecurityFlags=0
+    // body[3]      RequestedOplockLevel=0 (no oplock for pipes)
+    body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
+    // body[8..16]  SmbCreateFlags=0
+    // body[16..24] Reserved=0
+    body[24..28].copy_from_slice(&PIPE_DESIRED_ACCESS.to_le_bytes());
+    // body[28..32] FileAttributes=0
+    body[32..36].copy_from_slice(&0x0000_0007u32.to_le_bytes()); // ShareAccess: R|W|D
+    body[36..40].copy_from_slice(&1u32.to_le_bytes()); // CreateDisposition=FILE_OPEN
+    // body[40..44] CreateOptions=0  — pipes must NOT set FILE_NON_DIRECTORY_FILE
+    let name_offset = (SMB2_HEADER_SIZE + 56) as u16;
+    body[44..46].copy_from_slice(&name_offset.to_le_bytes());
+    body[46..48].copy_from_slice(&(name_utf16.len() as u16).to_le_bytes());
+    // body[48..52] CreateContextsOffset=0
+    // body[52..56] CreateContextsLength=0
+
+    (body, name_utf16)
+}
+
+/// Build the fixed 56-byte IOCTL Request body for `FSCTL_PIPE_TRANSCEIVE`.
+/// The caller appends the request payload (a DCE/RPC PDU) after this body.
+fn build_pipe_transceive_body(file_id: &[u8; 16], request_len: u32) -> Vec<u8> {
+    let mut body = vec![0u8; 56];
+    body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+    // body[2..4]   Reserved=0
+    body[4..8].copy_from_slice(&FSCTL_PIPE_TRANSCEIVE.to_le_bytes());
+    body[8..24].copy_from_slice(file_id);
+
+    let input_offset = (SMB2_HEADER_SIZE + 56) as u32;
+    body[24..28].copy_from_slice(&input_offset.to_le_bytes()); // InputOffset
+    body[28..32].copy_from_slice(&request_len.to_le_bytes()); // InputCount
+    // body[32..36] MaxInputResponse=0  (no input echoed back)
+    body[36..40].copy_from_slice(&input_offset.to_le_bytes()); // OutputOffset
+    // body[40..44] OutputCount=0       (unused on request)
+    body[44..48].copy_from_slice(&65_535u32.to_le_bytes()); // MaxOutputResponse
+    body[48..52].copy_from_slice(&SMB2_0_IOCTL_IS_FSCTL.to_le_bytes());
+    // body[52..56] Reserved2=0
+    body
+}
+
+/// Build the fixed 24-byte CLOSE Request body for a pipe handle.
+fn build_pipe_close_body(file_id: &[u8; 16]) -> Vec<u8> {
+    let mut body = vec![0u8; 24];
+    body[0..2].copy_from_slice(&24u16.to_le_bytes()); // StructureSize
+    // body[2..4] Flags=0  (no SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB)
+    // body[4..8] Reserved=0
+    body[8..24].copy_from_slice(file_id);
+    body
+}
+
+/// Extract the 16-byte FileId from an SMB2 CREATE Response (MS-SMB2 §2.2.14).
+/// FileId sits at body offset 64 (8 bytes Persistent + 8 bytes Volatile).
+fn parse_pipe_create_response(resp: &[u8]) -> Result<[u8; 16], String> {
+    if resp.len() < SMB2_HEADER_SIZE + 88 {
+        return Err(format!(
+            "pipe_open response too short: {} < {}",
+            resp.len(),
+            SMB2_HEADER_SIZE + 88
+        ));
+    }
+    let body_off = SMB2_HEADER_SIZE;
+    let mut file_id = [0u8; 16];
+    file_id.copy_from_slice(&resp[body_off + 64..body_off + 80]);
+    Ok(file_id)
+}
+
+/// Extract the OUTPUT buffer from an SMB2 IOCTL Response (MS-SMB2 §2.2.32).
+/// `OutputOffset` is from the start of the SMB2 packet (header included).
+/// Both offset and length are bounds-checked against the actual response.
+fn parse_pipe_transceive_response(resp: &[u8]) -> Result<Vec<u8>, String> {
+    // Fixed IOCTL Response body is 48 bytes (StructureSize=49 → 48 fixed).
+    if resp.len() < SMB2_HEADER_SIZE + 48 {
+        return Err(format!(
+            "pipe_transceive response too short: {} < {}",
+            resp.len(),
+            SMB2_HEADER_SIZE + 48
+        ));
+    }
+    let body_off = SMB2_HEADER_SIZE;
+    let output_offset =
+        u32::from_le_bytes(resp[body_off + 32..body_off + 36].try_into().unwrap()) as usize;
+    let output_length =
+        u32::from_le_bytes(resp[body_off + 36..body_off + 40].try_into().unwrap()) as usize;
+
+    let end = output_offset
+        .checked_add(output_length)
+        .ok_or_else(|| "pipe_transceive output offset+length overflow".to_string())?;
+    if end > resp.len() {
+        return Err(format!(
+            "pipe_transceive output out of bounds: {output_offset}+{output_length} > {}",
+            resp.len()
+        ));
+    }
+    Ok(resp[output_offset..end].to_vec())
+}
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::*;
+
+    #[test]
+    fn pipe_create_body_lays_out_expected_bytes() {
+        let (body, name) = build_pipe_create_body("srvsvc");
+
+        assert_eq!(body.len(), 56, "fixed body must be exactly 56 bytes");
+        // StructureSize = 57 (0x39 LE)
+        assert_eq!(&body[0..2], &[0x39, 0x00]);
+        // SecurityFlags=0, RequestedOplockLevel=0
+        assert_eq!(&body[2..4], &[0x00, 0x00]);
+        // ImpersonationLevel = 2 (Impersonation)
+        assert_eq!(&body[4..8], &[0x02, 0x00, 0x00, 0x00]);
+        // DesiredAccess = 0x0012019F
+        assert_eq!(&body[24..28], &0x0012_019Fu32.to_le_bytes());
+        // ShareAccess = 0x07 (R|W|D)
+        assert_eq!(&body[32..36], &[0x07, 0x00, 0x00, 0x00]);
+        // CreateDisposition = FILE_OPEN (1)
+        assert_eq!(&body[36..40], &[0x01, 0x00, 0x00, 0x00]);
+        // CreateOptions = 0 (no FILE_NON_DIRECTORY_FILE for pipes)
+        assert_eq!(&body[40..44], &[0x00, 0x00, 0x00, 0x00]);
+        // NameOffset = 64 + 56 = 120
+        assert_eq!(&body[44..46], &120u16.to_le_bytes());
+        // NameLength = 12 (UTF-16 of "srvsvc" = 6 cu × 2 bytes)
+        assert_eq!(&body[46..48], &12u16.to_le_bytes());
+        // Name bytes are UTF-16 LE "srvsvc", no leading backslash
+        assert_eq!(name, b"s\0r\0v\0s\0v\0c\0");
+    }
+
+    #[test]
+    fn pipe_create_body_handles_known_pipe_names() {
+        for (name, want_len) in [
+            ("samr", 8u16),
+            ("svcctl", 12u16),
+            ("wkssvc", 12u16),
+            ("winreg", 12u16),
+            ("lsarpc", 12u16),
+            ("netlogon", 16u16),
+        ] {
+            let (body, name_buf) = build_pipe_create_body(name);
+            let length_field = u16::from_le_bytes(body[46..48].try_into().unwrap());
+            assert_eq!(length_field, want_len, "wrong NameLength for `{name}`");
+            assert_eq!(name_buf.len(), want_len as usize);
+        }
+    }
+
+    #[test]
+    fn pipe_transceive_body_lays_out_expected_bytes() {
+        let mut file_id = [0u8; 16];
+        file_id[..8].fill(0x41); // Persistent = 0x41…41
+        file_id[8..].fill(0x42); // Volatile   = 0x42…42
+
+        let body = build_pipe_transceive_body(&file_id, 72);
+
+        assert_eq!(body.len(), 56);
+        // StructureSize = 57
+        assert_eq!(&body[0..2], &[0x39, 0x00]);
+        // Reserved = 0
+        assert_eq!(&body[2..4], &[0x00, 0x00]);
+        // CtlCode = FSCTL_PIPE_TRANSCEIVE (0x0011C017 LE)
+        assert_eq!(&body[4..8], &[0x17, 0xC0, 0x11, 0x00]);
+        // FileId (16 bytes — Persistent + Volatile)
+        assert_eq!(&body[8..24], &file_id);
+        // InputOffset = 120, InputCount = 72
+        assert_eq!(&body[24..28], &120u32.to_le_bytes());
+        assert_eq!(&body[28..32], &72u32.to_le_bytes());
+        // MaxInputResponse = 0
+        assert_eq!(&body[32..36], &[0x00, 0x00, 0x00, 0x00]);
+        // OutputOffset = 120 (echoed; server replaces on response)
+        assert_eq!(&body[36..40], &120u32.to_le_bytes());
+        // MaxOutputResponse = 65535
+        assert_eq!(&body[44..48], &65_535u32.to_le_bytes());
+        // Flags = SMB2_0_IOCTL_IS_FSCTL (1)
+        assert_eq!(&body[48..52], &[0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn pipe_close_body_lays_out_expected_bytes() {
+        let file_id = [0xAAu8; 16];
+        let body = build_pipe_close_body(&file_id);
+
+        assert_eq!(body.len(), 24);
+        assert_eq!(&body[0..2], &24u16.to_le_bytes()); // StructureSize=24
+        assert_eq!(&body[2..4], &[0x00, 0x00]); // Flags=0
+        assert_eq!(&body[4..8], &[0x00, 0x00, 0x00, 0x00]); // Reserved=0
+        assert_eq!(&body[8..24], &file_id);
+    }
+
+    #[test]
+    fn parse_pipe_create_response_extracts_file_id() {
+        // 64-byte SMB2 hdr + 89-byte CREATE Resp body, FileId at body+64.
+        let mut resp = vec![0u8; SMB2_HEADER_SIZE + 89];
+        resp[0..4].copy_from_slice(SMB2_MAGIC);
+        for (i, b) in resp[SMB2_HEADER_SIZE + 64..SMB2_HEADER_SIZE + 80]
+            .iter_mut()
+            .enumerate()
+        {
+            *b = 0xC0u8.wrapping_add(i as u8);
+        }
+        let fid = parse_pipe_create_response(&resp).expect("parse should succeed");
+        for (i, b) in fid.iter().enumerate() {
+            assert_eq!(*b, 0xC0u8.wrapping_add(i as u8), "fid[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn parse_pipe_create_response_rejects_truncation() {
+        // Way shorter than SMB2_HEADER_SIZE + 88 = 152.
+        let short = vec![0u8; 100];
+        assert!(parse_pipe_create_response(&short).is_err());
+    }
+
+    #[test]
+    fn parse_pipe_transceive_response_extracts_output_buffer() {
+        let payload: &[u8] = b"\x05\x00\x0c\x03BIND_ACK_payload_marker";
+        // Build a fake IOCTL Response: 64B hdr + 48B fixed body + payload.
+        let total = SMB2_HEADER_SIZE + 48 + payload.len();
+        let mut resp = vec![0u8; total];
+        resp[0..4].copy_from_slice(SMB2_MAGIC);
+
+        let body_off = SMB2_HEADER_SIZE;
+        let output_offset = (SMB2_HEADER_SIZE + 48) as u32; // 112
+        resp[body_off + 32..body_off + 36].copy_from_slice(&output_offset.to_le_bytes());
+        resp[body_off + 36..body_off + 40].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        resp[output_offset as usize..total].copy_from_slice(payload);
+
+        let out = parse_pipe_transceive_response(&resp).expect("parse should succeed");
+        assert_eq!(out.as_slice(), payload);
+    }
+
+    #[test]
+    fn parse_pipe_transceive_response_rejects_oob_offset() {
+        let mut resp = vec![0u8; SMB2_HEADER_SIZE + 48];
+        resp[0..4].copy_from_slice(SMB2_MAGIC);
+        let body_off = SMB2_HEADER_SIZE;
+        // OutputOffset = 200 (well past end), OutputCount = 32.
+        resp[body_off + 32..body_off + 36].copy_from_slice(&200u32.to_le_bytes());
+        resp[body_off + 36..body_off + 40].copy_from_slice(&32u32.to_le_bytes());
+        assert!(parse_pipe_transceive_response(&resp).is_err());
+    }
+
+    #[test]
+    fn parse_pipe_transceive_response_handles_zero_length_output() {
+        // Empty pipe response is legal — server sets OutputCount=0.
+        let mut resp = vec![0u8; SMB2_HEADER_SIZE + 48];
+        resp[0..4].copy_from_slice(SMB2_MAGIC);
+        let body_off = SMB2_HEADER_SIZE;
+        resp[body_off + 32..body_off + 36]
+            .copy_from_slice(&((SMB2_HEADER_SIZE + 48) as u32).to_le_bytes());
+        resp[body_off + 36..body_off + 40].copy_from_slice(&0u32.to_le_bytes());
+        let out = parse_pipe_transceive_response(&resp).expect("parse should succeed");
+        assert!(out.is_empty());
     }
 }
