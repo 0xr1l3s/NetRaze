@@ -31,6 +31,23 @@ pub trait RpcTransport: Send + Sync {
     /// fragment.
     async fn recv(&self) -> Result<Vec<u8>>;
 
+    /// Send a PDU that has no response, e.g. an AUTH3 PDU during a
+    /// three-leg NTLMSSP bind. The default implementation calls
+    /// [`send`](Self::send) followed by [`recv`](Self::recv) and discards
+    /// whatever the recv returns — that's adequate for in-memory test
+    /// transports where `send` doesn't actually expect a peer.
+    ///
+    /// Real SMB-pipe transports **must** override this:
+    /// `FSCTL_PIPE_TRANSCEIVE` (the SMB2 IOCTL behind their `send`) blocks
+    /// on the read half waiting for a response that will never come. The
+    /// SMB-pipe override should issue a plain SMB2 WRITE on the pipe and
+    /// return immediately.
+    async fn send_oneway(&self, pdu: &[u8]) -> Result<()> {
+        self.send(pdu).await?;
+        let _ = self.recv().await;
+        Ok(())
+    }
+
     /// Max fragment length we should advertise in `bind`. Windows default
     /// is 4280 on SMB pipes, 5840 over TCP.
     fn max_xmit_frag(&self) -> u16 {

@@ -442,6 +442,475 @@ impl NtlmAuthenticator {
     }
 }
 
+// ===========================================================================
+// NTLMSSP message construction (vendored from `netraze-protocols::smb::ntlm`)
+// ===========================================================================
+//
+// `netraze-dcerpc` must remain a leaf crate (the protocols crate depends on
+// it, not the other way around), so we cannot reach into
+// `netraze-protocols::smb::ntlm` for the NEGOTIATE/CHALLENGE/AUTHENTICATE
+// message construction. The chosen tradeoff is to vendor ~150 lines of
+// well-specified MS-NLMP code here. The duplication is acceptable because:
+//
+//   - the message format is frozen in MS-NLMP §2.2.1 (no churn)
+//   - both copies are byte-pinned by Impacket fixtures, so divergence will
+//     be caught at test time rather than in production
+//   - the alternative (a third crate `netraze-ntlm`) is overkill for two
+//     consumers
+//
+// If a third consumer ever appears, refactor into a shared crate at that
+// point and delete one of the copies.
+
+use md4::Md4;
+
+#[allow(dead_code)] // some flags are reserved for future PKT_INTEGRITY work
+mod ntlmssp_flags {
+    pub const NEGOTIATE_UNICODE: u32 = 0x0000_0001;
+    pub const REQUEST_TARGET: u32 = 0x0000_0004;
+    pub const NEGOTIATE_SIGN: u32 = 0x0000_0010;
+    pub const NEGOTIATE_SEAL: u32 = 0x0000_0020;
+    pub const NEGOTIATE_NTLM: u32 = 0x0000_0200;
+    pub const NEGOTIATE_ALWAYS_SIGN: u32 = 0x0000_8000;
+    pub const NEGOTIATE_EXTENDED_SS: u32 = 0x0008_0000;
+    pub const NEGOTIATE_128: u32 = 0x2000_0000;
+    pub const NEGOTIATE_KEY_EXCH: u32 = 0x4000_0000;
+    pub const NEGOTIATE_56: u32 = 0x8000_0000;
+}
+
+/// The flag set we advertise in NEGOTIATE. Picked to match what Windows and
+/// Samba both happily accept, with KEY_EXCH set so we get an
+/// `ExportedSessionKey` that's independent of the password hash.
+const NTLMSSP_NEGOTIATE_FLAGS: u32 = ntlmssp_flags::NEGOTIATE_56
+    | ntlmssp_flags::NEGOTIATE_KEY_EXCH
+    | ntlmssp_flags::NEGOTIATE_128
+    | ntlmssp_flags::NEGOTIATE_EXTENDED_SS
+    | ntlmssp_flags::NEGOTIATE_ALWAYS_SIGN
+    | ntlmssp_flags::NEGOTIATE_NTLM
+    | ntlmssp_flags::NEGOTIATE_SEAL
+    | ntlmssp_flags::NEGOTIATE_SIGN
+    | ntlmssp_flags::REQUEST_TARGET
+    | ntlmssp_flags::NEGOTIATE_UNICODE;
+
+fn ntlm_hmac_md5(key: &[u8], data: &[u8]) -> Result<[u8; 16]> {
+    let mut mac = <HmacMd5 as Mac>::new_from_slice(key)
+        .map_err(|e| DceRpcError::Auth(format!("HMAC key length: {e}")))?;
+    mac.update(data);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(out)
+}
+
+fn ntlm_md4(data: &[u8]) -> [u8; 16] {
+    let mut h = Md4::new();
+    h.update(data);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+/// Stateless RC4 encryption — used exactly once during AUTHENTICATE
+/// construction to wrap the random session key with the SessionBaseKey
+/// (KEY_EXCH path). The stateful [`Rc4`] above is for the per-connection
+/// sealing handle.
+fn rc4_oneshot(data: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut rc4 = Rc4::new(key);
+    let mut out = data.to_vec();
+    rc4.transform(&mut out);
+    out
+}
+
+fn rand_array<const N: usize>() -> [u8; N] {
+    use rand::RngCore;
+    let mut buf = [0u8; N];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf
+}
+
+fn current_filetime() -> [u8; 8] {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    // FILETIME = 100-ns intervals since 1601-01-01.
+    let ft = (now.as_secs() + 11_644_473_600) * 10_000_000 + now.subsec_nanos() as u64 / 100;
+    ft.to_le_bytes()
+}
+
+/// Walk the AV_PAIR list inside a CHALLENGE's TargetInfo and return the
+/// value bytes for the first entry with the matching id. Used for
+/// MsvAvTimestamp (id=7); we don't currently consume any other AV.
+fn extract_av_pair(info: &[u8], target_id: u16) -> Option<Vec<u8>> {
+    let mut off = 0usize;
+    while off + 4 <= info.len() {
+        let av_id = u16::from_le_bytes([info[off], info[off + 1]]);
+        let av_len = u16::from_le_bytes([info[off + 2], info[off + 3]]) as usize;
+        if av_id == 0 {
+            break;
+        }
+        if av_id == target_id && off + 4 + av_len <= info.len() {
+            return Some(info[off + 4..off + 4 + av_len].to_vec());
+        }
+        off += 4 + av_len;
+    }
+    None
+}
+
+/// Parsed NTLMSSP CHALLENGE (Type 2). Only the fields we actually consume.
+///
+/// We deliberately don't carry the server's negotiate_flags — the seal/sign
+/// path is hard-coded to NTLMv2-EXTENDED-SS-KEY_EXCH and any server that
+/// strips those bits would already break the BindAck handshake at a lower
+/// layer.
+#[derive(Debug, Clone)]
+struct NtlmChallenge {
+    server_challenge: [u8; 8],
+    target_info: Vec<u8>,
+    timestamp: Option<[u8; 8]>,
+}
+
+fn parse_ntlmssp_challenge(data: &[u8]) -> Result<NtlmChallenge> {
+    if data.len() < 32 {
+        return Err(DceRpcError::Auth(format!(
+            "NTLMSSP CHALLENGE too short: {} bytes",
+            data.len()
+        )));
+    }
+    if &data[0..8] != b"NTLMSSP\0" {
+        return Err(DceRpcError::Auth("missing NTLMSSP signature".into()));
+    }
+    let msg_type = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    if msg_type != 2 {
+        return Err(DceRpcError::Auth(format!(
+            "expected NTLMSSP CHALLENGE (type 2), got type {msg_type}"
+        )));
+    }
+
+    let mut server_challenge = [0u8; 8];
+    server_challenge.copy_from_slice(&data[24..32]);
+
+    let target_info = if data.len() >= 48 {
+        let ti_len = u16::from_le_bytes(data[40..42].try_into().unwrap()) as usize;
+        let ti_off = u32::from_le_bytes(data[44..48].try_into().unwrap()) as usize;
+        if ti_len > 0 && ti_off + ti_len <= data.len() {
+            data[ti_off..ti_off + ti_len].to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let timestamp =
+        extract_av_pair(&target_info, 7).and_then(|t| <[u8; 8]>::try_from(t.as_slice()).ok());
+
+    Ok(NtlmChallenge {
+        server_challenge,
+        target_info,
+        timestamp,
+    })
+}
+
+/// NTLMv2 response components. The `session_base_key` is the input to the
+/// KEY_EXCH wrapping — it is **not** the ExportedSessionKey itself.
+#[derive(Debug, Clone)]
+struct NtlmV2Response {
+    nt_response: Vec<u8>,
+    lm_response: Vec<u8>,
+    session_base_key: [u8; 16],
+}
+
+fn compute_ntlmv2_response(
+    nt_hash: &[u8; 16],
+    username: &str,
+    domain: &str,
+    challenge: &NtlmChallenge,
+) -> Result<NtlmV2Response> {
+    // ResponseKeyNT = HMAC_MD5(NT_Hash, UNICODE(uppercase(user) + domain))
+    let user_domain = format!("{}{}", username.to_uppercase(), domain);
+    let user_domain_utf16: Vec<u8> = user_domain
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let response_key = ntlm_hmac_md5(nt_hash, &user_domain_utf16)?;
+
+    let client_challenge = rand_array::<8>();
+    let timestamp = challenge.timestamp.unwrap_or_else(current_filetime);
+
+    // NTLMv2 client blob
+    let mut blob = Vec::with_capacity(28 + challenge.target_info.len());
+    blob.push(0x01); // RespType
+    blob.push(0x01); // HiRespType
+    blob.extend_from_slice(&[0u8; 6]); // Reserved
+    blob.extend_from_slice(&timestamp);
+    blob.extend_from_slice(&client_challenge);
+    blob.extend_from_slice(&[0u8; 4]); // Reserved
+    blob.extend_from_slice(&challenge.target_info);
+    blob.extend_from_slice(&[0u8; 4]); // Reserved
+
+    // NTProofStr = HMAC_MD5(ResponseKeyNT, ServerChallenge || blob)
+    let mut proof_input = Vec::with_capacity(8 + blob.len());
+    proof_input.extend_from_slice(&challenge.server_challenge);
+    proof_input.extend_from_slice(&blob);
+    let nt_proof = ntlm_hmac_md5(&response_key, &proof_input)?;
+
+    // NtChallengeResponse = NTProofStr || blob
+    let mut nt_response = Vec::with_capacity(16 + blob.len());
+    nt_response.extend_from_slice(&nt_proof);
+    nt_response.extend_from_slice(&blob);
+
+    // SessionBaseKey = HMAC_MD5(ResponseKeyNT, NTProofStr)
+    let session_base_key = ntlm_hmac_md5(&response_key, &nt_proof)?;
+
+    // LMv2 response
+    let lm_client_challenge = rand_array::<8>();
+    let mut lm_input = Vec::with_capacity(16);
+    lm_input.extend_from_slice(&challenge.server_challenge);
+    lm_input.extend_from_slice(&lm_client_challenge);
+    let lm_proof = ntlm_hmac_md5(&response_key, &lm_input)?;
+    let mut lm_response = Vec::with_capacity(24);
+    lm_response.extend_from_slice(&lm_proof);
+    lm_response.extend_from_slice(&lm_client_challenge);
+
+    Ok(NtlmV2Response {
+        nt_response,
+        lm_response,
+        session_base_key,
+    })
+}
+
+/// Compute the NT hash of a UTF-16LE-encoded password. Exposed so callers
+/// who hold a plaintext password can derive it once and pass the 16-byte
+/// digest into [`NtlmBinder::new`].
+pub fn nt_hash_from_password(password: &str) -> [u8; 16] {
+    let pw_utf16: Vec<u8> = password
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    ntlm_md4(&pw_utf16)
+}
+
+fn build_ntlmssp_negotiate() -> Vec<u8> {
+    let mut msg = Vec::with_capacity(40);
+    msg.extend_from_slice(b"NTLMSSP\0");
+    msg.extend_from_slice(&1u32.to_le_bytes());
+    msg.extend_from_slice(&NTLMSSP_NEGOTIATE_FLAGS.to_le_bytes());
+    msg.extend_from_slice(&[0u8; 8]); // DomainNameFields
+    msg.extend_from_slice(&[0u8; 8]); // WorkstationFields
+    // No version field — Samba and Windows both accept the 32-byte form.
+    msg
+}
+
+/// Build NTLMSSP AUTHENTICATE (Type 3). Returns
+/// `(message_bytes, exported_session_key)` — the random 16-byte session key
+/// generated client-side for KEY_EXCH and which seeds [`NtlmAuthenticator`].
+fn build_ntlmssp_authenticate(
+    response: &NtlmV2Response,
+    username: &str,
+    domain: &str,
+) -> (Vec<u8>, [u8; 16]) {
+    fn write_fields(out: &mut Vec<u8>, len: u16, off: u32) {
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes()); // MaxLen == Len
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+
+    let domain_utf16: Vec<u8> = domain
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let user_utf16: Vec<u8> = username
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let workstation_utf16: Vec<u8> = Vec::new();
+
+    let random_session_key = rand_array::<16>();
+    let encrypted_session_key = rc4_oneshot(&random_session_key, &response.session_base_key);
+
+    // Header layout: 8 sig + 4 type + 6×8 fields + 4 flags + 8 version = 72.
+    let payload_offset = 72u32;
+    let lm_off = payload_offset;
+    let nt_off = lm_off + response.lm_response.len() as u32;
+    let dom_off = nt_off + response.nt_response.len() as u32;
+    let usr_off = dom_off + domain_utf16.len() as u32;
+    let ws_off = usr_off + user_utf16.len() as u32;
+    let sk_off = ws_off + workstation_utf16.len() as u32;
+
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"NTLMSSP\0");
+    msg.extend_from_slice(&3u32.to_le_bytes());
+
+    write_fields(&mut msg, response.lm_response.len() as u16, lm_off);
+    write_fields(&mut msg, response.nt_response.len() as u16, nt_off);
+    write_fields(&mut msg, domain_utf16.len() as u16, dom_off);
+    write_fields(&mut msg, user_utf16.len() as u16, usr_off);
+    write_fields(&mut msg, workstation_utf16.len() as u16, ws_off);
+    write_fields(&mut msg, encrypted_session_key.len() as u16, sk_off);
+
+    msg.extend_from_slice(&NTLMSSP_NEGOTIATE_FLAGS.to_le_bytes());
+    // Version: 10.0, build 0, NTLM revision 15
+    msg.extend_from_slice(&[10, 0, 0x00, 0x00, 0, 0, 0, 0x0f]);
+
+    msg.extend_from_slice(&response.lm_response);
+    msg.extend_from_slice(&response.nt_response);
+    msg.extend_from_slice(&domain_utf16);
+    msg.extend_from_slice(&user_utf16);
+    msg.extend_from_slice(&workstation_utf16);
+    msg.extend_from_slice(&encrypted_session_key);
+
+    (msg, random_session_key)
+}
+
+// ===========================================================================
+// NtlmBinder — drives the NTLMSSP handshake during a DCE/RPC bind
+// ===========================================================================
+
+/// Per-connection state machine for the NTLMSSP handshake that rides inside
+/// a DCE/RPC bind dance:
+///
+/// ```text
+///   client ─[Bind + NEGOTIATE]──────▶ server
+///   client ◀─[BindAck + CHALLENGE]── server
+///   client ─[Auth3 + AUTHENTICATE]─▶ server
+/// ```
+///
+/// Construct with [`NtlmBinder::new`], call [`bind_verifier`] to get the
+/// `auth_verifier` blob for the Bind PDU, then [`consume_challenge`] with
+/// the NTLMSSP CHALLENGE bytes parsed out of the BindAck's `auth_verifier`,
+/// and finally [`finish`] to produce the AUTH3 verifier and a sealed
+/// [`NtlmAuthenticator`] ready for per-call sealing.
+///
+/// The struct is **not** reusable — once `finish` consumes it, build a new
+/// one for any subsequent rebind.
+///
+/// [`bind_verifier`]: Self::bind_verifier
+/// [`consume_challenge`]: Self::consume_challenge
+/// [`finish`]: Self::finish
+pub struct NtlmBinder {
+    nt_hash: [u8; 16],
+    username: String,
+    domain: String,
+    level: AuthLevel,
+    context_id: u32,
+    state: BinderState,
+}
+
+enum BinderState {
+    /// Awaiting the server's CHALLENGE message.
+    Initial,
+    /// CHALLENGE consumed; we have the NTLMv2 response material ready.
+    /// Calling `finish` will build the AUTHENTICATE message and finalise.
+    ChallengeConsumed { response: NtlmV2Response },
+}
+
+impl NtlmBinder {
+    /// Build a fresh binder for an NTLMv2 (pass-the-hash) DCE/RPC bind.
+    ///
+    /// `nt_hash` is the 16-byte NT hash of the password. For a plaintext
+    /// password, derive the hash via [`nt_hash_from_password`].
+    ///
+    /// `level` must be [`AuthLevel::PktPrivacy`] for v1; PKT_INTEGRITY is
+    /// rejected at `finish` time to match the [`NtlmAuthenticator`]
+    /// constraint.
+    ///
+    /// `context_id` is the per-bind auth_context_id that will be carried in
+    /// every subsequent `sec_trailer` — pick any monotonically increasing
+    /// value, conventionally `0` for the first bind on a connection.
+    pub fn new(
+        nt_hash: [u8; 16],
+        username: impl Into<String>,
+        domain: impl Into<String>,
+        level: AuthLevel,
+        context_id: u32,
+    ) -> Self {
+        Self {
+            nt_hash,
+            username: username.into(),
+            domain: domain.into(),
+            level,
+            context_id,
+            state: BinderState::Initial,
+        }
+    }
+
+    /// `auth_verifier` blob for the Bind PDU: `sec_trailer(8) + NTLMSSP NEGOTIATE`.
+    ///
+    /// `auth_pad_length = 0` because the Bind PDU has no encrypted body to
+    /// pad ahead of the verifier (MS-RPCE §2.2.2.11).
+    pub fn bind_verifier(&self) -> Vec<u8> {
+        let neg = build_ntlmssp_negotiate();
+        let trailer = SecTrailer {
+            auth_type: AuthType::Ntlmssp,
+            auth_level: self.level,
+            auth_pad_length: 0,
+            auth_reserved: 0,
+            auth_context_id: self.context_id,
+        };
+        let mut out = Vec::with_capacity(SecTrailer::SIZE + neg.len());
+        trailer.encode_to(&mut out);
+        out.extend_from_slice(&neg);
+        out
+    }
+
+    /// Parse the NTLMSSP CHALLENGE bytes returned in the BindAck's
+    /// `auth_verifier` (after the 8-byte `sec_trailer` prefix), then pre-
+    /// compute the NTLMv2 response material.
+    ///
+    /// `ntlmssp_blob` is the *raw* CHALLENGE message — the caller is
+    /// responsible for stripping the 8-byte `sec_trailer` first.
+    pub fn consume_challenge(&mut self, ntlmssp_blob: &[u8]) -> Result<()> {
+        if !matches!(self.state, BinderState::Initial) {
+            return Err(DceRpcError::Auth(
+                "NtlmBinder: consume_challenge called twice".into(),
+            ));
+        }
+        let chal = parse_ntlmssp_challenge(ntlmssp_blob)?;
+        let response = compute_ntlmv2_response(&self.nt_hash, &self.username, &self.domain, &chal)?;
+        self.state = BinderState::ChallengeConsumed { response };
+        Ok(())
+    }
+
+    /// Build the AUTH3 PDU's `auth_verifier` blob and graduate to a sealed
+    /// [`NtlmAuthenticator`]. Returns `(auth_verifier, authenticator)` —
+    /// the caller embeds `auth_verifier` in the AUTH3 PDU and uses the
+    /// authenticator for every subsequent Request/Response.
+    ///
+    /// Fails if [`consume_challenge`](Self::consume_challenge) hasn't run
+    /// yet, or if the configured auth level isn't PKT_PRIVACY.
+    pub fn finish(self) -> Result<(Vec<u8>, NtlmAuthenticator)> {
+        if !matches!(self.level, AuthLevel::PktPrivacy) {
+            return Err(DceRpcError::NotImplemented(
+                "NtlmBinder::finish: only PKT_PRIVACY supported in Phase 1",
+            ));
+        }
+        let response = match self.state {
+            BinderState::ChallengeConsumed { response } => response,
+            BinderState::Initial => {
+                return Err(DceRpcError::Auth(
+                    "NtlmBinder::finish called before consume_challenge".into(),
+                ));
+            }
+        };
+
+        let (auth_msg, exported_session_key) =
+            build_ntlmssp_authenticate(&response, &self.username, &self.domain);
+
+        let trailer = SecTrailer {
+            auth_type: AuthType::Ntlmssp,
+            auth_level: self.level,
+            auth_pad_length: 0,
+            auth_reserved: 0,
+            auth_context_id: self.context_id,
+        };
+        let mut verifier = Vec::with_capacity(SecTrailer::SIZE + auth_msg.len());
+        trailer.encode_to(&mut verifier);
+        verifier.extend_from_slice(&auth_msg);
+
+        let authenticator =
+            NtlmAuthenticator::new_ntlmv2_extended(exported_session_key, self.level, self.context_id);
+        Ok((verifier, authenticator))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +1171,141 @@ mod tests {
         let mut a = NtlmAuthenticator::new_ntlmv2_extended([0u8; 16], AuthLevel::PktIntegrity, 0);
         let err = a.seal_request(b"x").unwrap_err();
         assert!(matches!(err, DceRpcError::NotImplemented(_)));
+    }
+
+    /// `bind_verifier` must produce a sec_trailer + a structurally valid
+    /// NTLMSSP NEGOTIATE message. We only check the framing here — the
+    /// flag bits are pinned by the existing seal/unseal vectors which
+    /// transitively depend on `NTLMSSP_NEGOTIATE_FLAGS`.
+    #[test]
+    fn binder_emits_well_formed_negotiate() {
+        let binder = NtlmBinder::new(
+            [0xAA; 16],
+            "alice",
+            "WORKGROUP",
+            AuthLevel::PktPrivacy,
+            0,
+        );
+        let v = binder.bind_verifier();
+        assert!(v.len() > SecTrailer::SIZE);
+        // sec_trailer first byte is auth_type (10 = NTLMSSP)
+        assert_eq!(v[0], AuthType::Ntlmssp as u8);
+        assert_eq!(v[1], AuthLevel::PktPrivacy as u8);
+        // NTLMSSP signature follows the 8-byte trailer
+        assert_eq!(&v[SecTrailer::SIZE..SecTrailer::SIZE + 8], b"NTLMSSP\0");
+        // Message type 1 (NEGOTIATE)
+        let mtype = u32::from_le_bytes(
+            v[SecTrailer::SIZE + 8..SecTrailer::SIZE + 12]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(mtype, 1);
+    }
+
+    #[test]
+    fn binder_finish_requires_consume_challenge() {
+        let binder = NtlmBinder::new(
+            [0xAA; 16],
+            "alice",
+            "WORKGROUP",
+            AuthLevel::PktPrivacy,
+            0,
+        );
+        // `unwrap_err` would require NtlmAuthenticator: Debug; match instead.
+        match binder.finish() {
+            Ok(_) => panic!("finish without consume_challenge must fail"),
+            Err(DceRpcError::Auth(_)) => {}
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binder_consume_then_finish_yields_authenticator() {
+        let mut binder = NtlmBinder::new(
+            [0xAA; 16],
+            "alice",
+            "WORKGROUP",
+            AuthLevel::PktPrivacy,
+            0x1234,
+        );
+        // Build a minimal valid CHALLENGE: signature + type=2 + 12 bytes
+        // padding to reach the offset-of-flags slot, flags, server
+        // challenge, then 8 bytes reserved + empty TargetInfo fields.
+        let mut chal = Vec::new();
+        chal.extend_from_slice(b"NTLMSSP\0");
+        chal.extend_from_slice(&2u32.to_le_bytes()); // type
+        chal.extend_from_slice(&[0u8; 8]); // TargetNameFields
+        chal.extend_from_slice(&NTLMSSP_NEGOTIATE_FLAGS.to_le_bytes()); // flags
+        chal.extend_from_slice(&[0x11; 8]); // ServerChallenge
+        chal.extend_from_slice(&[0u8; 8]); // Reserved
+        chal.extend_from_slice(&[0u8; 8]); // TargetInfoFields (len=0)
+        assert!(chal.len() >= 32);
+
+        binder.consume_challenge(&chal).unwrap();
+        let (verifier, mut auth) = binder.finish().unwrap();
+        // Verifier must start with sec_trailer for AUTHENTICATE context_id
+        let trailer = SecTrailer::decode(&verifier[..SecTrailer::SIZE]).unwrap();
+        assert_eq!(trailer.auth_context_id, 0x1234);
+        assert_eq!(trailer.auth_type, AuthType::Ntlmssp);
+        // NTLMSSP type-3 (AUTHENTICATE) signature + type
+        assert_eq!(&verifier[SecTrailer::SIZE..SecTrailer::SIZE + 8], b"NTLMSSP\0");
+        let mtype = u32::from_le_bytes(
+            verifier[SecTrailer::SIZE + 8..SecTrailer::SIZE + 12]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(mtype, 3);
+        // Authenticator is usable for sealing.
+        let (_sealed, _verifier) = auth.seal_request(b"hello").unwrap();
+    }
+
+    #[test]
+    fn binder_double_consume_rejected() {
+        let mut binder = NtlmBinder::new(
+            [0xAA; 16],
+            "alice",
+            "WORKGROUP",
+            AuthLevel::PktPrivacy,
+            0,
+        );
+        let mut chal = Vec::new();
+        chal.extend_from_slice(b"NTLMSSP\0");
+        chal.extend_from_slice(&2u32.to_le_bytes());
+        chal.extend_from_slice(&[0u8; 8]);
+        chal.extend_from_slice(&NTLMSSP_NEGOTIATE_FLAGS.to_le_bytes());
+        chal.extend_from_slice(&[0x11; 8]);
+        chal.extend_from_slice(&[0u8; 8]);
+        chal.extend_from_slice(&[0u8; 8]);
+        binder.consume_challenge(&chal).unwrap();
+        let err = binder.consume_challenge(&chal).unwrap_err();
+        assert!(matches!(err, DceRpcError::Auth(_)));
+    }
+
+    #[test]
+    fn binder_rejects_non_ntlmssp_signature() {
+        let mut binder = NtlmBinder::new(
+            [0xAA; 16],
+            "alice",
+            "WORKGROUP",
+            AuthLevel::PktPrivacy,
+            0,
+        );
+        let mut bad = vec![0u8; 64];
+        bad[..8].copy_from_slice(b"NOPE!\0\0\0");
+        let err = binder.consume_challenge(&bad).unwrap_err();
+        assert!(matches!(err, DceRpcError::Auth(_)));
+    }
+
+    #[test]
+    fn nt_hash_from_password_known_vector() {
+        // MD4 of UTF-16LE("Password") — well-known.
+        let h = nt_hash_from_password("Password");
+        assert_eq!(
+            h,
+            [
+                0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f,
+                0xd8, 0x52,
+            ]
+        );
     }
 }
