@@ -102,9 +102,15 @@ pub fn encode_netr_share_enum_request(
     let mut w = NdrWriter::new();
 
     // ServerName: top-level [unique, string] WCHAR*. Referent inline, then
-    // the wstring inline immediately after.
+    // the wstring inline immediately after. The [string] attribute means the
+    // wire representation MUST include a NUL terminator.
     w.write_referent();
-    w.write_conformant_varying_wstring(server_name);
+    let server_name_nul = if server_name.ends_with('\0') {
+        server_name.to_string()
+    } else {
+        format!("{}\0", server_name)
+    };
+    w.write_conformant_varying_wstring(&server_name_nul);
 
     // SHARE_ENUM_STRUCT: Level=1 then the tagged-union switch.
     w.write_u32(1); // Level
@@ -242,6 +248,138 @@ pub fn decode_netr_share_enum_response(stub: &[u8]) -> Result<NetrShareEnumRespo
         resume_handle,
         status,
     })
+}
+
+// ---------------------------------------------------------------------------
+// NetrServerGetInfo — opnum 21
+// ---------------------------------------------------------------------------
+
+/// MS-SRVS §2.2.4.43 `SERVER_INFO_101`. We only support level 101 because
+/// it carries every field [`crate::interfaces::srvsvc::NetrServerGetInfo`]
+/// callers actually need (hostname, OS version, server type, comment) —
+/// level 102 adds operational counters (users / disconnect timeout / etc.)
+/// no caller in this codebase consumes today.
+#[derive(Debug, Clone, Default)]
+pub struct ServerInfo101 {
+    /// `PLATFORM_ID_*` constant — `500` = NT-family Windows, `400` = OS/2,
+    /// rarely anything else in practice. Diagnostic only; we don't gate
+    /// behaviour on it.
+    pub platform_id: u32,
+    /// NetBIOS name as the server reports it (uppercase by convention,
+    /// e.g. `"DC01"`, `"NAS5D9868"`).
+    pub name: String,
+    /// Major OS version. The high 4 bits are reserved per MS-SRVS — mask
+    /// with `0x0F` for the user-facing major number.
+    pub version_major: u32,
+    pub version_minor: u32,
+    /// `SV_TYPE_*` bitfield (`0x0000_0010` = SQL server, `0x0000_1000` =
+    /// domain controller, …). Useful for downstream classification.
+    pub server_type: u32,
+    /// Human-readable description string, often empty on workstations.
+    pub comment: String,
+    /// Win32 status returned by the server. `0` on success; non-zero
+    /// values follow `[MS-ERREF]` (e.g. `5` = `ERROR_ACCESS_DENIED`).
+    pub status: u32,
+}
+
+/// Build the NDR stub for a `NetrServerGetInfo(level)` request.
+///
+/// Wire layout (MS-SRVS §3.1.4.17):
+///
+/// ```text
+/// [unique, string] WCHAR* ServerName
+///   referent + inline conformant_varying_wstring
+/// DWORD                  Level
+/// ```
+///
+/// `server_name` is conventionally `""` — every implementation accepts
+/// the empty string as "the server you're already talking to". Callers
+/// that want explicit targeting can pass `"\\HOSTNAME"` instead, which
+/// some legacy stubs require.
+pub fn encode_netr_server_get_info_request(server_name: &str, level: u32) -> Vec<u8> {
+    let mut w = NdrWriter::new();
+    // ServerName: top-level [unique, string] WCHAR*. Same shape as
+    // NetrShareEnum's ServerName — referent inline, wstring inline
+    // immediately after, no deferred queue (top-level pointer rule).
+    // The [string] attribute means the wire representation MUST include a
+    // NUL terminator.
+    w.write_referent();
+    let server_name_nul = if server_name.ends_with('\0') {
+        server_name.to_string()
+    } else {
+        format!("{}\0", server_name)
+    };
+    w.write_conformant_varying_wstring(&server_name_nul);
+    w.write_u32(level);
+    w.finish()
+}
+
+/// Decode a level-101 `NetrServerGetInfo` response stub.
+///
+/// Wire layout (MS-SRVS §3.1.4.17 + IDL `case 101: LPSERVER_INFO_101`):
+///
+/// ```text
+/// inline (top-level):
+///   DWORD          Level                ; echoed = 101
+///   DWORD          tag                  ; == Level (union discriminator)
+///   [unique]       LPSERVER_INFO_101    ; pointer ref
+/// deferred of LPSERVER_INFO_101 (if non-NULL):
+///   DWORD          platform_id
+///   [unique]       sv101_name           ; pointer ref to wstring
+///   DWORD          version_major
+///   DWORD          version_minor
+///   DWORD          server_type
+///   [unique]       sv101_comment        ; pointer ref to wstring
+/// deferred (in field order):
+///   sv101_name wstring
+///   sv101_comment wstring
+/// trailer:
+///   DWORD          Status               ; Win32 error code
+/// ```
+///
+/// On `ServerInfo == NULL` we still must read the trailing `Status` —
+/// that's the canonical "error returned, no info" shape, hit when the
+/// server denies the call (e.g. `5 = ERROR_ACCESS_DENIED` on a hardened
+/// member server queried by a non-admin).
+pub fn decode_netr_server_get_info_response(stub: &[u8]) -> Result<ServerInfo101> {
+    let mut r = NdrReader::new(stub);
+
+    let level = r.read_u32()?;
+    if level != 101 {
+        return Err(DceRpcError::NdrDecode(format!(
+            "expected level=101 in NetrServerGetInfo response, got {level}"
+        )));
+    }
+    let tag = r.read_u32()?;
+    if tag != level {
+        return Err(DceRpcError::NdrDecode(format!(
+            "union tag {tag} ≠ level {level} (corrupt discriminator)"
+        )));
+    }
+    let info_present = r.read_unique_referent()?;
+
+    let mut out = ServerInfo101::default();
+    if info_present {
+        out.platform_id = r.read_u32()?;
+        let name_present = r.read_unique_referent()?;
+        out.version_major = r.read_u32()?;
+        out.version_minor = r.read_u32()?;
+        out.server_type = r.read_u32()?;
+        let comment_present = r.read_unique_referent()?;
+
+        // Deferred wstrings, in field order. Empty-but-non-null is
+        // legitimate and produces a `String::new()` — distinct from the
+        // NULL-pointer case (where we leave the field at its default).
+        if name_present {
+            out.name = r.read_conformant_varying_wstring()?;
+        }
+        if comment_present {
+            out.comment = r.read_conformant_varying_wstring()?;
+        }
+    }
+
+    out.status = r.read_u32()?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -519,6 +657,129 @@ mod tests {
         assert_eq!(resp.status, 0);
     }
 
+    // -----------------------------------------------------------------------
+    // NetrServerGetInfo (opnum 21) — request encoder + response decoder
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn server_get_info_request_layout() {
+        // Request stub: [unique]ServerName ref + wstring + Level=101.
+        // The encoder auto-appends NUL, so "\\\\HOST" (6 chars) becomes 7 WCHARs.
+        let stub = encode_netr_server_get_info_request("\\\\HOST", 101);
+        // ServerName referent @ 0..4 (non-zero), wstring max=7 @ 4..8,
+        // offset=0 @ 8..12, actual=7 @ 12..16, then 7 WCHARs (14 bytes) @ 16..30,
+        // pad to u32 align (2 bytes) @ 30..32, Level=101 @ 32..36.
+        assert_eq!(stub.len(), 36);
+        assert_ne!(u32::from_le_bytes([stub[0], stub[1], stub[2], stub[3]]), 0);
+        assert_eq!(&stub[4..8], 7u32.to_le_bytes());
+        assert_eq!(&stub[8..12], 0u32.to_le_bytes());
+        assert_eq!(&stub[12..16], 7u32.to_le_bytes());
+        let expected: Vec<u8> = "\\\\HOST\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(&stub[16..30], &expected[..]);
+        assert_eq!(&stub[32..36], 101u32.to_le_bytes());
+    }
+
+    #[test]
+    fn server_get_info_response_roundtrip_full() {
+        // Synthesise a level-101 response with all wstrings non-null.
+        let mut w = NdrWriter::new();
+        w.write_u32(101); // Level
+        w.write_u32(101); // union tag
+        w.write_unique_ptr(true, |w| {
+            w.write_u32(500); // platform_id (PLATFORM_ID_NT)
+            w.write_unique_ptr(true, |w| {
+                w.write_conformant_varying_wstring("DC01");
+            });
+            w.write_u32(10); // version_major
+            w.write_u32(0); // version_minor
+            w.write_u32(0x8003); // server_type (SV_TYPE_DOMAIN_CTRL | SV_TYPE_SERVER | SV_TYPE_WORKSTATION)
+            w.write_unique_ptr(true, |w| {
+                w.write_conformant_varying_wstring("Primary DC");
+            });
+        });
+        w.flush_deferred();
+        w.write_u32(0); // Status = SUCCESS
+        let stub = w.finish();
+
+        let info = decode_netr_server_get_info_response(&stub).expect("decode");
+        assert_eq!(info.platform_id, 500);
+        assert_eq!(info.name, "DC01");
+        assert_eq!(info.version_major, 10);
+        assert_eq!(info.version_minor, 0);
+        assert_eq!(info.server_type, 0x8003);
+        assert_eq!(info.comment, "Primary DC");
+        assert_eq!(info.status, 0);
+    }
+
+    #[test]
+    fn server_get_info_response_handles_empty_comment() {
+        // Some servers return an empty `comment` as a non-null pointer to a
+        // 1-WCHAR (just the terminating NUL) string — we must accept that
+        // and not confuse it for the NULL pointer case.
+        let mut w = NdrWriter::new();
+        w.write_u32(101);
+        w.write_u32(101);
+        w.write_unique_ptr(true, |w| {
+            w.write_u32(500);
+            w.write_unique_ptr(true, |w| {
+                w.write_conformant_varying_wstring("HOST");
+            });
+            w.write_u32(6);
+            w.write_u32(1);
+            w.write_u32(0x1003);
+            w.write_unique_ptr(true, |w| {
+                w.write_conformant_varying_wstring(""); // empty but non-null
+            });
+        });
+        w.flush_deferred();
+        w.write_u32(0);
+        let stub = w.finish();
+
+        let info = decode_netr_server_get_info_response(&stub).expect("decode");
+        assert_eq!(info.name, "HOST");
+        assert_eq!(info.comment, "");
+        assert_eq!(info.version_major, 6);
+        assert_eq!(info.version_minor, 1);
+    }
+
+    #[test]
+    fn server_get_info_response_null_info_pointer_with_error_status() {
+        // ERROR_ACCESS_DENIED (5) — server refused, no SERVER_INFO_101 follows.
+        let mut w = NdrWriter::new();
+        w.write_u32(101);
+        w.write_u32(101);
+        w.write_null_referent(); // ServerInfo pointer = NULL
+        w.flush_deferred();
+        w.write_u32(5); // Status = ACCESS_DENIED
+        let stub = w.finish();
+
+        let info = decode_netr_server_get_info_response(&stub).expect("decode");
+        assert_eq!(info.status, 5);
+        assert_eq!(info.name, ""); // defaults preserved
+        assert_eq!(info.platform_id, 0);
+    }
+
+    #[test]
+    fn server_get_info_response_rejects_wrong_level() {
+        let mut w = NdrWriter::new();
+        w.write_u32(102); // we only decode 101
+        let stub = w.finish();
+        assert!(decode_netr_server_get_info_response(&stub).is_err());
+    }
+
+    #[test]
+    fn server_get_info_response_rejects_tag_level_mismatch() {
+        // Level=101 but tag=100 — corrupt union discriminator.
+        let mut w = NdrWriter::new();
+        w.write_u32(101);
+        w.write_u32(100);
+        let stub = w.finish();
+        assert!(decode_netr_server_get_info_response(&stub).is_err());
+    }
+
     /// Our encoder must produce a request that Impacket-style decoders can
     /// round-trip back. We can't byte-compare because Impacket's referent
     /// IDs and `\xab\xab` padding bytes are implementation-specific, but we
@@ -526,7 +787,8 @@ mod tests {
     /// offset for the `LPSHARE_INFO_1_CONTAINER` wire layout.
     #[test]
     fn request_encoder_matches_impacket_layout() {
-        let stub = encode_netr_share_enum_request("\\\\SERVER", 0xFFFF_FFFF, 0);
+        // The fixture generator uses "\\\\SERVER\x00" (9 WCHARs incl. NUL).
+        let stub = encode_netr_share_enum_request("\\\\SERVER\0", 0xFFFF_FFFF, 0);
         assert_eq!(stub.len(), 68, "request must be 68 bytes");
 
         // ServerName wstring: referent @ 0-3, max @ 4-7, offset @ 8-11,

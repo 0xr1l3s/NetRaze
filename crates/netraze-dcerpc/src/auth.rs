@@ -52,7 +52,7 @@ const NTLM_SIGNATURE_VERSION: u32 = 1;
 
 /// Size of the fixed on-wire `NTLMSSP_MESSAGE_SIGNATURE`:
 /// `version(4) + checksum(8) + seq_num(4)`.
-const NTLM_SIGNATURE_SIZE: usize = 16;
+pub(crate) const NTLM_SIGNATURE_SIZE: usize = 16;
 
 /// Auth levels defined in MS-RPCE §2.2.1.1.8. Only the ones we'll ever emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,11 +304,18 @@ impl NtlmAuthenticator {
     ///
     /// Increments `send_seq` on success.
     ///
-    /// The signed input per MS-RPCE §2.2.2.11 is
-    /// `seq_num_LE || stub_padded || sec_trailer_bytes` — the PDU header is
-    /// explicitly **not** part of the signature (that's only true for
-    /// packet-level signing modes on DCE/RPC over UDP, which we don't do).
-    pub fn seal_request(&mut self, stub: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    /// Seal + sign a DCE/RPC request stub.
+    ///
+    /// `prefix` is every byte that precedes the stub in the PDU — for a
+    /// Request this is `header(16) + alloc_hint(4) + context_id(2) + opnum(2)`.
+    /// `stub` is the plaintext NDR-encoded parameter block.
+    ///
+    /// Returns `(sealed_stub_padded, auth_verifier)` where the sealed stub
+    /// includes the alignment padding required before the `auth_verifier`.
+    ///
+    /// The signed input per MS-RPCE §2.2.2.11 / Impacket is
+    /// `seq_num_LE || prefix || stub_padded || sec_trailer_bytes`.
+    pub fn seal_request(&mut self, prefix: &[u8], stub: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         if !matches!(self.level, AuthLevel::PktPrivacy) {
             return Err(DceRpcError::NotImplemented(
                 "seal_request: only PKT_PRIVACY supported in Phase 1",
@@ -316,8 +323,7 @@ impl NtlmAuthenticator {
         }
 
         // Pad stub to a 4-byte boundary. Impacket uses 0xBB as a sanity
-        // marker; we use 0x00 — the receiver ignores pad bytes entirely,
-        // and 0x00 matches what Samba emits.
+        // marker; we use 0x00 — the receiver ignores pad bytes entirely.
         let pad_len = (4 - (stub.len() % 4)) % 4;
         let mut stub_padded = Vec::with_capacity(stub.len() + pad_len);
         stub_padded.extend_from_slice(stub);
@@ -333,12 +339,17 @@ impl NtlmAuthenticator {
         let mut sec_trailer_bytes = Vec::with_capacity(SecTrailer::SIZE);
         sec_trailer.encode_to(&mut sec_trailer_bytes);
 
-        // 1. Compute HMAC over plaintext: seqnum_LE || stub_padded || sec_trailer.
+        // 1. Build the exact byte string that the HMAC is computed over.
         let seqnum_le = self.send_seq.to_le_bytes();
-        let full_mic = hmac_md5_concat(
-            &self.client_signing_key,
-            &[&seqnum_le, &stub_padded, &sec_trailer_bytes],
+        let mut message_to_sign = Vec::with_capacity(
+            seqnum_le.len() + prefix.len() + stub_padded.len() + sec_trailer_bytes.len(),
         );
+        message_to_sign.extend_from_slice(&seqnum_le);
+        message_to_sign.extend_from_slice(prefix);
+        message_to_sign.extend_from_slice(&stub_padded);
+        message_to_sign.extend_from_slice(&sec_trailer_bytes);
+
+        let full_mic = hmac_md5_concat(&self.client_signing_key, &[&message_to_sign]);
         let mut checksum = [0u8; 8];
         checksum.copy_from_slice(&full_mic[..8]);
 
@@ -366,17 +377,25 @@ impl NtlmAuthenticator {
 
     /// Decrypt + verify a response fragment.
     ///
+    /// `prefix` is every byte that precedes the stub in the PDU — for a
+    /// Response this is `header(16) + alloc_hint(4) + context_id(2) +
+    /// cancel_count(1) + reserved(1)`.
+    ///
     /// `sealed_stub` is mutated in place to plaintext. Pad bytes are **not**
     /// stripped — the caller inspects `SecTrailer::decode(&auth_verifier[..8])?
-    /// .auth_pad_length` and truncates themselves. This keeps the decrypt
-    /// layer free of any application-level stub knowledge.
+    /// .auth_pad_length` and truncates themselves.
     ///
     /// On success, increments `recv_seq`. On failure (signature mismatch,
     /// wrong seq_num, malformed auth_verifier) the authenticator state is
     /// left as it was **except** that the RC4 keystream has already been
     /// advanced — so a failed verification forces the caller to tear down
     /// the connection; there is no safe way to re-sync.
-    pub fn unseal_response(&mut self, sealed_stub: &mut [u8], auth_verifier: &[u8]) -> Result<()> {
+    pub fn unseal_response(
+        &mut self,
+        prefix: &[u8],
+        sealed_stub: &mut [u8],
+        auth_verifier: &[u8],
+    ) -> Result<()> {
         if !matches!(self.level, AuthLevel::PktPrivacy) {
             return Err(DceRpcError::NotImplemented(
                 "unseal_response: only PKT_PRIVACY supported in Phase 1",
@@ -409,21 +428,21 @@ impl NtlmAuthenticator {
         // 2. Decrypt checksum (continues same keystream — key_exch path).
         self.server_sealing.transform(&mut sealed_checksum);
 
-        // 3. Re-encode sec_trailer bytes for HMAC input — we can't reuse
-        //    `&auth_verifier[..8]` because SecTrailer::decode accepted
-        //    possibly-unused bytes (auth_reserved) and we want to sign the
-        //    canonical form. In practice they're identical for a
-        //    well-formed trailer, but being explicit prevents a ranzy
-        //    signed-malleability surprise.
+        // 3. Re-encode sec_trailer bytes for HMAC input.
         let mut sec_trailer_bytes = Vec::with_capacity(SecTrailer::SIZE);
         sec_trailer.encode_to(&mut sec_trailer_bytes);
 
-        // 4. Re-compute expected HMAC over plaintext stub + sec_trailer.
+        // 4. Re-compute expected HMAC over plaintext prefix || stub + sec_trailer.
         let seqnum_le = seq_num.to_le_bytes();
-        let full_mic = hmac_md5_concat(
-            &self.server_signing_key,
-            &[&seqnum_le, sealed_stub, &sec_trailer_bytes],
+        let mut message_to_sign = Vec::with_capacity(
+            seqnum_le.len() + prefix.len() + sealed_stub.len() + sec_trailer_bytes.len(),
         );
+        message_to_sign.extend_from_slice(&seqnum_le);
+        message_to_sign.extend_from_slice(prefix);
+        message_to_sign.extend_from_slice(sealed_stub);
+        message_to_sign.extend_from_slice(&sec_trailer_bytes);
+
+        let full_mic = hmac_md5_concat(&self.server_signing_key, &[&message_to_sign]);
         let expected = &full_mic[..8];
 
         if !ct_eq(&sealed_checksum, expected) {
@@ -565,6 +584,10 @@ struct NtlmChallenge {
     server_challenge: [u8; 8],
     target_info: Vec<u8>,
     timestamp: Option<[u8; 8]>,
+    /// The NegotiateFlags field from the server's CHALLENGE message.
+    /// The client MUST echo these back in the AUTHENTICATE message
+    /// (MS-NLMP §3.2.5.1.3).
+    negotiate_flags: u32,
 }
 
 fn parse_ntlmssp_challenge(data: &[u8]) -> Result<NtlmChallenge> {
@@ -587,6 +610,8 @@ fn parse_ntlmssp_challenge(data: &[u8]) -> Result<NtlmChallenge> {
     let mut server_challenge = [0u8; 8];
     server_challenge.copy_from_slice(&data[24..32]);
 
+    let negotiate_flags = u32::from_le_bytes(data[20..24].try_into().unwrap());
+
     let target_info = if data.len() >= 48 {
         let ti_len = u16::from_le_bytes(data[40..42].try_into().unwrap()) as usize;
         let ti_off = u32::from_le_bytes(data[44..48].try_into().unwrap()) as usize;
@@ -606,6 +631,7 @@ fn parse_ntlmssp_challenge(data: &[u8]) -> Result<NtlmChallenge> {
         server_challenge,
         target_info,
         timestamp,
+        negotiate_flags,
     })
 }
 
@@ -706,6 +732,8 @@ fn build_ntlmssp_authenticate(
     response: &NtlmV2Response,
     username: &str,
     domain: &str,
+    negotiate_flags: u32,
+    mic_input: Option<(&[u8], &[u8], &[u8; 16])>,
 ) -> (Vec<u8>, [u8; 16]) {
     fn write_fields(out: &mut Vec<u8>, len: u16, off: u32) {
         out.extend_from_slice(&len.to_le_bytes());
@@ -726,8 +754,10 @@ fn build_ntlmssp_authenticate(
     let random_session_key = rand_array::<16>();
     let encrypted_session_key = rc4_oneshot(&random_session_key, &response.session_base_key);
 
-    // Header layout: 8 sig + 4 type + 6×8 fields + 4 flags + 8 version = 72.
-    let payload_offset = 72u32;
+    // MS-NLMP §2.2.1.3: when NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY is set,
+    // a 16-byte MIC field sits at offset 72, *before* the variable payload.
+    let has_mic = mic_input.is_some();
+    let payload_offset = if has_mic { 88u32 } else { 72u32 };
     let lm_off = payload_offset;
     let nt_off = lm_off + response.lm_response.len() as u32;
     let dom_off = nt_off + response.nt_response.len() as u32;
@@ -746,9 +776,14 @@ fn build_ntlmssp_authenticate(
     write_fields(&mut msg, workstation_utf16.len() as u16, ws_off);
     write_fields(&mut msg, encrypted_session_key.len() as u16, sk_off);
 
-    msg.extend_from_slice(&NTLMSSP_NEGOTIATE_FLAGS.to_le_bytes());
+    msg.extend_from_slice(&negotiate_flags.to_le_bytes());
     // Version: 10.0, build 0, NTLM revision 15
     msg.extend_from_slice(&[10, 0, 0x00, 0x00, 0, 0, 0, 0x0f]);
+
+    // MIC placeholder at offset 72 (MS-NLMP §2.2.1.3).
+    if has_mic {
+        msg.extend_from_slice(&[0u8; 16]);
+    }
 
     msg.extend_from_slice(&response.lm_response);
     msg.extend_from_slice(&response.nt_response);
@@ -756,6 +791,14 @@ fn build_ntlmssp_authenticate(
     msg.extend_from_slice(&user_utf16);
     msg.extend_from_slice(&workstation_utf16);
     msg.extend_from_slice(&encrypted_session_key);
+
+    // MIC — MS-NLMP §3.2.5.1.9.  Required by Windows/Samba when
+    // NTLMSSP_NEGOTIATE_EXTENDED_SESSION_SECURITY is negotiated.
+    if let Some((neg, chal, session_base_key)) = mic_input {
+        let mic = hmac_md5_concat(session_base_key, &[neg, chal, &msg]);
+        // Overwrite the placeholder at offset 72.
+        msg[72..88].copy_from_slice(&mic);
+    }
 
     (msg, random_session_key)
 }
@@ -792,6 +835,9 @@ pub struct NtlmBinder {
     level: AuthLevel,
     context_id: u32,
     state: BinderState,
+    negotiate_blob: Vec<u8>,
+    challenge_blob: Vec<u8>,
+    challenge_flags: u32,
 }
 
 enum BinderState {
@@ -829,6 +875,9 @@ impl NtlmBinder {
             level,
             context_id,
             state: BinderState::Initial,
+            negotiate_blob: Vec::new(),
+            challenge_blob: Vec::new(),
+            challenge_flags: 0,
         }
     }
 
@@ -836,8 +885,9 @@ impl NtlmBinder {
     ///
     /// `auth_pad_length = 0` because the Bind PDU has no encrypted body to
     /// pad ahead of the verifier (MS-RPCE §2.2.2.11).
-    pub fn bind_verifier(&self) -> Vec<u8> {
+    pub fn bind_verifier(&mut self) -> Vec<u8> {
         let neg = build_ntlmssp_negotiate();
+        self.negotiate_blob = neg.clone();
         let trailer = SecTrailer {
             auth_type: AuthType::Ntlmssp,
             auth_level: self.level,
@@ -863,7 +913,9 @@ impl NtlmBinder {
                 "NtlmBinder: consume_challenge called twice".into(),
             ));
         }
+        self.challenge_blob = ntlmssp_blob.to_vec();
         let chal = parse_ntlmssp_challenge(ntlmssp_blob)?;
+        self.challenge_flags = chal.negotiate_flags;
         let response = compute_ntlmv2_response(&self.nt_hash, &self.username, &self.domain, &chal)?;
         self.state = BinderState::ChallengeConsumed { response };
         Ok(())
@@ -891,8 +943,17 @@ impl NtlmBinder {
             }
         };
 
-        let (auth_msg, exported_session_key) =
-            build_ntlmssp_authenticate(&response, &self.username, &self.domain);
+        let (auth_msg, exported_session_key) = build_ntlmssp_authenticate(
+            &response,
+            &self.username,
+            &self.domain,
+            self.challenge_flags,
+            Some((
+                &self.negotiate_blob,
+                &self.challenge_blob,
+                &response.session_base_key,
+            )),
+        );
 
         let trailer = SecTrailer {
             auth_type: AuthType::Ntlmssp,
@@ -905,8 +966,11 @@ impl NtlmBinder {
         trailer.encode_to(&mut verifier);
         verifier.extend_from_slice(&auth_msg);
 
-        let authenticator =
-            NtlmAuthenticator::new_ntlmv2_extended(exported_session_key, self.level, self.context_id);
+        let authenticator = NtlmAuthenticator::new_ntlmv2_extended(
+            exported_session_key,
+            self.level,
+            self.context_id,
+        );
         Ok((verifier, authenticator))
     }
 }
@@ -1036,7 +1100,8 @@ mod tests {
             NtlmAuthenticator::new_ntlmv2_extended(session_key, AuthLevel::PktPrivacy, 0);
 
         let stub = b"hello dcerpc world!"; // 19 bytes → 1 pad
-        let (sealed, auth_verifier) = client.seal_request(stub).unwrap();
+        let dummy_hdr = [0u8; 16];
+        let (sealed, auth_verifier) = client.seal_request(&dummy_hdr, stub).unwrap();
         assert_eq!(sealed.len() % 4, 0, "sealed stub must be 4-byte aligned");
         assert_eq!(auth_verifier.len(), SecTrailer::SIZE + NTLM_SIGNATURE_SIZE);
         assert_eq!(client.send_seq, 1);
@@ -1081,7 +1146,7 @@ mod tests {
         let seqnum_le = seq_num.to_le_bytes();
         let full_mic = hmac_md5_concat(
             &server_rx_signing,
-            &[&seqnum_le, &sealed_copy, &sec_trailer_bytes],
+            &[&seqnum_le, &dummy_hdr, &sealed_copy, &sec_trailer_bytes],
         );
         assert!(
             ct_eq(&sealed_checksum, &full_mic[..8]),
@@ -1108,7 +1173,8 @@ mod tests {
         let mut client =
             NtlmAuthenticator::new_ntlmv2_extended(session_key, AuthLevel::PktPrivacy, 0);
         let stub = b"\xde\xad\xbe\xef\xca\xfe\xba\xbe";
-        let (mut sealed, auth_verifier) = client.seal_request(stub).unwrap();
+        let dummy_hdr = [0u8; 16];
+        let (mut sealed, auth_verifier) = client.seal_request(&dummy_hdr, stub).unwrap();
 
         // Build a "server unseal" by flipping the sealing handles:
         // server.server_sealing needs to be what client.client_sealing was
@@ -1129,7 +1195,7 @@ mod tests {
         sealed[0] ^= 0x01;
 
         let err = server
-            .unseal_response(&mut sealed, &auth_verifier)
+            .unseal_response(&dummy_hdr, &mut sealed, &auth_verifier)
             .unwrap_err();
         match err {
             DceRpcError::Auth(_) => {}
@@ -1145,7 +1211,8 @@ mod tests {
         let mut client =
             NtlmAuthenticator::new_ntlmv2_extended(session_key, AuthLevel::PktPrivacy, 0x747A);
         let stub_orig = b"an odd length stub, seven mod four=3"; // 36 chars → 0 pad
-        let (mut sealed, auth_verifier) = client.seal_request(stub_orig).unwrap();
+        let dummy_hdr = [0u8; 16];
+        let (mut sealed, auth_verifier) = client.seal_request(&dummy_hdr, stub_orig).unwrap();
 
         let keys = derive_ntlmv2_keys(&session_key);
         let mut server = NtlmAuthenticator {
@@ -1158,7 +1225,9 @@ mod tests {
             client_sealing: Rc4::new(&keys.server_sealing),
             server_sealing: Rc4::new(&keys.client_sealing),
         };
-        server.unseal_response(&mut sealed, &auth_verifier).unwrap();
+        server
+            .unseal_response(&dummy_hdr, &mut sealed, &auth_verifier)
+            .unwrap();
 
         let sec_trailer = SecTrailer::decode(&auth_verifier[..SecTrailer::SIZE]).unwrap();
         let pad = sec_trailer.auth_pad_length as usize;
@@ -1169,7 +1238,7 @@ mod tests {
     #[test]
     fn seal_request_rejects_non_privacy_level() {
         let mut a = NtlmAuthenticator::new_ntlmv2_extended([0u8; 16], AuthLevel::PktIntegrity, 0);
-        let err = a.seal_request(b"x").unwrap_err();
+        let err = a.seal_request(&[0u8; 16], b"x").unwrap_err();
         assert!(matches!(err, DceRpcError::NotImplemented(_)));
     }
 
@@ -1179,13 +1248,8 @@ mod tests {
     /// transitively depend on `NTLMSSP_NEGOTIATE_FLAGS`.
     #[test]
     fn binder_emits_well_formed_negotiate() {
-        let binder = NtlmBinder::new(
-            [0xAA; 16],
-            "alice",
-            "WORKGROUP",
-            AuthLevel::PktPrivacy,
-            0,
-        );
+        let mut binder =
+            NtlmBinder::new([0xAA; 16], "alice", "WORKGROUP", AuthLevel::PktPrivacy, 0);
         let v = binder.bind_verifier();
         assert!(v.len() > SecTrailer::SIZE);
         // sec_trailer first byte is auth_type (10 = NTLMSSP)
@@ -1204,13 +1268,7 @@ mod tests {
 
     #[test]
     fn binder_finish_requires_consume_challenge() {
-        let binder = NtlmBinder::new(
-            [0xAA; 16],
-            "alice",
-            "WORKGROUP",
-            AuthLevel::PktPrivacy,
-            0,
-        );
+        let binder = NtlmBinder::new([0xAA; 16], "alice", "WORKGROUP", AuthLevel::PktPrivacy, 0);
         // `unwrap_err` would require NtlmAuthenticator: Debug; match instead.
         match binder.finish() {
             Ok(_) => panic!("finish without consume_challenge must fail"),
@@ -1248,7 +1306,10 @@ mod tests {
         assert_eq!(trailer.auth_context_id, 0x1234);
         assert_eq!(trailer.auth_type, AuthType::Ntlmssp);
         // NTLMSSP type-3 (AUTHENTICATE) signature + type
-        assert_eq!(&verifier[SecTrailer::SIZE..SecTrailer::SIZE + 8], b"NTLMSSP\0");
+        assert_eq!(
+            &verifier[SecTrailer::SIZE..SecTrailer::SIZE + 8],
+            b"NTLMSSP\0"
+        );
         let mtype = u32::from_le_bytes(
             verifier[SecTrailer::SIZE + 8..SecTrailer::SIZE + 12]
                 .try_into()
@@ -1256,18 +1317,13 @@ mod tests {
         );
         assert_eq!(mtype, 3);
         // Authenticator is usable for sealing.
-        let (_sealed, _verifier) = auth.seal_request(b"hello").unwrap();
+        let (_sealed, _verifier) = auth.seal_request(&[0u8; 16], b"hello").unwrap();
     }
 
     #[test]
     fn binder_double_consume_rejected() {
-        let mut binder = NtlmBinder::new(
-            [0xAA; 16],
-            "alice",
-            "WORKGROUP",
-            AuthLevel::PktPrivacy,
-            0,
-        );
+        let mut binder =
+            NtlmBinder::new([0xAA; 16], "alice", "WORKGROUP", AuthLevel::PktPrivacy, 0);
         let mut chal = Vec::new();
         chal.extend_from_slice(b"NTLMSSP\0");
         chal.extend_from_slice(&2u32.to_le_bytes());
@@ -1283,13 +1339,8 @@ mod tests {
 
     #[test]
     fn binder_rejects_non_ntlmssp_signature() {
-        let mut binder = NtlmBinder::new(
-            [0xAA; 16],
-            "alice",
-            "WORKGROUP",
-            AuthLevel::PktPrivacy,
-            0,
-        );
+        let mut binder =
+            NtlmBinder::new([0xAA; 16], "alice", "WORKGROUP", AuthLevel::PktPrivacy, 0);
         let mut bad = vec![0u8; 64];
         bad[..8].copy_from_slice(b"NOPE!\0\0\0");
         let err = binder.consume_challenge(&bad).unwrap_err();

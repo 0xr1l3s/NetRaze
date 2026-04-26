@@ -29,28 +29,32 @@ pub mod browser;
 #[path = "stubs/browser.rs"]
 pub mod browser;
 
-#[cfg(windows)]
-mod shares;
-#[cfg(not(windows))]
-#[path = "stubs/shares.rs"]
-mod shares;
+// Phase B.2 — SRVSVC NetrShareEnum over a sealed DCE/RPC channel + per-share
+// write probing via raw SMB2 CREATE. Replaces the Windows-only NetShareEnum
+// path and its NOT_PORTED stub. `pub mod` so integration tests can reach
+// `shares::enum_shares` directly (same pattern as `info`, `users`, …).
+#[path = "shares_rpc.rs"]
+pub mod shares;
 
-#[cfg(windows)]
-mod info;
-#[cfg(not(windows))]
-#[path = "stubs/info.rs"]
-mod info;
+// Phase B.1 — SRVSVC NetrServerGetInfo over a sealed DCE/RPC channel.
+// Single backend now; the Windows-only NetServerGetInfo path and the
+// Linux NOT_PORTED stub were both retired in favour of `info_rpc` so we
+// don't carry two divergent implementations long-term. `pub mod` so
+// integration tests under `tests/` can reach `info::get_server_info`
+// directly (same pattern as `users`, `dump`, `exec`, etc.).
+#[path = "info_rpc.rs"]
+pub mod info;
 
-#[cfg(windows)]
+// Phase B.3 -- SAMR user enumeration over a sealed DCE/RPC channel.
+// Single backend; the Windows-only NetUserEnum path and the Linux
+// NOT_PORTED stub are retired.
+#[path = "users_rpc.rs"]
 pub mod users;
-#[cfg(not(windows))]
-#[path = "stubs/users.rs"]
-pub mod users;
 
-#[cfg(windows)]
-pub mod dump;
-#[cfg(not(windows))]
-#[path = "stubs/dump.rs"]
+// Phase C -- WINREG BaseRegSaveKey + Hive parser for SAM dump.
+// Single backend; the Windows-only RegSaveKey path and the Linux
+// NOT_PORTED stub are retired.
+#[path = "dump_rpc.rs"]
 pub mod dump;
 
 #[cfg(windows)]
@@ -191,36 +195,50 @@ impl SmbClient {
         }
     }
 
-    /// Enumerate shares on the target.
+    /// Enumerate shares on the target via SRVSVC `NetrShareEnum`. Requires
+    /// authenticated credentials — Microsoft's DCE/RPC over named pipes
+    /// always runs its own NTLMSSP bind regardless of the SMB session
+    /// state, so an unconfigured `SmbClient` would have nothing to seal
+    /// the request with.
     pub async fn enum_shares(&self) -> Result<Vec<ShareInfo>, String> {
-        let target = self.target.clone();
-        tokio::task::spawn_blocking(move || shares::enum_shares(&target))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        let cred = self
+            .credential
+            .as_ref()
+            .ok_or("enum_shares requires credentials (SmbClient::with_credential)")?;
+        shares::enum_shares(&self.target, cred).await
     }
 
-    /// Enumerate shares on the target with access level checks.
+    /// Enumerate shares on the target with per-share read/write access
+    /// classification. Same authentication requirement as
+    /// [`SmbClient::enum_shares`].
     pub async fn enum_shares_with_access(&self) -> Result<Vec<ShareInfo>, String> {
-        let target = self.target.clone();
-        tokio::task::spawn_blocking(move || shares::enum_shares_with_access(&target))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        let cred = self
+            .credential
+            .as_ref()
+            .ok_or("enum_shares_with_access requires credentials (SmbClient::with_credential)")?;
+        shares::enum_shares_with_access(&self.target, cred).await
     }
 
-    /// Get server information.
+    /// Get server information via SRVSVC `NetrServerGetInfo` (opnum 21).
+    /// Requires authenticated credentials — Microsoft DCE/RPC over named
+    /// pipes does its own NTLMSSP bind regardless of the SMB session
+    /// state, so an unconfigured `SmbClient` would have nothing to seal
+    /// the request with.
     pub async fn server_info(&self) -> Result<ServerInfo, String> {
-        let target = self.target.clone();
-        tokio::task::spawn_blocking(move || info::get_server_info(&target))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        let cred = self
+            .credential
+            .as_ref()
+            .ok_or("server_info requires credentials (SmbClient::with_credential)")?;
+        info::get_server_info(&self.target, cred).await
     }
 
     /// Enumerate users (requires admin).
     pub async fn enum_users(&self) -> Result<Vec<UserInfo>, String> {
-        let target = self.target.clone();
-        tokio::task::spawn_blocking(move || users::enum_users(&target))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        let cred = self
+            .credential
+            .as_ref()
+            .ok_or("enum_users requires credentials (SmbClient::with_credential)")?;
+        users::enum_users(&self.target, cred).await
     }
 
     /// Check if current credentials grant admin access.
@@ -231,11 +249,13 @@ impl SmbClient {
             // Can't move &mut through spawn_blocking easily, check inline
             return session.check_admin(&target);
         }
-        // WNet path
-        let target = self.target.clone();
-        tokio::task::spawn_blocking(move || shares::can_access_admin_share(&target))
-            .await
-            .unwrap_or(false)
+        // Password / hash path: open a fresh session and probe ADMIN$.
+        // Requires credentials — without them there's nothing to bind
+        // with, so report `false` (matches the historical contract).
+        let Some(cred) = self.credential.as_ref() else {
+            return false;
+        };
+        shares::can_access_admin_share(&self.target, cred).await
     }
 
     /// Full scan: connect, gather info, enum shares/users, check admin.

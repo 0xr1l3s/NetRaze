@@ -180,8 +180,21 @@ impl NdrWriter {
     /// Alignment: the three u32 prefix starts aligned(4); the WCHARs follow
     /// on u16 alignment (already satisfied after three u32s).
     pub fn write_conformant_varying_wstring(&mut self, s: &str) {
-        let mut units: Vec<u16> = s.encode_utf16().collect();
-        units.push(0);
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let count = units.len() as u32;
+        self.write_u32(count); // max
+        self.write_u32(0); // offset
+        self.write_u32(count); // actual
+        for u in units {
+            self.write_u16(u);
+        }
+    }
+
+    /// Same as [`write_conformant_varying_wstring`](Self::write_conformant_varying_wstring)
+    /// but **without** the trailing NUL. Used for SAMR `PSAMPR_SERVER_NAME`
+    /// (`LPWSTR`) where Impacket/Windows do not emit a terminator.
+    pub fn write_conformant_varying_wstring_raw(&mut self, s: &str) {
+        let units: Vec<u16> = s.encode_utf16().collect();
         let count = units.len() as u32;
         self.write_u32(count); // max
         self.write_u32(0); // offset
@@ -210,6 +223,63 @@ impl NdrWriter {
         for item in items {
             write_element(self, item);
         }
+    }
+
+    /// Write a 20-byte RPC context handle inline (no alignment needed —
+    /// 20 is not a power of two, but the handle is always placed at a
+    /// 4-byte boundary by the surrounding struct layout).
+    pub fn write_context_handle(&mut self, h: &[u8; 20]) {
+        self.buf.extend_from_slice(h);
+    }
+
+    /// Write an `RPC_SID` (MS-DTYP §2.4.2.2) in NDR20.
+    ///
+    /// Layout: `Revision(u8) SubAuthorityCount(u8) IdentifierAuthority([u8;6], BE)
+    ///          SubAuthority[u32;Count]`.
+    /// The 6-byte authority is written big-endian per the spec; sub-authorities
+    /// are little-endian (NDR default).
+    pub fn write_rpc_sid(&mut self, sid: &[u8]) {
+        let owned = sid.to_owned();
+        assert!(owned.len() >= 8, "SID too short");
+        let count = owned[1] as usize;
+        assert_eq!(owned.len(), 8 + count * 4, "SID length mismatch");
+        // MS-RPCE §14.3.7.1: for a structure containing a conformant array as
+        // its last member, the max_count is moved to the beginning.
+        self.write_u32(count as u32); // max_count
+        self.write_u8(owned[0]); // Revision
+        self.write_u8(owned[1]); // SubAuthorityCount
+        self.buf.extend_from_slice(&owned[2..8]); // IdentifierAuthority (BE)
+        for i in 0..count {
+            let off = 8 + i * 4;
+            let sub =
+                u32::from_le_bytes([owned[off], owned[off + 1], owned[off + 2], owned[off + 3]]);
+            self.write_u32(sub);
+        }
+    }
+
+    /// Write an `RPC_UNICODE_STRING` (MS-DTYP §2.3.10) in NDR20.
+    ///
+    /// Wire layout (Impacket-style, which is what Samba/Windows expect for
+    /// SAMR structures):
+    ///
+    /// ```text
+    /// inline:
+    ///   Length           u16  (bytes, excluding NUL)
+    ///   MaximumLength    u16  (bytes, including NUL)
+    ///   [unique] Buffer  u32  (referent id)
+    /// deferred:
+    ///   conformant-varying WCHAR*  (max_count, offset, actual_count, chars+NUL)
+    /// ```
+    pub fn write_rpc_unicode_string(&mut self, s: &str) {
+        let owned = s.to_owned();
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let len_bytes = (units.len() * 2) as u16;
+        let max_len_bytes = len_bytes;
+        self.write_u16(len_bytes);
+        self.write_u16(max_len_bytes);
+        self.write_unique_ptr(true, move |w| {
+            w.write_conformant_varying_wstring(&owned);
+        });
     }
 }
 
@@ -338,6 +408,61 @@ impl<'a> NdrReader<'a> {
         }
         Ok(count as usize)
     }
+
+    /// Read a 20-byte RPC context handle.
+    pub fn read_context_handle(&mut self) -> Result<[u8; 20]> {
+        self.need(20)?;
+        let mut h = [0u8; 20];
+        h.copy_from_slice(&self.buf[self.pos..self.pos + 20]);
+        self.pos += 20;
+        Ok(h)
+    }
+
+    /// Read an `RPC_SID` (MS-DTYP §2.4.2.2) in NDR20.
+    pub fn read_rpc_sid(&mut self) -> Result<Vec<u8>> {
+        // MS-RPCE §14.3.7.1: conformant-array max_count is at the front of
+        // the struct. Verify it matches SubAuthorityCount.
+        let max_count = self.read_u32()? as usize;
+        let revision = self.read_u8()?;
+        let count = self.read_u8()? as usize;
+        if count > 15 {
+            return Err(DceRpcError::NdrDecode(format!(
+                "SID sub-authority count {count} exceeds max 15"
+            )));
+        }
+        if max_count != count {
+            // Defensive: some servers might be sloppy, but a mismatch is
+            // unusual enough to surface in case it signals corruption.
+            return Err(DceRpcError::NdrDecode(format!(
+                "SID max_count {max_count} != count {count}"
+            )));
+        }
+        let mut sid = Vec::with_capacity(8 + count * 4);
+        sid.push(revision);
+        sid.push(count as u8);
+        self.need(6)?;
+        sid.extend_from_slice(&self.buf[self.pos..self.pos + 6]);
+        self.pos += 6;
+        for _ in 0..count {
+            let sub = self.read_u32()?;
+            sid.extend_from_slice(&sub.to_le_bytes());
+        }
+        Ok(sid)
+    }
+
+    /// Read an `RPC_UNICODE_STRING` (MS-DTYP §2.3.10) in NDR20.
+    ///
+    /// See [`NdrWriter::write_rpc_unicode_string`] for the wire layout.
+    /// Returns the decoded string (trailing NUL stripped if present).
+    pub fn read_rpc_unicode_string(&mut self) -> Result<String> {
+        let _len = self.read_u16()?;
+        let _max_len = self.read_u16()?;
+        let present = self.read_unique_referent()?;
+        if !present {
+            return Ok(String::new());
+        }
+        self.read_conformant_varying_wstring()
+    }
 }
 
 #[cfg(test)]
@@ -404,8 +529,8 @@ mod tests {
         let bytes = w.finish();
         // First 4 bytes = referent (non-zero). Skip them and decode the
         // remaining wstring. Wstring layout: 12B prefix (max/offset/actual)
-        // + 6 WCHARs ("hello" + NUL).
-        assert_eq!(bytes.len(), 4 + 12 + 6 * 2);
+        // + 5 WCHARs ("hello" — no implicit NUL added).
+        assert_eq!(bytes.len(), 4 + 12 + 5 * 2);
         let referent = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_ne!(referent, 0);
         let mut r = NdrReader::new(&bytes[4..]);

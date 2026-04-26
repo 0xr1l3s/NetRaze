@@ -169,6 +169,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 secret: state.new_cred_secret.drain(..).collect(),
                 cred_type: state.new_cred_type.clone(),
                 valid: None,
+                active: true,
+                protocol: String::new(),
+                source: String::new(),
+                notes: String::new(),
+                tags: Vec::new(),
+                created_at: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                ),
             });
         }
 

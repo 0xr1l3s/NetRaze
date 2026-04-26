@@ -22,6 +22,7 @@ const SMB2_TREE_DISCONNECT: u16 = 4;
 const SMB2_CREATE: u16 = 5;
 const SMB2_CLOSE: u16 = 6;
 const SMB2_READ: u16 = 8;
+const SMB2_WRITE: u16 = 9;
 const SMB2_IOCTL: u16 = 11;
 
 /// MS-FSCC §2.3 — bidirectional named-pipe transceive. Carrier for DCE/RPC
@@ -40,8 +41,11 @@ pub const SMB2_0_IOCTL_IS_FSCTL: u32 = 0x0000_0001;
 const PIPE_DESIRED_ACCESS: u32 = 0x0012_019F;
 
 pub const STATUS_SUCCESS: u32 = 0;
+pub const STATUS_PENDING: u32 = 0x00000103;
 pub const STATUS_MORE_PROCESSING: u32 = 0xC0000016;
+pub const STATUS_ACCESS_DENIED: u32 = 0xC0000022;
 pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC0000034;
+pub const STATUS_OBJECT_PATH_NOT_FOUND: u32 = 0xC000003A;
 pub const STATUS_SHARING_VIOLATION: u32 = 0xC0000043;
 pub const STATUS_END_OF_FILE: u32 = 0xC0000011;
 pub const STATUS_PIPE_DISCONNECTED: u32 = 0xC000_00B0;
@@ -444,14 +448,48 @@ impl Smb2Session {
         packet.extend_from_slice(request);
 
         self.send_packet(&packet)?;
+
+        // Some servers (Samba in particular) may return STATUS_PENDING on
+        // FSCTL_PIPE_TRANSCEIVE before the final response is ready. Loop
+        // until we get a definitive status.
+        loop {
+            let resp = self.recv_packet()?;
+            let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
+            if status == STATUS_SUCCESS {
+                return parse_pipe_transceive_response(&resp);
+            }
+            if status != STATUS_PENDING {
+                return Err(format!("pipe_transceive: 0x{status:08x}"));
+            }
+        }
+    }
+
+    /// SMB2 WRITE on a pipe handle: push `data` to the server with no read
+    /// side. We still consume the WRITE Response (just to ack the bytes
+    /// written and keep `message_id` in sync) but never queue a read for
+    /// reply data — there isn't any.
+    ///
+    /// Used exclusively by the DCE/RPC layer for AUTH3 PDUs, which are
+    /// one-way per MS-RPCE §2.2.2.5. Sending an AUTH3 via
+    /// `pipe_transceive` would deadlock: the IOCTL's read half blocks
+    /// waiting for response bytes that the server will never produce.
+    pub fn pipe_write(&mut self, handle: &PipeHandle, data: &[u8]) -> Result<(), String> {
+        let body = build_pipe_write_body(&handle.file_id, data.len() as u32);
+        let hdr = self.build_header(SMB2_WRITE, handle.tree_id);
+
+        let mut packet = Vec::with_capacity(hdr.len() + body.len() + data.len());
+        packet.extend_from_slice(&hdr);
+        packet.extend_from_slice(&body);
+        packet.extend_from_slice(data);
+
+        self.send_packet(&packet)?;
         let resp = self.recv_packet()?;
 
         let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
         if status != STATUS_SUCCESS {
-            return Err(format!("pipe_transceive: 0x{status:08x}"));
+            return Err(format!("pipe_write: 0x{status:08x}"));
         }
-
-        parse_pipe_transceive_response(&resp)
+        Ok(())
     }
 
     /// SMB2 CLOSE on a pipe handle. Idempotent at the protocol level — the
@@ -473,6 +511,84 @@ impl Smb2Session {
             return Err(format!("pipe_close: 0x{status:08x}"));
         }
         Ok(())
+    }
+
+    /// Probe whether the current session can write to `share` via `tree_id`.
+    ///
+    /// Sends a CREATE Request with `DesiredAccess = FILE_WRITE_DATA` for a
+    /// non-existent probe filename (caller picks the random suffix). The
+    /// server checks ACLs **before** checking that the file exists, so:
+    ///
+    /// - `STATUS_OBJECT_NAME_NOT_FOUND` (0xC0000034) → write would be granted
+    ///   if the file existed → `Ok(true)`. This is the canonical "writable"
+    ///   signal; we never actually create or modify anything.
+    /// - `STATUS_OBJECT_PATH_NOT_FOUND` (0xC000003A) → same idea, just a
+    ///   different leaf-vs-parent code path inside the server.
+    /// - `STATUS_ACCESS_DENIED` (0xC0000022) → server refused at the ACL
+    ///   check → `Ok(false)`. Read-only.
+    /// - `STATUS_SUCCESS` → file actually existed (collision on the random
+    ///   probe name); we close the handle and report `Ok(true)`.
+    /// - Any other status is propagated as `Err` so the caller can log /
+    ///   classify it; the share-access detection layer maps Err→Read as a
+    ///   safe default.
+    ///
+    /// Mirrors `check_share_access` in the Windows-native `shares.rs` but
+    /// runs identically on every OS via raw SMB2.
+    pub fn probe_write(&mut self, tree_id: u32, rel_path: &str) -> Result<bool, String> {
+        let name_utf16: Vec<u8> = rel_path
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+
+        let hdr = self.build_header(SMB2_CREATE, tree_id);
+
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
+        body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
+        // DesiredAccess = FILE_WRITE_DATA (0x02). The whole point of the
+        // probe is to ask the server "would you give me write?" — anything
+        // beyond that bit risks tripping unrelated ACL checks.
+        body[24..28].copy_from_slice(&0x0000_0002u32.to_le_bytes());
+        body[32..36].copy_from_slice(&0x0000_0007u32.to_le_bytes()); // ShareAccess RWD
+        body[36..40].copy_from_slice(&1u32.to_le_bytes()); // CreateDisposition=FILE_OPEN
+        body[40..44].copy_from_slice(&0x40u32.to_le_bytes()); // CreateOptions=FILE_NON_DIRECTORY_FILE
+
+        let name_offset = if name_utf16.is_empty() {
+            0u16
+        } else {
+            (SMB2_HEADER_SIZE + 56) as u16
+        };
+        body[44..46].copy_from_slice(&name_offset.to_le_bytes());
+        body[46..48].copy_from_slice(&(name_utf16.len() as u16).to_le_bytes());
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&hdr);
+        packet.extend_from_slice(&body);
+        if name_utf16.is_empty() {
+            packet.push(0);
+        } else {
+            packet.extend_from_slice(&name_utf16);
+        }
+
+        self.send_packet(&packet)?;
+        let resp = self.recv_packet()?;
+
+        let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
+        match status {
+            STATUS_SUCCESS => {
+                // File actually existed — close the handle we just got.
+                if resp.len() >= SMB2_HEADER_SIZE + 88 {
+                    let body_off = SMB2_HEADER_SIZE;
+                    let mut fid = [0u8; 16];
+                    fid.copy_from_slice(&resp[body_off + 64..body_off + 80]);
+                    let _ = self.close_file(tree_id, &fid);
+                }
+                Ok(true)
+            }
+            STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND => Ok(true),
+            STATUS_ACCESS_DENIED => Ok(false),
+            other => Err(format!("probe_write: 0x{other:08x}")),
+        }
     }
 
     /// Send SMB2 Logoff.
@@ -723,6 +839,32 @@ fn build_pipe_transceive_body(file_id: &[u8; 16], request_len: u32) -> Vec<u8> {
     body
 }
 
+/// Build the fixed 48-byte WRITE Request body for a pipe handle. The
+/// caller appends the payload bytes after this body.
+///
+/// Layout per MS-SMB2 §2.2.21:
+///   - StructureSize = 49 (0x31), the "fixed body + 1" sentinel
+///   - DataOffset    = SMB2_HEADER_SIZE + 48 — payload starts right after body
+///   - Length        = `data_len`
+///   - Offset        = 0 (pipes ignore this field)
+///   - FileId        = 16 bytes
+///   - Channel/RemainingBytes/WriteChannelInfo*/Flags = 0
+fn build_pipe_write_body(file_id: &[u8; 16], data_len: u32) -> Vec<u8> {
+    let mut body = vec![0u8; 48];
+    body[0..2].copy_from_slice(&49u16.to_le_bytes()); // StructureSize
+    let data_offset = (SMB2_HEADER_SIZE + 48) as u16;
+    body[2..4].copy_from_slice(&data_offset.to_le_bytes()); // DataOffset
+    body[4..8].copy_from_slice(&data_len.to_le_bytes()); // Length
+    // body[8..16]   Offset = 0 (pipe)
+    body[16..32].copy_from_slice(file_id);
+    // body[32..36]  Channel = 0
+    // body[36..40]  RemainingBytes = 0
+    // body[40..42]  WriteChannelInfoOffset = 0
+    // body[42..44]  WriteChannelInfoLength = 0
+    // body[44..48]  Flags = 0
+    body
+}
+
 /// Build the fixed 24-byte CLOSE Request body for a pipe handle.
 fn build_pipe_close_body(file_id: &[u8; 16]) -> Vec<u8> {
     let mut body = vec![0u8; 24];
@@ -855,6 +997,29 @@ mod pipe_tests {
         assert_eq!(&body[44..48], &65_535u32.to_le_bytes());
         // Flags = SMB2_0_IOCTL_IS_FSCTL (1)
         assert_eq!(&body[48..52], &[0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn pipe_write_body_lays_out_expected_bytes() {
+        let mut file_id = [0u8; 16];
+        for (i, b) in file_id.iter_mut().enumerate() {
+            *b = 0x10u8.wrapping_add(i as u8);
+        }
+        let body = build_pipe_write_body(&file_id, 64);
+
+        assert_eq!(body.len(), 48, "fixed WRITE body must be exactly 48 bytes");
+        // StructureSize = 49 (0x31)
+        assert_eq!(&body[0..2], &49u16.to_le_bytes());
+        // DataOffset = SMB2_HEADER_SIZE(64) + 48 = 112 (0x70)
+        assert_eq!(&body[2..4], &112u16.to_le_bytes());
+        // Length = 64
+        assert_eq!(&body[4..8], &64u32.to_le_bytes());
+        // Offset = 0 (pipes ignore this)
+        assert_eq!(&body[8..16], &[0u8; 8]);
+        // FileId
+        assert_eq!(&body[16..32], &file_id);
+        // Channel / RemainingBytes / WriteChannelInfo* / Flags = 0
+        assert_eq!(&body[32..48], &[0u8; 16]);
     }
 
     #[test]

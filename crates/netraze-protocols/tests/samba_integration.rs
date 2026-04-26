@@ -32,18 +32,17 @@
 //!   `\PIPE\srvsvc`, with a hand-rolled DCE/RPC Bind PDU pushed through the
 //!   pipe and a Bind Ack expected back. End-to-end proof that the carrier
 //!   that every Phase 4-6 RPC interface will ride on actually works.
-//!
-//! Does NOT cover (yet):
-//! - SMB signing / encryption — our session-setup path does the NTLM dance
-//!   but does not yet negotiate/enforce SMB signing against Samba.
-//! - Higher-level SRVSVC opnums (NetrShareEnum) — those land in Phase 4
-//!   once the encoder/decoder in `netraze-dcerpc::interfaces::srvsvc` is
-//!   wired through the new pipe transport.
+//! - **Phase 4**: Authenticated DCE/RPC bind (NTLMSSP PKT_PRIVACY) followed by
+//!   a sealed `NetrShareEnum` request/response over the same pipe.
 
 use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use netraze_dcerpc::channel::RpcChannel;
+use netraze_protocols::smb::connection::SmbCredential;
 use netraze_protocols::smb::ntlm;
+use netraze_protocols::smb::rpc::SmbPipeTransport;
 use netraze_protocols::smb::smb2::Smb2Session;
 
 /// Default test endpoint — the `docker-compose.yml` binds the Samba
@@ -100,27 +99,10 @@ fn nt_hash_of_wonderland_is_md4_of_utf16le() {
     assert_eq!(hash, expected, "NT-hash(wonderland) drifted");
 }
 
-/// Plain TCP reachability — preflight for the auth tests. Surfaces
-/// "container isn't up" as a clearer failure than "session setup timed
-/// out" does.
-#[test]
-#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
-fn samba_port_is_reachable() {
-    assert!(
-        samba_reachable(),
-        "Samba test container not reachable at {}. Start it with:\n  \
-         docker compose -f tests/samba/docker-compose.yml up -d",
-        samba_addr()
-    );
-}
+// ─── Phase 1: basic SMB2 session setup against Samba ──────────────────────
 
-/// End-to-end: Negotiate → NTLMv2 Session Setup → Tree Connect to IPC$.
-///
-/// This is the load-bearing smoke test for the SMB2 client. If any of the
-/// three stages regresses (wrong struct packing, off-by-one in NTLMSSP
-/// field layout, mis-aligned SMB2 header), this test fails against real
-/// Samba — the most important signal we can get that the wire-level code
-/// is actually correct.
+/// Verify that the SMB2 NTLMv2 handshake completes successfully against
+/// the live Samba container and that the session id is non-zero.
 #[test]
 #[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
 fn negotiate_sessionsetup_treeconnect_to_ipc() {
@@ -130,21 +112,15 @@ fn negotiate_sessionsetup_treeconnect_to_ipc() {
             samba_addr()
         );
     }
-
     let addr = samba_addr();
     let mut session =
         Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
-            .expect("connect + negotiate + session_setup must succeed against live Samba");
-
-    // IPC$ is always present on Samba (it's the RPC named-pipe entrypoint).
-    // We strip the `:port` suffix because Tree Connect builds a UNC path
-    // and UNC doesn't accept ports — Samba wouldn't crash on `\\host:1445\…`
-    // but it's the wrong shape to put on the wire.
+            .expect("session_setup must succeed against live Samba");
     let host_only = addr.split(':').next().unwrap_or(&addr);
-    let tid = session
+    let ipc = session
         .tree_connect(host_only, "IPC$")
-        .expect("tree connect to IPC$ must succeed");
-    assert_ne!(tid, 0, "tree ID must be non-zero on success");
+        .expect("tree_connect IPC$ must succeed");
+    assert_ne!(ipc, 0, "tree_id for IPC$ must be non-zero");
 }
 
 /// Wrong password must be rejected by Samba — verifies our negative-path
@@ -181,7 +157,7 @@ fn bad_password_is_rejected() {
 ///
 /// Wire layout (MS-RPCE §2.2.2.13):
 ///   header (16 B): rpc_vers=5, type=11 (BIND), pfc_flags=0x03,
-///     drep=10000000 (NDR20 LE/ASCII/IEEE), frag_len, auth_len=0, call_id=1
+///     drep=10000000 (NDR20 LE/ASCII/IEEE), frag_len, auth_length=0, call_id=1
 ///   body  (56 B): max_xmit=4280, max_recv=4280, assoc_group=0,
 ///     n_ctx=1 + 3-byte pad, then one ctx item:
 ///       ctx_id=0, n_xfer=1 + 1 reserved,
@@ -288,4 +264,84 @@ fn pipe_transceive_drives_srvsvc_bind_to_bindack() {
     // Clean shutdown.
     session.pipe_close(&pipe).expect("pipe_close must succeed");
     let _ = session.tree_disconnect(ipc);
+}
+
+// ─── Phase 4: Authenticated DCE/RPC bind + sealed NetrShareEnum ─────────
+
+/// End-to-end: authenticated NTLMSSP bind with PKT_PRIVACY on `\PIPE\srvsvc`,
+/// then a sealed `NetrShareEnum` request/response round-trip.
+///
+/// This exercises the full Phase 4 stack: NtlmBinder, RpcChannel,
+/// NtlmAuthenticator (sign+seal), and the SRVSVC request/response codecs.
+#[tokio::test]
+#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
+async fn srvsvc_authenticated_share_enum() {
+    if !samba_reachable() {
+        panic!(
+            "Samba container not running at {}. See tests/samba/README.md",
+            samba_addr()
+        );
+    }
+
+    let addr = samba_addr();
+    let mut session =
+        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+            .expect("session_setup must succeed against live Samba");
+
+    let host_only = addr.split(':').next().unwrap_or(&addr);
+    let ipc = session
+        .tree_connect(host_only, "IPC$")
+        .expect("tree_connect IPC$ must succeed");
+
+    let session_arc = Arc::new(Mutex::new(session));
+    let transport =
+        SmbPipeTransport::open(Arc::clone(&session_arc), ipc, "srvsvc").expect("open srvsvc pipe");
+    let pipe_handle = *transport.handle();
+
+    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let binder = netraze_protocols::smb::rpc::build_binder(&cred, 0);
+    let transport_arc: Arc<dyn netraze_dcerpc::transport::RpcTransport> = Arc::new(transport);
+
+    let mut ch = RpcChannel::bind_authenticated(
+        transport_arc,
+        netraze_dcerpc::interfaces::srvsvc::uuid(),
+        (3, 0),
+        binder,
+    )
+    .await
+    .expect("bind_authenticated must succeed");
+
+    let request = netraze_dcerpc::interfaces::srvsvc::encode_netr_share_enum_request(
+        host_only, 0xFFFFFFFF, 0,
+    );
+    let response_stub = ch
+        .call(
+            netraze_dcerpc::interfaces::srvsvc::Opnum::NetrShareEnum as u16,
+            &request,
+        )
+        .await
+        .expect("NetrShareEnum call must succeed");
+
+    let resp = netraze_dcerpc::interfaces::srvsvc::decode_netr_share_enum_response(&response_stub)
+        .expect("decode response must succeed");
+
+    assert!(
+        !resp.shares.is_empty(),
+        "Samba must expose at least one share"
+    );
+    let names: Vec<String> = resp.shares.iter().map(|e| e.netname.clone()).collect();
+    assert!(
+        names.contains(&"IPC$".to_string()),
+        "IPC$ must be present, got {names:?}"
+    );
+
+    // Clean shutdown: close the pipe via the shared session.
+    // Samba may already have closed the pipe handle on its side after the
+    // last DCE/RPC response, so we ignore STATUS_FILE_CLOSED (0xC0000128).
+    drop(ch);
+    {
+        let mut s = session_arc.lock().unwrap();
+        let _ = s.pipe_close(&pipe_handle);
+        let _ = s.tree_disconnect(ipc);
+    }
 }

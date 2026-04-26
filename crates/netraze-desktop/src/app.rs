@@ -94,33 +94,34 @@ impl eframe::App for NetRazeDesktopApp {
         }
 
         // Process pending share enumeration requests
-        for (node_id, ip, hostname) in self.state.pending_share_enums.drain(..).collect::<Vec<_>>()
+        for (node_id, ip, hostname, cred) in
+            self.state.pending_share_enums.drain(..).collect::<Vec<_>>()
         {
-            self.runtime.spawn_share_enum(node_id, ip, hostname);
+            self.runtime.spawn_share_enum(node_id, ip, hostname, cred);
         }
 
         // Process pending user enumeration requests
-        for (node_id, ip, hostname) in self.state.pending_user_enums.drain(..).collect::<Vec<_>>() {
-            self.runtime.spawn_user_enum(node_id, ip, hostname);
+        for (node_id, ip, hostname, cred) in
+            self.state.pending_user_enums.drain(..).collect::<Vec<_>>()
+        {
+            self.runtime.spawn_user_enum(node_id, ip, hostname, cred);
         }
 
         // Process pending dump requests
-        for (node_id, ip, hostname, dump_type) in
+        for (node_id, ip, hostname, dump_type, cred) in
             self.state.pending_dumps.drain(..).collect::<Vec<_>>()
         {
             match dump_type.as_str() {
-                "SAM" => self.runtime.spawn_dump_sam(node_id, ip, hostname),
-                "LSA" => self.runtime.spawn_dump_lsa(node_id, ip, hostname),
+                "SAM" => self.runtime.spawn_dump_sam(node_id, ip, hostname, cred),
+                "LSA" => self.runtime.spawn_dump_lsa(node_id, ip, hostname, cred),
                 _ => {}
             }
         }
 
         // Process pending AV enumeration requests
-        for (node_id, ip, hostname, username, domain, secret) in
-            self.state.pending_enumav.drain(..).collect::<Vec<_>>()
+        for (node_id, ip, hostname, cred) in self.state.pending_enumav.drain(..).collect::<Vec<_>>()
         {
-            self.runtime
-                .spawn_enum_av(node_id, ip, hostname, username, domain, secret);
+            self.runtime.spawn_enum_av(node_id, ip, hostname, cred);
         }
 
         // Process pending fingerprint requests
@@ -185,7 +186,7 @@ impl eframe::App for NetRazeDesktopApp {
                         ui::targets_table::show(ui, &mut self.state);
                     }
                     crate::state::NavTab::CredentialManager => {
-                        ui::credential_manager::show(ui, &mut self.state);
+                        ui::credential_manager::show(ui, ctx, &mut self.state);
                     }
                     _ => {
                         ui::workflow_canvas::show(ui, &mut self.state);

@@ -386,16 +386,16 @@ impl WorkflowDocument {
 pub struct WorkflowViewer {
     pub credentials: Vec<CredentialRecord>,
     pub login_requests: Vec<(String, CredentialRecord)>,
-    /// (source_node_id_raw, host_ip, hostname) — trigger async share enum
-    pub shares_requests: Vec<(NodeId, String, String)>,
+    /// (source_node_id_raw, host_ip, hostname, credential) — trigger async share enum
+    pub shares_requests: Vec<(NodeId, String, String, CredentialRecord)>,
     /// (host_ip, share_name) — open browser window
     pub browse_requests: Vec<(String, String)>,
-    /// (source_node_id, host_ip, hostname) — trigger async user enum
-    pub users_requests: Vec<(NodeId, String, String)>,
-    /// (source_node_id, host_ip, hostname, dump_type) — trigger async dump
-    pub dump_requests: Vec<(NodeId, String, String, String)>,
-    /// (source_node_id, host_ip, hostname, username, domain, secret) — trigger async AV enum
-    pub enumav_requests: Vec<(NodeId, String, String, String, String, String)>,
+    /// (source_node_id, host_ip, hostname, credential) — trigger async user enum
+    pub users_requests: Vec<(NodeId, String, String, CredentialRecord)>,
+    /// (source_node_id, host_ip, hostname, dump_type, credential) — trigger async dump
+    pub dump_requests: Vec<(NodeId, String, String, String, CredentialRecord)>,
+    /// (source_node_id, host_ip, hostname, credential) — trigger async AV enum
+    pub enumav_requests: Vec<(NodeId, String, String, CredentialRecord)>,
     /// IPs to fingerprint
     pub fingerprint_requests: Vec<String>,
     /// (host_ip, hostname, credential) — open a console window for a pwned host
@@ -415,6 +415,22 @@ impl WorkflowViewer {
             fingerprint_requests: Vec::new(),
             console_requests: Vec::new(),
         }
+    }
+
+    /// Resolve a `CredentialRecord` from its display label (e.g. `DOMAIN\user`).
+    fn resolve_cred(&self, label: &Option<String>) -> Option<CredentialRecord> {
+        let label = label.as_ref()?;
+        for c in &self.credentials {
+            let cl = if c.domain.is_empty() {
+                format!(".\\{}", c.username)
+            } else {
+                format!("{}\\{}", c.domain, c.username)
+            };
+            if &cl == label {
+                return Some(c.clone());
+            }
+        }
+        None
     }
 }
 
@@ -1120,18 +1136,34 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
 
             // "List Shares" — spawn a SharesNode
             if ui.button("📂 List Shares").clicked() {
-                if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                    self.shares_requests
-                        .push((node, ip.clone(), hostname.clone()));
+                if let WorkflowNode::HostNode {
+                    ip,
+                    hostname,
+                    logged_in_cred,
+                    ..
+                } = &snarl[node]
+                {
+                    if let Some(cred) = self.resolve_cred(logged_in_cred) {
+                        self.shares_requests
+                            .push((node, ip.clone(), hostname.clone(), cred));
+                    }
                 }
                 ui.close();
             }
 
             // "List Users" — spawn a UsersNode
             if ui.button("👥 List Users").clicked() {
-                if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                    self.users_requests
-                        .push((node, ip.clone(), hostname.clone()));
+                if let WorkflowNode::HostNode {
+                    ip,
+                    hostname,
+                    logged_in_cred,
+                    ..
+                } = &snarl[node]
+                {
+                    if let Some(cred) = self.resolve_cred(logged_in_cred) {
+                        self.users_requests
+                            .push((node, ip.clone(), hostname.clone(), cred));
+                    }
                 }
                 ui.close();
             }
@@ -1140,24 +1172,42 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             ui.menu_button("🔑 Dump", |ui| {
                 ui.set_min_width(140.0);
                 if ui.button("🔑 SAM Hashes").clicked() {
-                    if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                        self.dump_requests.push((
-                            node,
-                            ip.clone(),
-                            hostname.clone(),
-                            "SAM".to_string(),
-                        ));
+                    if let WorkflowNode::HostNode {
+                        ip,
+                        hostname,
+                        logged_in_cred,
+                        ..
+                    } = &snarl[node]
+                    {
+                        if let Some(cred) = self.resolve_cred(logged_in_cred) {
+                            self.dump_requests.push((
+                                node,
+                                ip.clone(),
+                                hostname.clone(),
+                                "SAM".to_string(),
+                                cred,
+                            ));
+                        }
                     }
                     ui.close();
                 }
                 if ui.button("🔓 LSA Secrets").clicked() {
-                    if let WorkflowNode::HostNode { ip, hostname, .. } = &snarl[node] {
-                        self.dump_requests.push((
-                            node,
-                            ip.clone(),
-                            hostname.clone(),
-                            "LSA".to_string(),
-                        ));
+                    if let WorkflowNode::HostNode {
+                        ip,
+                        hostname,
+                        logged_in_cred,
+                        ..
+                    } = &snarl[node]
+                    {
+                        if let Some(cred) = self.resolve_cred(logged_in_cred) {
+                            self.dump_requests.push((
+                                node,
+                                ip.clone(),
+                                hostname.clone(),
+                                "LSA".to_string(),
+                                cred,
+                            ));
+                        }
                     }
                     ui.close();
                 }
@@ -1230,22 +1280,14 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                         }
                     }
                     if let Some(cred) = cred_found {
-                        self.enumav_requests.push((
-                            node,
-                            ip.clone(),
-                            hostname.clone(),
-                            cred.username,
-                            cred.domain,
-                            cred.secret,
-                        ));
+                        self.enumav_requests
+                            .push((node, ip.clone(), hostname.clone(), cred));
                     } else if let Some(first) = self.credentials.first() {
                         self.enumav_requests.push((
                             node,
                             ip.clone(),
                             hostname.clone(),
-                            first.username.clone(),
-                            first.domain.clone(),
-                            first.secret.clone(),
+                            first.clone(),
                         ));
                     }
                 }

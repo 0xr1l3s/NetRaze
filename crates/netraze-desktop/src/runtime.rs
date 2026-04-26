@@ -11,6 +11,8 @@ use netraze_protocols::smb::{
 };
 use netraze_protocols::targets::parse_target_list;
 
+use crate::state::CredentialRecord;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogLevel {
     Info,
@@ -505,7 +507,13 @@ impl RuntimeServices {
     }
 
     /// Enumerate shares on a host and send result back.
-    pub fn spawn_share_enum(&self, host_node_id: usize, ip: String, hostname: String) {
+    pub fn spawn_share_enum(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: CredentialRecord,
+    ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -514,8 +522,9 @@ impl RuntimeServices {
 
         let ip_clone = ip.clone();
         let hostname_clone = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let mut client = SmbClient::new(&ip_clone);
+            let mut client = SmbClient::new(&ip_clone).with_credential(smb_cred);
             let result = client.connect().await;
             let shares = if result.is_ok() {
                 match client.enum_shares_with_access().await {
@@ -564,7 +573,13 @@ impl RuntimeServices {
         });
     }
 
-    pub fn spawn_user_enum(&self, host_node_id: usize, ip: String, hostname: String) {
+    pub fn spawn_user_enum(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: crate::state::CredentialRecord,
+    ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -573,15 +588,13 @@ impl RuntimeServices {
 
         let ip_clone = ip.clone();
         let hostname_clone = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let target = format!("\\\\{ip_clone}");
-            let result = tokio::task::spawn_blocking(move || {
-                netraze_protocols::smb::users::enum_users(&target)
-            })
-            .await;
+            let target = format!("{ip_clone}:445");
+            let result = netraze_protocols::smb::users::enum_users(&target, &smb_cred).await;
 
             let users = match result {
-                Ok(Ok(user_list)) => {
+                Ok(user_list) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
                         message: format!(
@@ -594,17 +607,10 @@ impl RuntimeServices {
                         .map(|u| (u.name, u.disabled, u.locked, u.privilege_level))
                         .collect()
                 }
-                Ok(Err(e)) => {
-                    let _ = tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Error,
-                        message: format!("{ip_clone}: erreur enum users: {e}"),
-                    });
-                    Vec::new()
-                }
                 Err(e) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Error,
-                        message: format!("{ip_clone}: task panic: {e}"),
+                        message: format!("{ip_clone}: erreur enum users: {e}"),
                     });
                     Vec::new()
                 }
@@ -619,7 +625,13 @@ impl RuntimeServices {
         });
     }
 
-    pub fn spawn_dump_sam(&self, host_node_id: usize, ip: String, hostname: String) {
+    pub fn spawn_dump_sam(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: crate::state::CredentialRecord,
+    ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -628,12 +640,12 @@ impl RuntimeServices {
 
         let ip2 = ip.clone();
         let hostname2 = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let ip3 = ip2.clone();
-            let result = tokio::task::spawn_blocking(move || remote_dump_sam(&ip3)).await;
+            let result = remote_dump_sam(&ip2, &smb_cred).await;
 
             let (entries, error) = match result {
-                Ok(Ok(dump)) => {
+                Ok(dump) => {
                     let lines: Vec<String> = dump.hashes.iter().map(|h| h.to_string()).collect();
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
@@ -646,19 +658,12 @@ impl RuntimeServices {
                     };
                     (lines, err)
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Error,
                         message: format!("{ip2}: SAM dump failed: {e}"),
                     });
                     (Vec::new(), Some(e))
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Error,
-                        message: format!("{ip2}: SAM task panic: {e}"),
-                    });
-                    (Vec::new(), Some(format!("task panic: {e}")))
                 }
             };
 
@@ -673,7 +678,13 @@ impl RuntimeServices {
         });
     }
 
-    pub fn spawn_dump_lsa(&self, host_node_id: usize, ip: String, hostname: String) {
+    pub fn spawn_dump_lsa(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: crate::state::CredentialRecord,
+    ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
             level: LogLevel::Info,
@@ -682,12 +693,12 @@ impl RuntimeServices {
 
         let ip2 = ip.clone();
         let hostname2 = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let ip3 = ip2.clone();
-            let result = tokio::task::spawn_blocking(move || remote_dump_lsa(&ip3)).await;
+            let result = remote_dump_lsa(&ip2, &smb_cred).await;
 
             let (entries, error) = match result {
-                Ok(Ok(dump)) => {
+                Ok(dump) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
                         message: format!("{ip2}: LSA dump — {} secret(s)", dump.secrets.len()),
@@ -699,19 +710,12 @@ impl RuntimeServices {
                     };
                     (dump.secrets, err)
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Error,
                         message: format!("{ip2}: LSA dump failed: {e}"),
                     });
                     (Vec::new(), Some(e))
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Error,
-                        message: format!("{ip2}: LSA task panic: {e}"),
-                    });
-                    (Vec::new(), Some(format!("task panic: {e}")))
                 }
             };
 
@@ -731,9 +735,7 @@ impl RuntimeServices {
         host_node_id: usize,
         ip: String,
         hostname: String,
-        username: String,
-        domain: String,
-        secret: String,
+        cred: CredentialRecord,
     ) {
         let tx = self.log_tx.clone();
         let _ = tx.send(RuntimeEvent::Log {
@@ -743,10 +745,10 @@ impl RuntimeServices {
 
         let ip2 = ip.clone();
         let hostname2 = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
             let ip3 = ip2.clone();
-            let cred = SmbCredential::new(&username, &domain, &secret);
-            let result = tokio::task::spawn_blocking(move || enum_av(&ip3, Some(&cred))).await;
+            let result = tokio::task::spawn_blocking(move || enum_av(&ip3, Some(&smb_cred))).await;
 
             let (products, error) = match result {
                 Ok(av_result) => {
@@ -1093,5 +1095,32 @@ impl RuntimeServices {
                 }
             }
         });
+    }
+}
+
+/// Convert a desktop `CredentialRecord` into an `SmbCredential` usable by
+/// the protocol layer.
+fn cred_to_smb(cred: &crate::state::CredentialRecord) -> SmbCredential {
+    match cred.cred_type {
+        crate::state::CredType::Password => {
+            SmbCredential::new(&cred.username, &cred.domain, &cred.secret)
+        }
+        crate::state::CredType::Hash => {
+            let mut hash = [0u8; 16];
+            let hex = cred.secret.trim();
+            if hex.len() == 32 {
+                for i in 0..16 {
+                    if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+                        hash[i] = b;
+                    }
+                }
+            }
+            SmbCredential {
+                username: cred.username.clone(),
+                domain: cred.domain.clone(),
+                password: String::new(),
+                nt_hash: Some(hash),
+            }
+        }
     }
 }

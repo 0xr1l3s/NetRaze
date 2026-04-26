@@ -17,33 +17,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     // Collect share enum requests — dispatched to runtime in app.rs
-    for (host_node_id, host_ip, hostname) in viewer.shares_requests.drain(..) {
+    for (host_node_id, host_ip, hostname, cred) in viewer.shares_requests.drain(..) {
         state
             .pending_share_enums
-            .push((host_node_id.0, host_ip, hostname));
+            .push((host_node_id.0, host_ip, hostname, cred));
     }
 
     // Collect user enum requests — dispatched to runtime in app.rs
-    for (host_node_id, host_ip, hostname) in viewer.users_requests.drain(..) {
+    for (host_node_id, host_ip, hostname, cred) in viewer.users_requests.drain(..) {
         state
             .pending_user_enums
-            .push((host_node_id.0, host_ip, hostname));
+            .push((host_node_id.0, host_ip, hostname, cred));
     }
 
     // Collect dump requests — dispatched to runtime in app.rs
-    for (host_node_id, host_ip, hostname, dump_type) in viewer.dump_requests.drain(..) {
+    for (host_node_id, host_ip, hostname, dump_type, cred) in viewer.dump_requests.drain(..) {
         state
             .pending_dumps
-            .push((host_node_id.0, host_ip, hostname, dump_type));
+            .push((host_node_id.0, host_ip, hostname, dump_type, cred));
     }
 
     // Collect AV enum requests — dispatched to runtime in app.rs
-    for (host_node_id, host_ip, hostname, username, domain, secret) in
-        viewer.enumav_requests.drain(..)
-    {
+    for (host_node_id, host_ip, hostname, cred) in viewer.enumav_requests.drain(..) {
         state
             .pending_enumav
-            .push((host_node_id.0, host_ip, hostname, username, domain, secret));
+            .push((host_node_id.0, host_ip, hostname, cred));
     }
 
     // Collect fingerprint requests
