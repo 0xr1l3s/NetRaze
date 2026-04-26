@@ -1,11 +1,11 @@
 pub mod config_panel;
 pub mod console;
+pub mod credential_manager;
 pub mod credentials_panel;
 pub mod log_panel;
 pub mod network_view;
 pub mod share_browser;
 pub mod targets_table;
-pub mod credential_manager;
 pub mod workflow_canvas;
 
 use crate::app;

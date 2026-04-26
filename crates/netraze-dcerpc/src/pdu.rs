@@ -11,6 +11,7 @@
 //! fragments; the decoder peeks the common header and parses only the
 //! ptype-specific fields a client needs to react to.
 
+use crate::auth::SecTrailer;
 use crate::error::{DceRpcError, Result};
 use crate::uuid::Uuid;
 
@@ -45,7 +46,7 @@ impl CommonHeader {
         }
     }
 
-    fn encode_to(&self, out: &mut Vec<u8>) {
+    pub fn encode_to(&self, out: &mut Vec<u8>) {
         out.push(self.rpc_vers);
         out.push(self.rpc_vers_minor);
         out.push(self.ptype as u8);
@@ -222,7 +223,11 @@ pub fn encode_bind(
     let auth_len = match auth_verifier {
         Some(av) => {
             buf.extend_from_slice(av);
-            u16::try_from(av.len())
+            let token_len = av
+                .len()
+                .checked_sub(SecTrailer::SIZE)
+                .ok_or_else(|| DceRpcError::invalid("auth_verifier", "shorter than sec_trailer"))?;
+            u16::try_from(token_len)
                 .map_err(|_| DceRpcError::invalid("auth_verifier", "length exceeds u16"))?
         }
         None => 0,
@@ -269,7 +274,11 @@ pub fn encode_request(
     let auth_len = match auth_verifier {
         Some(av) => {
             buf.extend_from_slice(av);
-            u16::try_from(av.len())
+            let token_len = av
+                .len()
+                .checked_sub(SecTrailer::SIZE)
+                .ok_or_else(|| DceRpcError::invalid("auth_verifier", "shorter than sec_trailer"))?;
+            u16::try_from(token_len)
                 .map_err(|_| DceRpcError::invalid("auth_verifier", "length exceeds u16"))?
         }
         None => 0,
@@ -333,9 +342,13 @@ pub fn decode_response(buf: &[u8]) -> Result<ResponsePdu<'_>> {
     // body[after_hdr + 7] is a reserved byte.
 
     let auth_len = header.auth_length as usize;
-    let stub_end = frag_len
-        .checked_sub(auth_len)
-        .ok_or_else(|| DceRpcError::invalid("auth_length", "exceeds frag_length"))?;
+    let stub_end = if auth_len == 0 {
+        frag_len
+    } else {
+        frag_len
+            .checked_sub(auth_len + SecTrailer::SIZE)
+            .ok_or_else(|| DceRpcError::invalid("auth_length", "exceeds frag_length"))?
+    };
     let stub_data = &body[after_hdr + 8..stub_end];
     let auth_verifier = &body[stub_end..frag_len];
 
@@ -432,9 +445,13 @@ pub fn decode_bind_ack(buf: &[u8]) -> Result<BindAckParsed> {
     }
     let body = &buf[..frag_len];
     let auth_len = header.auth_length as usize;
-    let stub_end = frag_len
-        .checked_sub(auth_len)
-        .ok_or_else(|| DceRpcError::invalid("auth_length", "exceeds frag_length"))?;
+    let stub_end = if auth_len == 0 {
+        frag_len
+    } else {
+        frag_len
+            .checked_sub(auth_len + SecTrailer::SIZE)
+            .ok_or_else(|| DceRpcError::invalid("auth_length", "exceeds frag_length"))?
+    };
 
     let mut off = CommonHeader::SIZE;
     if off + 12 > stub_end {
@@ -442,12 +459,8 @@ pub fn decode_bind_ack(buf: &[u8]) -> Result<BindAckParsed> {
     }
     let max_xmit = u16::from_le_bytes([body[off], body[off + 1]]);
     let max_recv = u16::from_le_bytes([body[off + 2], body[off + 3]]);
-    let assoc_group_id = u32::from_le_bytes([
-        body[off + 4],
-        body[off + 5],
-        body[off + 6],
-        body[off + 7],
-    ]);
+    let assoc_group_id =
+        u32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]);
     off += 8;
 
     // sec_addr_length + sec_addr bytes (no NDR alignment inside this field).
@@ -510,12 +523,19 @@ pub fn encode_auth3(call_id: u32, auth_verifier: &[u8]) -> Result<Vec<u8>> {
         ));
     }
     let mut hdr = CommonHeader::new(PacketType::Auth3, call_id);
+    // MS-RPCE §2.2.2.5 says pfc_flags MUST be 0x00 for auth3, but Impacket
+    // sets FIRST|LAST (0x03) and Samba rejects 0x00. Match working traffic.
+    hdr.pfc_flags = PFC_FIRST_FRAG | PFC_LAST_FRAG;
     let mut buf = Vec::with_capacity(CommonHeader::SIZE + 4 + auth_verifier.len());
     buf.resize(CommonHeader::SIZE, 0);
     buf.extend_from_slice(&[0u8; 4]); // mandatory pad
     buf.extend_from_slice(auth_verifier);
 
-    let auth_len = u16::try_from(auth_verifier.len())
+    let token_len = auth_verifier
+        .len()
+        .checked_sub(SecTrailer::SIZE)
+        .ok_or_else(|| DceRpcError::invalid("auth_verifier", "shorter than sec_trailer"))?;
+    let auth_len = u16::try_from(token_len)
         .map_err(|_| DceRpcError::invalid("auth_verifier", "length exceeds u16"))?;
     let frag_len = u16::try_from(buf.len()).map_err(|_| DceRpcError::FragmentTooLarge {
         size: buf.len(),
@@ -654,7 +674,7 @@ mod tests {
 
         let mut hdr = CommonHeader::new(PacketType::BindAck, call_id);
         hdr.frag_length = (CommonHeader::SIZE + body.len()) as u16;
-        hdr.auth_length = auth_verifier.len() as u16;
+        hdr.auth_length = auth_verifier.len().saturating_sub(SecTrailer::SIZE) as u16;
         let mut out = Vec::with_capacity(hdr.frag_length as usize);
         hdr.encode_to(&mut out);
         out.extend_from_slice(&body);
@@ -709,7 +729,7 @@ mod tests {
         let hdr = CommonHeader::decode(&pdu).unwrap();
         assert_eq!(hdr.ptype, PacketType::Auth3);
         assert_eq!(hdr.call_id, 0xDEAD_BEEF);
-        assert_eq!(hdr.auth_length as usize, av.len());
+        assert_eq!(hdr.auth_length as usize, av.len() - SecTrailer::SIZE);
         assert_eq!(hdr.frag_length as usize, pdu.len());
         // 4 zero pad bytes after the header.
         assert_eq!(&pdu[CommonHeader::SIZE..CommonHeader::SIZE + 4], &[0; 4]);

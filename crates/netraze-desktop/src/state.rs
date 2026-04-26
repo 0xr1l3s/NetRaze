@@ -59,6 +59,22 @@ pub struct CredentialRecord {
     pub secret: String,
     pub cred_type: CredType,
     pub valid: Option<bool>,
+    #[serde(default = "bool_true")]
+    pub active: bool,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub created_at: Option<u64>,
+}
+
+fn bool_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +98,54 @@ pub struct CredentialConfig {
 }
 
 #[derive(Debug)]
+pub struct CredentialManagerState {
+    pub search_query: String,
+    pub filter_type: Option<CredType>,
+    pub filter_protocol: String,
+    pub filter_valid: Option<bool>,
+    pub filter_active_only: bool,
+    pub selected_cred_idx: Option<usize>,
+    pub edit_mode: bool,
+    pub show_secrets: bool,
+    pub form_username: String,
+    pub form_domain: String,
+    pub form_secret: String,
+    pub form_cred_type: CredType,
+    pub form_protocol: String,
+    pub form_source: String,
+    pub form_notes: String,
+    pub form_tags: String,
+    pub form_active: bool,
+    // Reserved for future file-dialog persistence
+    // pub import_path: String,
+    // pub export_path: String,
+}
+
+impl Default for CredentialManagerState {
+    fn default() -> Self {
+        Self {
+            search_query: String::new(),
+            filter_type: None,
+            filter_protocol: String::new(),
+            filter_valid: None,
+            filter_active_only: false,
+            selected_cred_idx: None,
+            edit_mode: false,
+            show_secrets: false,
+            form_username: String::new(),
+            form_domain: String::new(),
+            form_secret: String::new(),
+            form_cred_type: CredType::Password,
+            form_protocol: "SMB".to_owned(),
+            form_source: String::new(),
+            form_notes: String::new(),
+            form_tags: String::new(),
+            form_active: true,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct AppState {
     pub nav_tab: NavTab,
     pub workflow: WorkflowDocument,
@@ -94,6 +158,7 @@ pub struct AppState {
     pub new_cred_domain: String,
     pub new_cred_secret: String,
     pub new_cred_type: CredType,
+    pub cm_state: CredentialManagerState,
     pub networks: Vec<NetworkSubnet>,
     pub selected_host: Option<String>,
     pub target_config: TargetConfig,
@@ -107,14 +172,14 @@ pub struct AppState {
     pub progress: f32,
     pub progress_message: String,
     pub pending_logins: Vec<(String, CredentialRecord)>,
-    /// (host_node_id_raw, ip, hostname)
-    pub pending_share_enums: Vec<(usize, String, String)>,
-    /// (host_node_id_raw, ip, hostname)
-    pub pending_user_enums: Vec<(usize, String, String)>,
-    /// (host_node_id_raw, ip, hostname, dump_type)
-    pub pending_dumps: Vec<(usize, String, String, String)>,
-    /// (host_node_id_raw, ip, hostname, username, domain, secret)
-    pub pending_enumav: Vec<(usize, String, String, String, String, String)>,
+    /// (host_node_id_raw, ip, hostname, credential)
+    pub pending_share_enums: Vec<(usize, String, String, CredentialRecord)>,
+    /// (host_node_id_raw, ip, hostname, credential)
+    pub pending_user_enums: Vec<(usize, String, String, CredentialRecord)>,
+    /// (host_node_id_raw, ip, hostname, dump_type, credential)
+    pub pending_dumps: Vec<(usize, String, String, String, CredentialRecord)>,
+    /// (host_node_id_raw, ip, hostname, credential)
+    pub pending_enumav: Vec<(usize, String, String, CredentialRecord)>,
     pub share_browsers: Vec<crate::ui::share_browser::ShareBrowserState>,
     pub pending_browse: Vec<String>,
     pub pending_fingerprints: Vec<String>,
@@ -140,6 +205,7 @@ impl AppState {
             new_cred_domain: String::new(),
             new_cred_secret: String::new(),
             new_cred_type: CredType::Password,
+            cm_state: CredentialManagerState::default(),
             networks: Vec::new(),
             selected_host: None,
             target_config: TargetConfig {

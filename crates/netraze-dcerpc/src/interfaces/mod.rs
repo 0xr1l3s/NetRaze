@@ -7,4 +7,7 @@
 //!
 //! The list below grows Phase by Phase. For Phase 1 we only ship SRVSVC.
 
+pub mod samr;
+pub mod scmr;
 pub mod srvsvc;
+pub mod winreg;

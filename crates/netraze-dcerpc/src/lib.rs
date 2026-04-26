@@ -29,6 +29,7 @@
 //! every platform — no `cfg(windows)` allowed inside this crate.
 
 pub mod auth;
+pub mod channel;
 pub mod error;
 pub mod interfaces;
 pub mod ndr;
@@ -36,6 +37,7 @@ pub mod pdu;
 pub mod transport;
 pub mod uuid;
 
+pub use channel::RpcChannel;
 pub use error::{DceRpcError, Result};
 pub use transport::RpcTransport;
 pub use uuid::Uuid;
