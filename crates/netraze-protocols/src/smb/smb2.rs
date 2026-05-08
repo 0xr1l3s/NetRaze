@@ -374,7 +374,7 @@ impl Smb2Session {
 
         let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
         if status != STATUS_SUCCESS {
-            return Err(format!("TreeConnect {share}: 0x{status:08x}"));
+            return Err(explain_tree_connect_failure(share, status));
         }
 
         let tree_id = u32::from_le_bytes(resp[36..40].try_into().unwrap());
@@ -715,6 +715,41 @@ impl Smb2Session {
             return Err(format!("Authentication failed: 0x{status2:08x}"));
         }
 
+        // MS-SMB2 §2.2.6 — `SessionFlags` at body offset 2 (2 bytes). Value
+        // `0x0001 = SMB2_SESSION_FLAG_IS_GUEST`, `0x0002 = SMB2_SESSION_FLAG_IS_NULL`.
+        //
+        // This is the load-bearing fix for the "tree_connect IPC$ returns
+        // 0xC0000022" footgun: Windows servers happily complete session_setup
+        // with STATUS_SUCCESS when an account binds as guest (typical when
+        // the password/domain combo is wrong but the box has guest enabled),
+        // then refuse IPC$ tree_connect because guest can't bind there.
+        // Without this check, the failure surfaces as a confusing
+        // ACCESS_DENIED on tree_connect *after* "auth succeeded".
+        if resp2.len() >= SMB2_HEADER_SIZE + 4 {
+            let session_flags = u16::from_le_bytes(
+                resp2[SMB2_HEADER_SIZE + 2..SMB2_HEADER_SIZE + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            if session_flags & 0x0001 != 0 {
+                self.session_id = 0;
+                return Err(format!(
+                    "auth downgraded to GUEST for {domain}\\{username} \
+                     — credentials are invalid (wrong password / wrong domain) \
+                     or the server's account policy refused them. \
+                     IPC$ and every authenticated share will be denied."
+                ));
+            }
+            if session_flags & 0x0002 != 0 {
+                self.session_id = 0;
+                return Err(format!(
+                    "auth downgraded to ANONYMOUS for {domain}\\{username} \
+                     — server treated us as a null session. \
+                     IPC$ tree_connect will be denied on any hardened host."
+                ));
+            }
+        }
+
         // Stash the ExportedSessionKey now that the server has confirmed the
         // AUTHENTICATE message. `RpcChannel::bind_authenticated` will read it
         // back via `exported_session_key()` to build its NTLMSSP authenticator.
@@ -781,6 +816,83 @@ impl Smb2Session {
 impl Drop for Smb2Session {
     fn drop(&mut self) {
         self.logoff();
+    }
+}
+
+// ──────────────────────── Diagnostic helpers ─────────────────────────
+
+/// Map an NTSTATUS returned on a TreeConnect failure to an actionable
+/// human-readable explanation. Tells the operator *what to try next*
+/// rather than dumping a raw `0xc0000022` and walking away.
+///
+/// We deliberately concentrate the operator-facing wisdom here (rather
+/// than scattering it across each call site) because TreeConnect is the
+/// single place where credential / signing / share-permission problems
+/// surface for the first time in any SMB workflow.
+fn explain_tree_connect_failure(share: &str, status: u32) -> String {
+    match status {
+        // STATUS_ACCESS_DENIED — by far the most common failure on IPC$
+        // and the one that historically just produced "0xc0000022" with
+        // no context. The cause is almost never that the share itself is
+        // ACL-locked: it's that the SMB session is degraded or the
+        // server policy refuses our auth class.
+        0xC000_0022 => format!(
+            "TreeConnect {share}: ACCESS_DENIED (0xC0000022). \
+             Likely causes — check in this order: \
+             (1) credentials are wrong → session was downgraded to GUEST \
+             (we should have caught this at session_setup but some servers \
+             return SUCCESS without setting the GUEST flag); \
+             (2) the user account exists but doesn't have local logon rights \
+             on this host (typical: domain user on a workgroup box, or vice versa); \
+             (3) the server requires SMB signing and we're not signing; \
+             (4) the server has 'Restrict NTLM: Incoming NTLM traffic' set to deny — \
+             retry with Kerberos or from a host that's allowed; \
+             (5) the share is genuinely ACL-restricted (rare for IPC$). \
+             Verify with: smbclient -L //{share} -U user%pass"
+        ),
+        // STATUS_BAD_NETWORK_NAME — share doesn't exist on this server
+        0xC000_00CC => format!(
+            "TreeConnect {share}: BAD_NETWORK_NAME (0xC00000CC). \
+             The share doesn't exist on this server. \
+             Common typos: ADMIN$ vs admin$ (case-insensitive on Windows but \
+             pinned-name shares like a custom 'Backup' may be case-sensitive on Samba). \
+             Run enum_shares first to see the real share inventory."
+        ),
+        // STATUS_BAD_NETWORK_PATH — UNC path malformed (ports leaking, etc.)
+        0xC000_00BE => format!(
+            "TreeConnect {share}: BAD_NETWORK_PATH (0xC00000BE). \
+             Server can't parse the UNC path — usually means the target string \
+             includes a port suffix (\"host:445\") that leaked into the UNC. \
+             Strip the port before calling tree_connect."
+        ),
+        // STATUS_LOGON_FAILURE — re-authentication required
+        0xC000_006D => format!(
+            "TreeConnect {share}: LOGON_FAILURE (0xC000006D). \
+             Server invalidated our session; reconnect required. \
+             Check the account isn't locked or password-expired."
+        ),
+        // STATUS_NETWORK_SESSION_EXPIRED
+        0xC000_035C => format!(
+            "TreeConnect {share}: SESSION_EXPIRED (0xC000035C). \
+             SMB session timed out server-side. Reconnect."
+        ),
+        // STATUS_USER_SESSION_DELETED
+        0xC000_00CB => format!(
+            "TreeConnect {share}: USER_SESSION_DELETED (0xC00000CB). \
+             Server tore down our session, often because of admin policy \
+             or signing mismatch on the prior op. Reconnect."
+        ),
+        // STATUS_NOT_SUPPORTED — usually signing-required mismatch
+        0xC000_00BB => format!(
+            "TreeConnect {share}: NOT_SUPPORTED (0xC00000BB). \
+             Often means the server requires SMB signing and we're not signing yet. \
+             Tracked in the protocol-stack roadmap as 'SMB2 signing'."
+        ),
+        // Generic — print the raw code so the operator can look it up
+        _ => format!(
+            "TreeConnect {share}: 0x{status:08x} \
+             (no specific hint — look up the NTSTATUS in MS-ERREF)"
+        ),
     }
 }
 

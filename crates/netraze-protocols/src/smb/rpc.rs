@@ -225,6 +225,21 @@ impl RpcTransport for SmbPipeTransport {
     }
 }
 
+/// Magic offset Impacket adds to the per-bind `ctx_id` to derive the
+/// `auth_context_id` carried in `sec_trailer`s
+/// (`impacket/dcerpc/v5/rpcrt.py:1581 — sec_trailer['auth_ctx_id'] = self._ctx + 79231`).
+///
+/// Why it matters: many hardened Windows hosts (DC, recent Server 2019+,
+/// any box with strict RPC auth policies) reject `auth_context_id == 0`
+/// on the wire with `RPC_S_CANNOT_SUPPORT (0x000006E4)` or
+/// `RPC_X_BAD_STUB_DATA (0x000006F7)` even though MS-RPCE doesn't
+/// formally forbid 0. We mirror Impacket's well-known offset so our
+/// traffic looks identical to a known-working client.
+///
+/// The exact value (`79231`) is folklore — Impacket has used it for
+/// 15+ years and every real-world RPC server tolerates it.
+const IMPACKET_AUTH_CTX_ID_OFFSET: u32 = 79231;
+
 /// Build the [`NtlmBinder`] driving the DCE/RPC NTLMSSP bind handshake from
 /// a credential the caller already used to set up the SMB session.
 ///
@@ -233,9 +248,12 @@ impl RpcTransport for SmbPipeTransport {
 /// the same thing earlier in `Smb2Session::connect`, so the derived hash
 /// is identical to whatever the SMB session is using.
 ///
-/// `ctx_id` is the per-bind `auth_context_id` carried in every subsequent
-/// `sec_trailer`. Conventionally `0` for the first bind on a connection;
-/// open multiple binds on one pipe (we don't yet) by incrementing.
+/// `ctx_id` is the **presentation context id** of this bind — almost
+/// always `0` for a single-context bind. This function adds the
+/// [`IMPACKET_AUTH_CTX_ID_OFFSET`] internally to produce the
+/// `auth_context_id` that goes in every `sec_trailer`, exactly mirroring
+/// what Impacket emits. So callers continue to pass `0` here and the
+/// Windows-strict bug `auth_context_id == 0 → 0x6E4` is dodged.
 ///
 /// # Why not reuse the SMB session key directly?
 ///
@@ -256,7 +274,7 @@ pub fn build_binder(cred: &SmbCredential, ctx_id: u32) -> NtlmBinder {
         cred.username.clone(),
         cred.domain.clone(),
         AuthLevel::PktPrivacy,
-        ctx_id,
+        ctx_id.wrapping_add(IMPACKET_AUTH_CTX_ID_OFFSET),
     )
 }
 
