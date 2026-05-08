@@ -17,3 +17,4 @@ tracing-subscriber.workspace = true
 netraze-app = { path = "../netraze-app" }
 netraze-config = { path = "../netraze-config" }
 netraze-core = { path = "../netraze-core" }
+netraze-protocols = { path = "../netraze-protocols" }

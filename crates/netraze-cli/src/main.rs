@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use netraze_app::NetRazeApp;
 use netraze_config::AppConfig;
 use netraze_core::ScanRequest;
+use netraze_protocols::smb::secrets_dump;
 use std::collections::BTreeMap;
 use tracing_subscriber::EnvFilter;
 
@@ -23,6 +24,15 @@ enum Command {
         targets: Vec<String>,
         #[arg(long)]
         module: Option<String>,
+    },
+    SecretsDump {
+        target: String,
+        #[arg(short, long)]
+        username: String,
+        #[arg(short, long)]
+        password: String,
+        #[arg(short, long)]
+        domain: Option<String>,
     },
 }
 
@@ -70,6 +80,16 @@ async fn main() -> Result<()> {
                 plan.concurrency,
                 plan.timeout_seconds
             );
+        }
+        Command::SecretsDump {
+            target,
+            username,
+            password,
+            domain,
+        } => {
+            secrets_dump(&target, &username, &password, domain.as_deref())
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
     }
 

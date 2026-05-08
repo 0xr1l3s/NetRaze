@@ -8,6 +8,7 @@ pub(crate) const NOT_PORTED: &str =
 pub mod crypto;
 pub mod fingerprint;
 pub mod hive;
+pub mod lsa;
 pub mod ntlm;
 pub mod rpc;
 pub mod sam;
@@ -74,11 +75,12 @@ pub use browser::{
     format_size, list_directory, upload_file,
 };
 pub use connection::SmbCredential;
-pub use dump::{LsaDumpResult, SamDumpResult, remote_dump_lsa, remote_dump_sam};
+pub use dump::{SamDumpResult, remote_dump_lsa, remote_dump_sam, secrets_dump, RemoteRegistryHandle, dump_sam, dump_lsa};
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
 pub use exec::{execute_command, execute_command_live, execute_command_traced};
 pub use fingerprint::{SmbFingerprint, fingerprint as smb_fingerprint};
 pub use info::ServerInfo;
+pub use lsa::LsaDumpResult;
 pub use sam::SamHash;
 pub use shares::{ShareAccess, ShareInfo};
 pub use users::UserInfo;

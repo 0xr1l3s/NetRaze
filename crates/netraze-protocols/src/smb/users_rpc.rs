@@ -175,11 +175,9 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
                 samr::MAXIMUM_ALLOWED,
                 entry.relative_id,
             );
-            if let Ok(resp_open) = ch
-                .call(samr::Opnum::SamrOpenUser as u16, &stub_open)
-                .await
-            {
-                if let Ok((user_handle, status)) = samr::decode_samr_open_user_response(&resp_open) {
+            if let Ok(resp_open) = ch.call(samr::Opnum::SamrOpenUser as u16, &stub_open).await {
+                if let Ok((user_handle, status)) = samr::decode_samr_open_user_response(&resp_open)
+                {
                     if status == 0 {
                         let stub_query = samr::encode_samr_query_information_user_request(
                             &user_handle,

@@ -23,6 +23,7 @@ hmac = { workspace = true }
 md-5 = { workspace = true }
 md4 = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 
 # Windows-only: the native NetAPI / WNet / SCM / Registry backend used by
 # connection.rs, shares.rs, users.rs, info.rs, exec.rs, dump.rs, browser.rs,
