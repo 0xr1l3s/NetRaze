@@ -88,6 +88,14 @@ pub struct Smb2Session {
     /// for DCE/RPC PKT_PRIVACY over the named-pipe transport. `None` until
     /// the handshake completes; cleared by `logoff`.
     session_key: Option<[u8; 16]>,
+    /// Set from the server's Negotiate response SecurityMode bit
+    /// `SMB2_NEGOTIATE_SIGNING_REQUIRED (0x0002)` — see [MS-SMB2 §2.2.4].
+    /// Domain controllers always set it. When true, every post-session-setup
+    /// request (`send_packet` with a live `session_key`) is signed per
+    /// MS-SMB2 §3.2.5.1 — a signing-required server drops unsigned requests
+    /// with STATUS_ACCESS_DENIED, which used to surface as a baffling
+    /// "TreeConnect IPC$: ACCESS_DENIED" right after a successful login.
+    signing_required: bool,
 }
 
 impl Smb2Session {
@@ -128,6 +136,7 @@ impl Smb2Session {
             session_id: 0,
             message_id: 0,
             session_key: None,
+            signing_required: false,
         };
 
         session.negotiate()?;
@@ -209,12 +218,12 @@ impl Smb2Session {
         // Body: StructureSize=57, then 55 more bytes + 1 byte variable
         let mut body = vec![0u8; 56];
         body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
-        // body[2]: SecurityFlags=0
-        // body[3]: RequestedOplockLevel=0
+                                                          // body[2]: SecurityFlags=0
+                                                          // body[3]: RequestedOplockLevel=0
         body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
-        // body[8..16] SmbCreateFlags=0
-        // body[16..24] Reserved=0
-        // DesiredAccess: FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+                                                         // body[8..16] SmbCreateFlags=0
+                                                         // body[16..24] Reserved=0
+                                                         // DesiredAccess: FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
         body[24..28].copy_from_slice(&0x0012_0089u32.to_le_bytes());
         // FileAttributes=0
         body[32..36].copy_from_slice(&0x0000_0007u32.to_le_bytes()); // ShareAccess RWD
@@ -283,7 +292,7 @@ impl Smb2Session {
         let mut body = vec![0u8; 48];
         body[0..2].copy_from_slice(&49u16.to_le_bytes()); // StructureSize
         body[2] = 0x50; // Padding (arbitrary dummy byte)
-        // body[3] Flags = 0
+                        // body[3] Flags = 0
         body[4..8].copy_from_slice(&length.to_le_bytes());
         body[8..16].copy_from_slice(&offset.to_le_bytes());
         body[16..32].copy_from_slice(file_id);
@@ -327,7 +336,7 @@ impl Smb2Session {
         let hdr = self.build_header(SMB2_CLOSE, tree_id);
         let mut body = vec![0u8; 24];
         body[0..2].copy_from_slice(&24u16.to_le_bytes()); // StructureSize
-        // Flags=0, Reserved=0
+                                                          // Flags=0, Reserved=0
         body[8..24].copy_from_slice(file_id);
 
         let mut packet = Vec::new();
@@ -545,9 +554,9 @@ impl Smb2Session {
         let mut body = vec![0u8; 56];
         body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
         body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
-        // DesiredAccess = FILE_WRITE_DATA (0x02). The whole point of the
-        // probe is to ask the server "would you give me write?" — anything
-        // beyond that bit risks tripping unrelated ACL checks.
+                                                         // DesiredAccess = FILE_WRITE_DATA (0x02). The whole point of the
+                                                         // probe is to ask the server "would you give me write?" — anything
+                                                         // beyond that bit risks tripping unrelated ACL checks.
         body[24..28].copy_from_slice(&0x0000_0002u32.to_le_bytes());
         body[32..36].copy_from_slice(&0x0000_0007u32.to_le_bytes()); // ShareAccess RWD
         body[36..40].copy_from_slice(&1u32.to_le_bytes()); // CreateDisposition=FILE_OPEN
@@ -645,6 +654,11 @@ impl Smb2Session {
         if resp.len() < SMB2_HEADER_SIZE + 65 {
             return Err("Negotiate response too short".into());
         }
+
+        // MS-SMB2 §2.2.4 — SecurityMode at body offset 2. Bit 0x0002 means
+        // the server *requires* signing: it will silently drop every
+        // unsigned request once the session is authenticated.
+        self.signing_required = negotiate_signing_required(&resp)?;
 
         Ok(())
     }
@@ -783,12 +797,32 @@ impl Smb2Session {
         hdr
     }
 
+    /// Send one SMB2 request, signing it first when the server requires it.
+    ///
+    /// Signing gate (MS-SMB2 §3.2.5.1, mirroring Impacket `sendSMB` /
+    /// `signSMB` in `smb3.py`): sign iff the session key exists AND the
+    /// server's Negotiate SecurityMode demanded it. The `session_key` gate
+    /// alone is enough to leave NEGOTIATE and both SESSION_SETUP rounds
+    /// unsigned — the key only materialises after round 2 — while every
+    /// later request (TREE_CONNECT, CREATE, IOCTL, …, LOGOFF) gets signed.
+    /// LOGOFF is sent before `logoff()` clears the key, so it is covered.
+    ///
+    /// Server *response* signatures are not verified — same deliberate
+    /// choice Impacket makes; out of scope until something needs it.
     fn send_packet(&mut self, data: &[u8]) -> Result<(), String> {
-        let len = data.len() as u32;
+        let wire: Vec<u8> = match (self.signing_required, self.session_key) {
+            (true, Some(key)) => {
+                let mut signed = data.to_vec();
+                sign_smb2_message(&mut signed, &key)?;
+                signed
+            }
+            _ => data.to_vec(),
+        };
+        let len = wire.len() as u32;
         let nb = [0u8, (len >> 16) as u8, (len >> 8) as u8, len as u8];
         self.stream
             .write_all(&nb)
-            .and_then(|_| self.stream.write_all(data))
+            .and_then(|_| self.stream.write_all(&wire))
             .and_then(|_| self.stream.flush())
             .map_err(|e| format!("Send failed: {e}"))
     }
@@ -844,7 +878,10 @@ fn explain_tree_connect_failure(share: &str, status: u32) -> String {
              return SUCCESS without setting the GUEST flag); \
              (2) the user account exists but doesn't have local logon rights \
              on this host (typical: domain user on a workgroup box, or vice versa); \
-             (3) the server requires SMB signing and we're not signing; \
+             (3) the server requires SMB signing and rejected ours \
+             (we sign automatically when the server demands it — see \
+             `sign_smb2_message`; unlikely unless the session key was \
+             derived from a mismatched credential); \
              (4) the server has 'Restrict NTLM: Incoming NTLM traffic' set to deny — \
              retry with Kerberos or from a host that's allowed; \
              (5) the share is genuinely ACL-restricted (rare for IPC$). \
@@ -885,8 +922,9 @@ fn explain_tree_connect_failure(share: &str, status: u32) -> String {
         // STATUS_NOT_SUPPORTED — usually signing-required mismatch
         0xC000_00BB => format!(
             "TreeConnect {share}: NOT_SUPPORTED (0xC00000BB). \
-             Often means the server requires SMB signing and we're not signing yet. \
-             Tracked in the protocol-stack roadmap as 'SMB2 signing'."
+             Historically meant 'server requires SMB signing and we're not signing' \
+             — signing is implemented now, so if this appears the likely cause is \
+             a dialect/capability mismatch in the Negotiate exchange."
         ),
         // Generic — print the raw code so the operator can look it up
         _ => format!(
@@ -894,6 +932,61 @@ fn explain_tree_connect_failure(share: &str, status: u32) -> String {
              (no specific hint — look up the NTSTATUS in MS-ERREF)"
         ),
     }
+}
+
+// ──────────────────────── Signing helpers ──────────────────────────
+//
+// Pure functions — no `&self`, no IO — so the wire transformation can be
+// unit-tested without a TcpStream (same pattern as the pipe helpers below).
+
+/// SMB2_FLAGS_SIGNED (MS-SMB2 §2.2.2.4, bit 3 of the Flags field).
+const SMB2_FLAGS_SIGNED: u32 = 0x0000_0008;
+
+/// Sign an outgoing SMB2 request in place for dialects 2.0.2 / 2.1
+/// (MS-SMB2 §3.2.5.1.1):
+///
+/// 1. Set `SMB2_FLAGS_SIGNED` in the header Flags — the flag itself is
+///    covered by the signature, so it must be flipped *before* the MAC.
+/// 2. Zero the 16-byte Signature field (48..64).
+/// 3. Signature = `HMAC-SHA256(SessionKey, entire SMB2 message)[:16]`.
+///
+/// The NetBIOS length prefix added by `send_packet` is NOT part of the
+/// MAC. The signing key is the **raw** NTLMv2 ExportedSessionKey — the
+/// HMAC-SHA256 KDF and AES-CMAC of SMB 3.x don't apply, and we only
+/// offer dialects 0x0202/0x0210 in `negotiate`. Mirrors Impacket
+/// `smb3.py:signSMB`.
+fn sign_smb2_message(message: &mut [u8], session_key: &[u8; 16]) -> Result<(), String> {
+    if message.len() < SMB2_HEADER_SIZE {
+        return Err(format!(
+            "cannot sign: message is {} bytes, shorter than the {}-byte SMB2 header",
+            message.len(),
+            SMB2_HEADER_SIZE
+        ));
+    }
+    // 1. SIGNED flag first — it's inside the MAC input.
+    let flags = u32::from_le_bytes(message[16..20].try_into().unwrap()) | SMB2_FLAGS_SIGNED;
+    message[16..20].copy_from_slice(&flags.to_le_bytes());
+    // 2. Zero the signature field.
+    message[48..SMB2_HEADER_SIZE].fill(0);
+    // 3. HMAC-SHA256 over the whole message, truncate to 16 bytes.
+    let mac = super::crypto::hmac_sha256(session_key, message)?;
+    message[48..SMB2_HEADER_SIZE].copy_from_slice(&mac[..16]);
+    Ok(())
+}
+
+/// Extract the server's signing-required preference from a Negotiate
+/// response (MS-SMB2 §2.2.4 — SecurityMode at body offset 2, bit 0x0002).
+/// Separated from `negotiate` so the parsing is unit-testable.
+fn negotiate_signing_required(resp: &[u8]) -> Result<bool, String> {
+    if resp.len() < SMB2_HEADER_SIZE + 4 {
+        return Err("Negotiate response too short".into());
+    }
+    let security_mode = u16::from_le_bytes(
+        resp[SMB2_HEADER_SIZE + 2..SMB2_HEADER_SIZE + 4]
+            .try_into()
+            .unwrap(),
+    );
+    Ok(security_mode & 0x0002 != 0)
 }
 
 // ─────────────────────────── Pipe helpers ───────────────────────────
@@ -911,16 +1004,16 @@ fn build_pipe_create_body(name: &str) -> (Vec<u8>, Vec<u8>) {
 
     let mut body = vec![0u8; 56];
     body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
-    // body[2]      SecurityFlags=0
-    // body[3]      RequestedOplockLevel=0 (no oplock for pipes)
+                                                      // body[2]      SecurityFlags=0
+                                                      // body[3]      RequestedOplockLevel=0 (no oplock for pipes)
     body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
-    // body[8..16]  SmbCreateFlags=0
-    // body[16..24] Reserved=0
+                                                     // body[8..16]  SmbCreateFlags=0
+                                                     // body[16..24] Reserved=0
     body[24..28].copy_from_slice(&PIPE_DESIRED_ACCESS.to_le_bytes());
     // body[28..32] FileAttributes=0
     body[32..36].copy_from_slice(&0x0000_0007u32.to_le_bytes()); // ShareAccess: R|W|D
     body[36..40].copy_from_slice(&1u32.to_le_bytes()); // CreateDisposition=FILE_OPEN
-    // body[40..44] CreateOptions=0  — pipes must NOT set FILE_NON_DIRECTORY_FILE
+                                                       // body[40..44] CreateOptions=0  — pipes must NOT set FILE_NON_DIRECTORY_FILE
     let name_offset = (SMB2_HEADER_SIZE + 56) as u16;
     body[44..46].copy_from_slice(&name_offset.to_le_bytes());
     body[46..48].copy_from_slice(&(name_utf16.len() as u16).to_le_bytes());
@@ -935,16 +1028,16 @@ fn build_pipe_create_body(name: &str) -> (Vec<u8>, Vec<u8>) {
 fn build_pipe_transceive_body(file_id: &[u8; 16], request_len: u32) -> Vec<u8> {
     let mut body = vec![0u8; 56];
     body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
-    // body[2..4]   Reserved=0
+                                                      // body[2..4]   Reserved=0
     body[4..8].copy_from_slice(&FSCTL_PIPE_TRANSCEIVE.to_le_bytes());
     body[8..24].copy_from_slice(file_id);
 
     let input_offset = (SMB2_HEADER_SIZE + 56) as u32;
     body[24..28].copy_from_slice(&input_offset.to_le_bytes()); // InputOffset
     body[28..32].copy_from_slice(&request_len.to_le_bytes()); // InputCount
-    // body[32..36] MaxInputResponse=0  (no input echoed back)
+                                                              // body[32..36] MaxInputResponse=0  (no input echoed back)
     body[36..40].copy_from_slice(&input_offset.to_le_bytes()); // OutputOffset
-    // body[40..44] OutputCount=0       (unused on request)
+                                                               // body[40..44] OutputCount=0       (unused on request)
     body[44..48].copy_from_slice(&65_535u32.to_le_bytes()); // MaxOutputResponse
     body[48..52].copy_from_slice(&SMB2_0_IOCTL_IS_FSCTL.to_le_bytes());
     // body[52..56] Reserved2=0
@@ -967,7 +1060,7 @@ fn build_pipe_write_body(file_id: &[u8; 16], data_len: u32) -> Vec<u8> {
     let data_offset = (SMB2_HEADER_SIZE + 48) as u16;
     body[2..4].copy_from_slice(&data_offset.to_le_bytes()); // DataOffset
     body[4..8].copy_from_slice(&data_len.to_le_bytes()); // Length
-    // body[8..16]   Offset = 0 (pipe)
+                                                         // body[8..16]   Offset = 0 (pipe)
     body[16..32].copy_from_slice(file_id);
     // body[32..36]  Channel = 0
     // body[36..40]  RemainingBytes = 0
@@ -981,8 +1074,8 @@ fn build_pipe_write_body(file_id: &[u8; 16], data_len: u32) -> Vec<u8> {
 fn build_pipe_close_body(file_id: &[u8; 16]) -> Vec<u8> {
     let mut body = vec![0u8; 24];
     body[0..2].copy_from_slice(&24u16.to_le_bytes()); // StructureSize
-    // body[2..4] Flags=0  (no SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB)
-    // body[4..8] Reserved=0
+                                                      // body[2..4] Flags=0  (no SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB)
+                                                      // body[4..8] Reserved=0
     body[8..24].copy_from_slice(file_id);
     body
 }
@@ -1210,5 +1303,94 @@ mod pipe_tests {
         resp[body_off + 36..body_off + 40].copy_from_slice(&0u32.to_le_bytes());
         let out = parse_pipe_transceive_response(&resp).expect("parse should succeed");
         assert!(out.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+
+    /// Build a synthetic 72-byte SMB2 request (64-byte header + 8-byte
+    /// TREE_CONNECT-shaped body) with the exact field values used to pin
+    /// the HMAC-SHA256 KAT below. Pre-sign Flags = 1, Signature = 0.
+    fn kat_message() -> Vec<u8> {
+        let mut msg = vec![0u8; SMB2_HEADER_SIZE + 8];
+        msg[0..4].copy_from_slice(SMB2_MAGIC);
+        msg[4..6].copy_from_slice(&64u16.to_le_bytes()); // StructureSize
+        msg[6..8].copy_from_slice(&1u16.to_le_bytes()); // CreditCharge
+        msg[12..14].copy_from_slice(&SMB2_TREE_CONNECT.to_le_bytes());
+        msg[14..16].copy_from_slice(&31u16.to_le_bytes()); // CreditRequest
+        msg[16..20].copy_from_slice(&1u32.to_le_bytes()); // Flags (pre-sign)
+        msg[24..32].copy_from_slice(&3u64.to_le_bytes()); // MessageId
+        msg[36..40].copy_from_slice(&0x8001u32.to_le_bytes()); // TreeId
+        msg[40..48].copy_from_slice(&0x11223344u64.to_le_bytes()); // SessionId
+        msg[64..72].copy_from_slice(&[9, 0, 0, 0, 0, 0, 0, 0]); // body
+        msg
+    }
+
+    /// Known-answer test for the SMB 2.0.2/2.1 signing MAC, cross-checked
+    /// against `python3 -c "import hmac,hashlib; hmac.new(key, msg,
+    /// hashlib.sha256).digest()[:16]"` with the SIGNED flag set and the
+    /// Signature field zeroed — the exact transformation Impacket's
+    /// `smb3.py:signSMB` performs for pre-3.0 dialects.
+    #[test]
+    fn sign_message_kat() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let mut msg = kat_message();
+        sign_smb2_message(&mut msg, &key).expect("signing should succeed");
+        let expected = [
+            0xe6, 0x78, 0xad, 0x82, 0xbf, 0x0b, 0x3a, 0x87, 0x73, 0x73, 0x1b, 0x91, 0x61, 0x89,
+            0x6e, 0x01,
+        ];
+        assert_eq!(&msg[48..64], &expected, "signature mismatch");
+    }
+
+    #[test]
+    fn sign_message_sets_flag_and_preserves_header() {
+        let key = [0xABu8; 16];
+        let original = kat_message();
+        let mut msg = original.clone();
+        sign_smb2_message(&mut msg, &key).expect("signing should succeed");
+
+        // SIGNED flag flipped on.
+        let flags = u32::from_le_bytes(msg[16..20].try_into().unwrap());
+        assert_eq!(flags, 1 | SMB2_FLAGS_SIGNED);
+        // Signature non-zero and exactly 16 bytes.
+        assert_ne!(&msg[48..64], &[0u8; 16]);
+        // Everything else in the header — and the whole body — untouched.
+        assert_eq!(&msg[0..16], &original[0..16]);
+        assert_eq!(&msg[20..48], &original[20..48]);
+        assert_eq!(&msg[64..], &original[64..]);
+    }
+
+    #[test]
+    fn sign_message_rejects_short_input() {
+        let key = [0u8; 16];
+        let mut short = vec![0u8; 32];
+        assert!(sign_smb2_message(&mut short, &key).is_err());
+    }
+
+    #[test]
+    fn negotiate_signing_required_parses_security_mode() {
+        // Minimal Negotiate response: 64-byte header + SecurityMode at
+        // body offset 2 (StructureSize sits at 0..2).
+        let make = |security_mode: u16| {
+            let mut resp = vec![0u8; SMB2_HEADER_SIZE + 4];
+            resp[0..4].copy_from_slice(SMB2_MAGIC);
+            resp[SMB2_HEADER_SIZE..SMB2_HEADER_SIZE + 2].copy_from_slice(&65u16.to_le_bytes());
+            resp[SMB2_HEADER_SIZE + 2..SMB2_HEADER_SIZE + 4]
+                .copy_from_slice(&security_mode.to_le_bytes());
+            resp
+        };
+        // 0x0002 = SIGNING_REQUIRED (domain controllers) → sign.
+        assert!(negotiate_signing_required(&make(0x0002)).unwrap());
+        // 0x0003 = required + enabled → sign.
+        assert!(negotiate_signing_required(&make(0x0003)).unwrap());
+        // 0x0001 = signing enabled but not required (Samba default) → don't.
+        assert!(!negotiate_signing_required(&make(0x0001)).unwrap());
+        // 0x0000 = neither → don't.
+        assert!(!negotiate_signing_required(&make(0x0000)).unwrap());
+        // Truncated response → error rather than a guess.
+        assert!(negotiate_signing_required(&[0u8; 16]).is_err());
     }
 }

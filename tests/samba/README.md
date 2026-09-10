@@ -69,8 +69,12 @@ Not covered yet:
   IOCTL support in `smb2.rs`. Once that lands, a follow-up suite in
   `crates/netraze-dcerpc/tests/` will drive the full SRVSVC stack
   end-to-end against the same container.
-- SMB signing / encryption — we do the NTLM dance but don't yet negotiate
-  signing against Samba.
+- SMB signing — implemented for dialects 2.0.2/2.1 (HMAC-SHA256 over the
+  raw ExportedSessionKey, applied in `send_packet` when the server's
+  Negotiate SecurityMode demands it), but not exercised here: the harness
+  intentionally keeps Samba at its `server signing` default (auto = not
+  required), so the container exercises the unsigned path only. Signing
+  is validated against live signing-required hosts (domain controllers).
 
 ### Tear down
 
