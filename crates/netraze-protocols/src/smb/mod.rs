@@ -142,34 +142,47 @@ impl SmbClient {
         self
     }
 
-    /// Connect to the target. Uses raw SMB2 for hash creds, WNet for passwords.
+    /// Connect to the target via the pure-Rust SMB2 + NTLMv2 stack.
+    ///
+    /// Both password and pass-the-hash credentials use `smb2::Smb2Session`
+    /// — identical behaviour on every OS. (The legacy WNet IPC$ mount path
+    /// remains only for anonymous connects on Windows; on Linux it is a
+    /// NOT_PORTED stub, which used to make every password `Login As` fail
+    /// there even though the credential was valid.)
     pub async fn connect(&mut self) -> Result<(), String> {
         let target = self.target.clone();
-        let cred = self.credential.clone();
 
-        // Check if this is a PtH credential
-        if let Some(ref c) = cred {
-            if let Some(ref nt_hash) = c.nt_hash {
-                let hash = *nt_hash;
-                let user = c.username.clone();
-                let domain = c.domain.clone();
-                let tgt = target.clone();
+        if let Some(cred) = self.credential.clone() {
+            let user = cred.username.clone();
+            let domain = cred.domain.clone();
+            let tgt = target.clone();
 
-                let session = tokio::task::spawn_blocking(move || {
-                    smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
-                })
-                .await
-                .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+            let session = match cred.nt_hash {
+                Some(hash) => {
+                    tokio::task::spawn_blocking(move || {
+                        smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
+                    })
+                    .await
+                    .map_err(|e| format!("spawn_blocking failed: {e}"))??
+                }
+                None => {
+                    let password = cred.password.clone();
+                    tokio::task::spawn_blocking(move || {
+                        smb2::Smb2Session::connect_with_password(&tgt, &user, &domain, &password)
+                    })
+                    .await
+                    .map_err(|e| format!("spawn_blocking failed: {e}"))??
+                }
+            };
 
-                self.raw_session = Some(session);
-                self.connected = true;
-                return Ok(());
-            }
+            self.raw_session = Some(session);
+            self.connected = true;
+            return Ok(());
         }
 
-        // Standard WNet path for password-based auth
+        // Anonymous connect: legacy WNet path (Windows only).
         let result =
-            tokio::task::spawn_blocking(move || connection::connect_ipc(&target, cred.as_ref()))
+            tokio::task::spawn_blocking(move || connection::connect_ipc(&target, None))
                 .await
                 .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
@@ -189,8 +202,9 @@ impl SmbClient {
                 session.logoff();
             })
             .await;
-        }
-        if self.connected {
+            self.connected = false;
+        } else if self.connected {
+            // Legacy anonymous WNet session (Windows only).
             let target = self.target.clone();
             let _ = tokio::task::spawn_blocking(move || connection::disconnect_ipc(&target)).await;
             self.connected = false;
