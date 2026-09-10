@@ -13,11 +13,10 @@
 use std::sync::{Arc, Mutex};
 
 use netraze_dcerpc::interfaces::srvsvc;
-use netraze_dcerpc::{RpcChannel, RpcTransport};
 use rand::RngCore;
 
 use super::connection::SmbCredential;
-use super::rpc::{SmbPipeTransport, build_binder, connect_session};
+use super::rpc::{bind_srvsvc_over_smb, connect_session};
 use super::smb2::Smb2Session;
 
 /// Win32 status `ERROR_MORE_DATA` — server has more shares than fit in this
@@ -135,23 +134,11 @@ pub async fn enum_shares(target: &str, cred: &SmbCredential) -> Result<Vec<Share
 
     let session = Arc::new(Mutex::new(session));
 
-    let session_for_pipe = Arc::clone(&session);
-    let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
-        SmbPipeTransport::open(session_for_pipe, ipc_tid, "srvsvc")
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
-    let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
-
-    let binder = build_binder(cred, 0);
-    let mut channel = RpcChannel::bind_authenticated(
-        transport,
-        srvsvc::uuid(),
-        (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
-        binder,
-    )
-    .await
-    .map_err(|e| format!("RpcChannel::bind_authenticated(srvsvc): {e}"))?;
+    // ── Stage 3-4: open \PIPE\srvsvc + bind. Authenticated PKT_PRIVACY
+    // bind first; DCs that BindNak the NTLMSSP bind fall back to an
+    // anonymous bind riding the (authenticated) SMB session — see
+    // `bind_srvsvc_over_smb`.
+    let mut channel = bind_srvsvc_over_smb(Arc::clone(&session), ipc_tid, cred).await?;
 
     // Continuation loop: server may chunk a large share table across
     // multiple `NetrShareEnum` calls, signalled by ERROR_MORE_DATA + a
