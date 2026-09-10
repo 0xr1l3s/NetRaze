@@ -472,7 +472,9 @@ impl RuntimeServices {
                 crate::state::CredType::Password => SmbCredential::new(&username, &domain, &secret),
             };
             let mut client = SmbClient::new(&ip).with_credential(smb_cred);
-            let success = client.connect().await.is_ok();
+            let login_result = client.connect().await;
+            let success = login_result.is_ok();
+            let error_detail = login_result.err();
             let mut admin = false;
 
             if success {
@@ -493,7 +495,12 @@ impl RuntimeServices {
                         ip
                     )
                 } else {
-                    format!("{}: ✘ login échoué pour {cred_label_clone}", ip)
+                    match error_detail {
+                        Some(detail) => {
+                            format!("{ip}: ✘ login échoué pour {cred_label_clone} — {detail}")
+                        }
+                        None => format!("{ip}: ✘ login échoué pour {cred_label_clone}"),
+                    }
                 },
             });
 
