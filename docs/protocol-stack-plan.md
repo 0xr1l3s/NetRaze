@@ -68,7 +68,7 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | File DELETE (DELETE_ON_CLOSE) | 🔜 | Phase D — cleanup côté exec |
 | Query Directory (FileBothDirectoryInformation) | 🔜 | Phase D — bloque browser_rpc |
 | Create Directory (FILE_DIRECTORY_FILE) | 🔜 | Phase D |
-| **SMB signing (HMAC-SHA256)** | ⚪ | Bloque les targets avec "require signing" — à activer quand on en croisera |
+| **SMB signing (HMAC-SHA256)** | ✅ | Dialectes 2.0.2/2.1 — HMAC-SHA256(ExportedSessionKey) sur le message entier ; appliqué dans `send_packet` quand le Negotiate serveur exige la signature (DC). Vérifié live contre un DC |
 | SMB3 encryption (AES-CCM/GCM) | ⚪ | Out v1 — la plupart des cibles acceptent SMB2 unencrypted |
 | Kerberos session setup (AP-REQ in SPNEGO) | 🔜 | Couplé avec `netraze-kerberos` |
 

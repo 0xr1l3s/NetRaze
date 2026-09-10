@@ -5,17 +5,19 @@
 //! (names, signatures, `Result<_, String>`) is preserved so callers in
 //! `sam.rs`, `ntlm.rs`, `dump.rs`, `hive.rs` don't need to change.
 
+use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use aes::Aes128;
-use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 use cipher::{BlockDecrypt, KeyInit};
 use des::Des;
 use hmac::{Hmac, Mac};
 use md4::Md4;
 use md5::Digest as _;
 use md5::Md5;
+use sha2::Sha256;
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 type HmacMd5 = Hmac<Md5>;
+type HmacSha256 = Hmac<Sha256>;
 
 /// MD4 hash.
 pub fn md4(data: &[u8]) -> Result<[u8; 16], String> {
@@ -46,6 +48,20 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> Result<[u8; 16], String> {
     mac.update(data);
     let out = mac.finalize().into_bytes();
     let mut buf = [0u8; 16];
+    buf.copy_from_slice(&out);
+    Ok(buf)
+}
+
+/// HMAC-SHA256: SMB2 message-signing MAC for dialects 2.0.2/2.1
+/// (MS-SMB2 §3.2.5.1 — the full 32-byte digest is computed, callers take
+/// the first 16 bytes as the Signature field).
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
+    // Same `Mac` vs `KeyInit` disambiguation as `hmac_md5` above.
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key).map_err(|e| format!("HMAC-SHA256 key: {e}"))?;
+    mac.update(data);
+    let out = mac.finalize().into_bytes();
+    let mut buf = [0u8; 32];
     buf.copy_from_slice(&out);
     Ok(buf)
 }
