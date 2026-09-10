@@ -11,7 +11,6 @@
 //! `netraze-dcerpc` so the dependency direction stays `protocols -> dcerpc`
 //! only — the dcerpc crate must remain leaf.
 
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -124,13 +123,6 @@ impl SmbPipeTransport {
 #[async_trait]
 impl RpcTransport for SmbPipeTransport {
     async fn send(&self, pdu: &[u8]) -> RpcResult<()> {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(r"C:\temp\netraze_tx.bin")
-        {
-            let _ = f.write_all(pdu);
-        }
         // Run the synchronous SMB I/O on a blocking thread so we don't pin
         // the tokio runtime while waiting on the network. The mutex is held
         // only for the duration of the transceive — no `.await` inside.
@@ -172,13 +164,6 @@ impl RpcTransport for SmbPipeTransport {
                     "pipe transport: recv() with no prior send() — call send first".into(),
                 )
             })?;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(r"C:\temp\netraze_rx.bin")
-        {
-            let _ = f.write_all(&data);
-        }
         Ok(data)
     }
 
@@ -192,13 +177,6 @@ impl RpcTransport for SmbPipeTransport {
     /// drain on the next `recv()` because the next caller-driven exchange
     /// is the first sealed Request, which has its own response.
     async fn send_oneway(&self, pdu: &[u8]) -> RpcResult<()> {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(r"C:\temp\netraze_tx.bin")
-        {
-            let _ = f.write_all(pdu);
-        }
         let session = Arc::clone(&self.session);
         let handle = self.handle;
         let pdu_owned = pdu.to_vec();
