@@ -298,18 +298,24 @@ pub struct ServerInfo101 {
 /// some legacy stubs require.
 pub fn encode_netr_server_get_info_request(server_name: &str, level: u32) -> Vec<u8> {
     let mut w = NdrWriter::new();
-    // ServerName: top-level [unique, string] WCHAR*. Same shape as
-    // NetrShareEnum's ServerName — referent inline, wstring inline
-    // immediately after, no deferred queue (top-level pointer rule).
-    // The [string] attribute means the wire representation MUST include a
-    // NUL terminator.
-    w.write_referent();
-    let server_name_nul = if server_name.ends_with('\0') {
-        server_name.to_string()
+    // ServerName: top-level [unique, string] WCHAR*.
+    //
+    // Empty input means "no server name" — encode it as a NULL referent,
+    // exactly like Impacket's `hNetrServerGetInfo` (`request['ServerName']
+    // = NULL`). A Server 2022 DC accepts an empty-but-non-null wstring
+    // too, but then *echoes* it back as an empty `sv101_name`; with NULL
+    // the server reports its own hostname.
+    if server_name.is_empty() {
+        w.write_null_referent();
     } else {
-        format!("{}\0", server_name)
-    };
-    w.write_conformant_varying_wstring(&server_name_nul);
+        w.write_referent();
+        let server_name_nul = if server_name.ends_with('\0') {
+            server_name.to_string()
+        } else {
+            format!("{}\0", server_name)
+        };
+        w.write_conformant_varying_wstring(&server_name_nul);
+    }
     w.write_u32(level);
     w.finish()
 }
@@ -350,12 +356,13 @@ pub fn decode_netr_server_get_info_response(stub: &[u8]) -> Result<ServerInfo101
             "expected level=101 in NetrServerGetInfo response, got {level}"
         )));
     }
-    let tag = r.read_u32()?;
-    if tag != level {
-        return Err(DceRpcError::NdrDecode(format!(
-            "union tag {tag} ≠ level {level} (corrupt discriminator)"
-        )));
-    }
+    // MS-SRVS: the [out] param is `LPSERVER_INFO` — a union *pointer* whose
+    // switch is `Level`. On the wire that means the level u32 is followed
+    // directly by the arm's unique referent ID — there is NO second union
+    // tag on the wire (the discriminator is implicit in `Level` above).
+    // Verified against a live Server 2022 DC; reading a phantom tag here
+    // desynchronises the whole stub (it shows up as "union tag 131072 ≠
+    // level 101" because the referent ID 0x00020000 lands in the tag slot).
     let info_present = r.read_unique_referent()?;
 
     let mut out = ServerInfo101::default();
@@ -683,11 +690,20 @@ mod tests {
     }
 
     #[test]
+    fn server_get_info_request_null_server_name() {
+        // Empty ServerName → NULL referent + Level, mirroring Impacket's
+        // `hNetrServerGetInfo` (ServerName = NULL ⇒ server reports itself).
+        let stub = encode_netr_server_get_info_request("", 101);
+        assert_eq!(stub.len(), 8);
+        assert_eq!(&stub[0..4], 0u32.to_le_bytes()); // NULL referent
+        assert_eq!(&stub[4..8], 101u32.to_le_bytes()); // Level
+    }
+
+    #[test]
     fn server_get_info_response_roundtrip_full() {
         // Synthesise a level-101 response with all wstrings non-null.
         let mut w = NdrWriter::new();
-        w.write_u32(101); // Level
-        w.write_u32(101); // union tag
+        w.write_u32(101); // Level — doubles as the union switch
         w.write_unique_ptr(true, |w| {
             w.write_u32(500); // platform_id (PLATFORM_ID_NT)
             w.write_unique_ptr(true, |w| {
@@ -720,8 +736,7 @@ mod tests {
         // 1-WCHAR (just the terminating NUL) string — we must accept that
         // and not confuse it for the NULL pointer case.
         let mut w = NdrWriter::new();
-        w.write_u32(101);
-        w.write_u32(101);
+        w.write_u32(101); // Level — doubles as the union switch
         w.write_unique_ptr(true, |w| {
             w.write_u32(500);
             w.write_unique_ptr(true, |w| {
@@ -749,8 +764,7 @@ mod tests {
     fn server_get_info_response_null_info_pointer_with_error_status() {
         // ERROR_ACCESS_DENIED (5) — server refused, no SERVER_INFO_101 follows.
         let mut w = NdrWriter::new();
-        w.write_u32(101);
-        w.write_u32(101);
+        w.write_u32(101); // Level — doubles as the union switch
         w.write_null_referent(); // ServerInfo pointer = NULL
         w.flush_deferred();
         w.write_u32(5); // Status = ACCESS_DENIED
@@ -770,14 +784,41 @@ mod tests {
         assert!(decode_netr_server_get_info_response(&stub).is_err());
     }
 
+    /// Known-answer test pinned from a live Windows Server 2022 domain
+    /// controller (72-byte level-101 response stub). Guards the wire layout:
+    /// `Level` switches a union *pointer* — no second union tag on the wire,
+    /// the u32 after Level is the unique referent ID (0x00020000), then
+    /// SERVER_INFO_101 with embedded name/comment pointers and their
+    /// deferred wstrings, then Status.
     #[test]
-    fn server_get_info_response_rejects_tag_level_mismatch() {
-        // Level=101 but tag=100 — corrupt union discriminator.
-        let mut w = NdrWriter::new();
-        w.write_u32(101);
-        w.write_u32(100);
-        let stub = w.finish();
-        assert!(decode_netr_server_get_info_response(&stub).is_err());
+    fn server_get_info_response_live_dc_kat() {
+        let stub = [
+            // Level (union switch)
+            0x65, 0x00, 0x00, 0x00, // ServerInfo unique referent ID
+            0x00, 0x00, 0x02, 0x00, // platform_id = 500 (PLATFORM_ID_NT)
+            0xf4, 0x01, 0x00, 0x00, // name unique referent ID
+            0x04, 0x00, 0x02, 0x00, // version_major = 10, version_minor = 0
+            0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // server_type = 0x0080102b
+            0x2b, 0x10, 0x80, 0x00, // comment unique referent ID
+            0x08, 0x00, 0x02, 0x00,
+            // name wstring "DC\0": max 3, offset 0, count 3, L"DC\0", pad
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x44, 0x00,
+            0x43, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // comment wstring L"\0": max 1, offset 0, count 1, L"\0", pad
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, // Status = ERROR_SUCCESS
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(stub.len(), 72);
+
+        let info = decode_netr_server_get_info_response(&stub).expect("decode");
+        assert_eq!(info.platform_id, 500);
+        assert_eq!(info.name, "DC");
+        assert_eq!(info.version_major, 10);
+        assert_eq!(info.version_minor, 0);
+        assert_eq!(info.server_type, 0x0080_102b);
+        assert_eq!(info.comment, "");
+        assert_eq!(info.status, 0);
     }
 
     /// Our encoder must produce a request that Impacket-style decoders can
@@ -797,7 +838,7 @@ mod tests {
         assert_eq!(&stub[4..8], 9u32.to_le_bytes()); // max_count
         assert_eq!(&stub[8..12], 0u32.to_le_bytes()); // offset
         assert_eq!(&stub[12..16], 9u32.to_le_bytes()); // actual_count
-        // "\\SERVER\0" in UTF-16-LE
+                                                       // "\\SERVER\0" in UTF-16-LE
         let expected_wstring: Vec<u8> = "\\\\SERVER\0"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())

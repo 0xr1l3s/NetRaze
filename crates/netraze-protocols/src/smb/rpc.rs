@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use netraze_dcerpc::auth::{AuthLevel, NtlmAuthenticator, NtlmBinder};
-use netraze_dcerpc::{DceRpcError, Result as RpcResult, RpcTransport};
+use netraze_dcerpc::interfaces::srvsvc;
+use netraze_dcerpc::{DceRpcError, Result as RpcResult, RpcChannel, RpcTransport};
 
 use super::connection::SmbCredential;
 use super::smb2::{PipeHandle, Smb2Session};
@@ -217,6 +218,72 @@ impl RpcTransport for SmbPipeTransport {
 /// The exact value (`79231`) is folklore — Impacket has used it for
 /// 15+ years and every real-world RPC server tolerates it.
 const IMPACKET_AUTH_CTX_ID_OFFSET: u32 = 79231;
+
+/// Open `\PIPE\srvsvc` on an authenticated SMB session, then bind the
+/// SRVSVC v3.0 interface — NTLMSSP PKT_PRIVACY first, anonymous fallback.
+///
+/// Why the fallback: Windows domain controllers (observed on Server 2022,
+/// and reproducible with Impacket against the same hosts) answer an
+/// NTLMSSP-authenticated bind on the srvsvc endpoint with
+/// `bind_nak provider_reject_reason=8` ("authentication type not
+/// recognized") while BindAck-ing an anonymous bind without blinking —
+/// the server authorizes the subsequent calls through the **SMB session
+/// identity**, which is already authenticated (and signed when the server
+/// demands it). This is exactly how Impacket's `SMBConnection.listShares`
+/// — and therefore NetExec / CrackMapExec `--shares` — has always driven
+/// share enumeration: an anonymous DCE bind riding an authenticated SMB
+/// session.
+///
+/// Samba is the opposite: it accepts the NTLMSSP bind (what our Samba
+/// integration tests exercise) and may refuse anonymous access, so the
+/// authenticated attempt stays the primary path. We only fall back when
+/// the endpoint explicitly BindNaks.
+pub async fn bind_srvsvc_over_smb(
+    session: Arc<Mutex<Smb2Session>>,
+    ipc_tree_id: u32,
+    cred: &SmbCredential,
+) -> Result<RpcChannel, String> {
+    // ── Open the pipe (blocking SMB I/O off the async runtime).
+    let session_for_pipe = Arc::clone(&session);
+    let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
+        SmbPipeTransport::open(session_for_pipe, ipc_tree_id, "srvsvc")
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
+    let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
+
+    // ── Primary: NTLMSSP PKT_PRIVACY bind.
+    let binder = build_binder(cred, 0);
+    match RpcChannel::bind_authenticated(
+        transport,
+        srvsvc::uuid(),
+        (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
+        binder,
+    )
+    .await
+    {
+        Ok(channel) => Ok(channel),
+        Err(e) if e.to_string().contains("BindNak") => {
+            // Endpoint refused the authenticated bind — retry anonymous on
+            // a fresh pipe (the NAKed association is dead server-side).
+            let session_for_pipe = Arc::clone(&session);
+            let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
+                SmbPipeTransport::open(session_for_pipe, ipc_tree_id, "srvsvc")
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
+            let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
+            RpcChannel::bind(
+                transport,
+                srvsvc::uuid(),
+                (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
+            )
+            .await
+            .map_err(|e| format!("srvsvc anonymous bind fallback (after BindNak): {e}"))
+        }
+        Err(e) => Err(format!("RpcChannel::bind_authenticated(srvsvc): {e}")),
+    }
+}
 
 /// Build the [`NtlmBinder`] driving the DCE/RPC NTLMSSP bind handshake from
 /// a credential the caller already used to set up the SMB session.

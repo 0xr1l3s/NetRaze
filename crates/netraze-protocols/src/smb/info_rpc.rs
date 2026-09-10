@@ -14,10 +14,9 @@
 use std::sync::{Arc, Mutex};
 
 use netraze_dcerpc::interfaces::srvsvc;
-use netraze_dcerpc::{RpcChannel, RpcTransport};
 
 use super::connection::SmbCredential;
-use super::rpc::{SmbPipeTransport, build_binder, connect_session};
+use super::rpc::{bind_srvsvc_over_smb, connect_session};
 use super::smb2::Smb2Session;
 
 /// Subset of `SERVER_INFO_101` we surface to the rest of the workspace.
@@ -83,28 +82,11 @@ pub async fn get_server_info(target: &str, cred: &SmbCredential) -> Result<Serve
 
     let session = Arc::new(Mutex::new(session));
 
-    // ── Stage 3: open \PIPE\srvsvc on the IPC$ tree.
-    let session_for_pipe = Arc::clone(&session);
-    let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
-        SmbPipeTransport::open(session_for_pipe, ipc_tid, "srvsvc")
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
-    let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
-
-    // ── Stage 4: NTLMSSP bind to SRVSVC v3.0 with PKT_PRIVACY sealing.
-    // Microsoft DCE/RPC over named pipes always runs its own NTLMSSP
-    // dance inside the bind PDUs — `build_binder` builds the binder
-    // from the same credential the SMB layer used.
-    let binder = build_binder(cred, 0);
-    let mut channel = RpcChannel::bind_authenticated(
-        transport,
-        srvsvc::uuid(),
-        (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
-        binder,
-    )
-    .await
-    .map_err(|e| format!("RpcChannel::bind_authenticated(srvsvc): {e}"))?;
+    // ── Stage 3-4: open \PIPE\srvsvc + bind. Authenticated PKT_PRIVACY
+    // bind first; DCs that BindNak the NTLMSSP bind fall back to an
+    // anonymous bind riding the (authenticated) SMB session — see
+    // `bind_srvsvc_over_smb`.
+    let mut channel = bind_srvsvc_over_smb(Arc::clone(&session), ipc_tid, cred).await?;
 
     // ── Stage 5: opnum 21 round-trip.
     let stub = srvsvc::encode_netr_server_get_info_request("", 101);
