@@ -4,10 +4,13 @@
 //!
 //! The *DCE/RPC-specific* NTLMSSP glue:
 //!   - the `auth_verifier` trailer format (8-byte `sec_trailer` + opaque blob)
-//!   - sign-then-seal (RC4 on the stub + HMAC-MD5 MIC) for NTLMv2 with
+//!   - seal-then-sign for NTLMv2 with
 //!     `NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY` +
 //!     `NTLMSSP_NEGOTIATE_KEY_EXCH` (the only combo any modern Windows or
-//!     Samba server will ever negotiate)
+//!     Samba server will ever negotiate): the HMAC-MD5 MIC covers the full
+//!     PDU-minus-signature with the stub in **plaintext** (the MAC input is
+//!     taken before RC4-sealing — verified against Impacket, which
+//!     interoperates with Samba and Windows at this auth level)
 //!   - per-connection sealing-handle state (the RC4 keystream is continuous
 //!     across every request on the same bind; we must *not* re-key per call)
 //!
@@ -293,19 +296,6 @@ impl NtlmAuthenticator {
 
     /// Seal + sign a DCE/RPC request stub.
     ///
-    /// Returns `(sealed_stub_with_pad, auth_verifier)` where:
-    ///   - `sealed_stub_with_pad` is the encrypted stub, padded up to a
-    ///     4-byte boundary (pad bytes = `0x00`). Its length is always a
-    ///     multiple of 4.
-    ///   - `auth_verifier` is `sec_trailer(8B) + ntlm_signature(16B)` —
-    ///     always 24 bytes. The caller sets the PDU header's `auth_length`
-    ///     field to `NTLM_SIGNATURE_SIZE` (16) and `frag_length` to
-    ///     `header + sealed_stub_with_pad.len() + auth_verifier.len()`.
-    ///
-    /// Increments `send_seq` on success.
-    ///
-    /// Seal + sign a DCE/RPC request stub.
-    ///
     /// `prefix` is every byte that precedes the stub in the PDU — for a
     /// Request this is `header(16) + alloc_hint(4) + context_id(2) + opnum(2)`.
     /// `stub` is the plaintext NDR-encoded parameter block.
@@ -313,25 +303,33 @@ impl NtlmAuthenticator {
     /// Returns `(sealed_stub_padded, auth_verifier)` where the sealed stub
     /// includes the alignment padding required before the `auth_verifier`.
     ///
-    /// The signed input matches Impacket byte-for-byte (`impacket/ntlm.py`
-    /// `MAC` + `SEAL`):
+    /// # What gets signed (and in what order)
+    ///
+    /// For PKT_PRIVACY the signature covers the **plaintext** PDU minus the
+    /// signature itself — the MAC input is taken *before* the stub is
+    /// RC4-sealed. Verified live against Impacket 0.13.1 (which
+    /// interoperates with both Samba and Windows at this auth level): the
+    /// signed bytes are the whole PDU with the stub still in plaintext:
     ///
     /// ```text
-    /// MAC_input = SeqNum_LE(4) || plain_stub_padded
+    /// MAC_input = SeqNum_LE(4) || prefix || plaintext_stub_padded || sec_trailer(8)
+    /// Checksum  = RC4(HMAC_MD5(ClientSigningKey, MAC_input)[..8])
     /// ```
     ///
-    /// **Why not the full PDU per MS-RPCE §2.2.2.11.5?** The spec says
-    /// "MAC over header || body || sec_trailer (auth_value zeroed)" but
-    /// Microsoft's NTLMSSP-over-RPC implementation actually only signs
-    /// `SeqNum || stub`. Impacket has done the same for 15+ years and is
-    /// the de-facto reference for what real Windows servers accept.
+    /// `prefix` must therefore be the exact on-wire PDU bytes preceding the
+    /// stub — including the 16-byte common header with its **final**
+    /// `frag_length` / `auth_length` values (Impacket computes both from the
+    /// finished packet layout before signing; a placeholder header produces
+    /// a signature the server rejects with `RPC_S_SEC_PKG_ERROR`).
     ///
-    /// The previous (spec-correct) implementation worked against permissive
-    /// pipes (SAMR, SRVSVC) but **silently failed** against hardened
-    /// pipes — notably SCMR on Server 2019+ where every sealed Request
-    /// returned `RPC_S_CANNOT_SUPPORT (0x000006E4)` because our MAC
-    /// covered too much data and didn't match what Microsoft's
-    /// SecurityProvider re-computed server-side.
+    /// An earlier variant signed the ciphertext instead (seal first, MAC
+    /// the sealed bytes) and Samba faulted the first sealed Request with
+    /// `RPC_S_SEC_PKG_ERROR (1825 / 0x721)` — the receiver re-derives the
+    /// MIC from the **decrypted** PDU, so a ciphertext MAC never matches.
+    ///
+    /// The RC4 checksum encryption continues the *same* seal handle that
+    /// encrypted the stub (MS-NLMP §3.4.4.2, KEY_EXCH path), so the handle
+    /// order here is: stub, then checksum.
     pub fn seal_request(&mut self, prefix: &[u8], stub: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         if !matches!(self.level, AuthLevel::PktPrivacy) {
             return Err(DceRpcError::NotImplemented(
@@ -340,7 +338,8 @@ impl NtlmAuthenticator {
         }
 
         // Pad stub to a 4-byte boundary. Impacket uses 0xBB as a sanity
-        // marker; we use 0x00 — the receiver ignores pad bytes entirely.
+        // marker; we use 0x00 — the pad is inside the sealed region and the
+        // receiver strips `auth_pad_length` bytes after unsealing.
         let pad_len = (4 - (stub.len() % 4)) % 4;
         let mut stub_padded = Vec::with_capacity(stub.len() + pad_len);
         stub_padded.extend_from_slice(stub);
@@ -356,37 +355,23 @@ impl NtlmAuthenticator {
         let mut sec_trailer_bytes = Vec::with_capacity(SecTrailer::SIZE);
         sec_trailer.encode_to(&mut sec_trailer_bytes);
 
-        // 1. Compute MAC over `SeqNum_LE(4) || plain_stub_padded`.
-        //
-        // We tested two MAC formulas against a hardened SCMR pipe and the
-        // simpler "Impacket SEAL semantics" got us closer to success
-        // (`0x721 SEC_PKG_ERROR` instead of `0x6E4 CANNOT_SUPPORT`).
-        // Spec MS-RPCE §2.2.2.11.5 says we should also fold the PDU header
-        // and sec_trailer in, but Microsoft's server-side `SecurityProvider`
-        // for NTLMSSP-over-NP appears to mirror Impacket's `ntlm.SEAL` —
-        // signing only `SeqNum || message` where `message` is the unsealed
-        // padded stub. Anything else trips a different validation path
-        // and the server rejects with `RPC_S_CANNOT_SUPPORT` before even
-        // invoking VerifySignature.
-        //
-        // `prefix` and `sec_trailer_bytes` are kept around for
-        // documentation / future PKT_INTEGRITY support but deliberately
-        // unused in this MAC input.
-        let _prefix_unused = prefix;
+        // 1. Compute the MAC over SeqNum || full-PDU-minus-signature with
+        //    the stub still in PLAINTEXT — the receiver re-derives the MIC
+        //    from the decrypted PDU, so it must match the plaintext form.
         let seqnum_le = self.send_seq.to_le_bytes();
-        let mut message_to_sign = Vec::with_capacity(seqnum_le.len() + stub_padded.len());
-        message_to_sign.extend_from_slice(&seqnum_le);
-        message_to_sign.extend_from_slice(&stub_padded);
-
-        let full_mic = hmac_md5_concat(&self.client_signing_key, &[&message_to_sign]);
+        let full_mic = hmac_md5_concat(
+            &self.client_signing_key,
+            &[&seqnum_le, prefix, &stub_padded, &sec_trailer_bytes],
+        );
         let mut checksum = [0u8; 8];
         checksum.copy_from_slice(&full_mic[..8]);
 
-        // 2. Encrypt stub in-place (advances client_sealing keystream).
+        // 2. Seal the padded stub.
         self.client_sealing.transform(&mut stub_padded);
 
-        // 3. Encrypt checksum using the *same* advancing keystream.
-        //    (NTLMSSP_NEGOTIATE_KEY_EXCH path; MS-NLMP §3.4.4.2.)
+        // 3. Encrypt checksum using the *same* advancing keystream that
+        //    sealed the stub (NTLMSSP_NEGOTIATE_KEY_EXCH path; MS-NLMP
+        //    §3.4.4.2).
         self.client_sealing.transform(&mut checksum);
 
         // 4. Assemble 16-byte NTLMSSP_MESSAGE_SIGNATURE.
@@ -413,6 +398,12 @@ impl NtlmAuthenticator {
     /// `sealed_stub` is mutated in place to plaintext. Pad bytes are **not**
     /// stripped — the caller inspects `SecTrailer::decode(&auth_verifier[..8])?
     /// .auth_pad_length` and truncates themselves.
+    ///
+    /// Verification mirrors [`seal_request`](Self::seal_request): the server
+    /// signed `SeqNum_LE || prefix || plaintext_stub || sec_trailer`, so the
+    /// expected HMAC must be computed *after* the in-place decryption has
+    /// restored the plaintext stub (the MIC covers the plaintext, never the
+    /// ciphertext).
     ///
     /// On success, increments `recv_seq`. On failure (signature mismatch,
     /// wrong seq_num, malformed auth_verifier) the authenticator state is
@@ -457,16 +448,19 @@ impl NtlmAuthenticator {
         // 2. Decrypt checksum (continues same keystream — key_exch path).
         self.server_sealing.transform(&mut sealed_checksum);
 
-        // 3. Re-compute expected HMAC over `SeqNum_LE(4) || plain_stub`.
-        //    Mirrors `seal_request` — see that function's doc for the
-        //    rationale on why we don't fold prefix/sec_trailer in.
-        let _prefix_unused = prefix;
+        // 3. Compute the expected HMAC over the now-plaintext PDU:
+        //    SeqNum || prefix || plaintext stub || sec_trailer — same input
+        //    shape our seal_request MACs for the other direction.
         let seqnum_le = seq_num.to_le_bytes();
-        let mut message_to_sign = Vec::with_capacity(seqnum_le.len() + sealed_stub.len());
-        message_to_sign.extend_from_slice(&seqnum_le);
-        message_to_sign.extend_from_slice(sealed_stub);
-
-        let full_mic = hmac_md5_concat(&self.server_signing_key, &[&message_to_sign]);
+        let full_mic = hmac_md5_concat(
+            &self.server_signing_key,
+            &[
+                &seqnum_le,
+                prefix,
+                sealed_stub,
+                &auth_verifier[..SecTrailer::SIZE],
+            ],
+        );
         let expected = &full_mic[..8];
 
         if !ct_eq(&sealed_checksum, expected) {
@@ -1218,7 +1212,10 @@ mod tests {
 
     /// Two authenticators built from the same session key talk to each
     /// other: client seals → server unseals. Verifies the DCE/RPC framing
-    /// layer (sec_trailer inclusion in HMAC, pad bytes, seq_num update).
+    /// layer (full-PDU MAC input, pad bytes, seq_num update) by re-deriving
+    /// the expected signature by hand, independently of
+    /// `unseal_response` — this is executable documentation of the MAC
+    /// input shape from `seal_request`'s doc comment.
     #[test]
     fn seal_unseal_roundtrip() {
         let session_key = [0x42u8; 16];
@@ -1232,45 +1229,42 @@ mod tests {
         assert_eq!(auth_verifier.len(), SecTrailer::SIZE + NTLM_SIGNATURE_SIZE);
         assert_eq!(client.send_seq, 1);
 
-        // Server side: the outbound keystream on the client is the same
-        // keystream the server uses to DECRYPT (client→server direction),
-        // so swap roles — feed the sealed stub into the server's
-        // `client_sealing` decryption path by routing through a fresh
-        // authenticator that shares the *client_sealing* half.
-        //
-        // Actually no — both authenticators were built identically, so
-        // `server.server_sealing` is the server's OWN keystream, not the
-        // client's. To validate unseal, we need the mirror — use the
-        // client's client_sealing-decrypt. Simplest check: call the
-        // client's own unseal via a symmetric helper path. Instead, build
-        // a bespoke validator here that uses the correct direction.
-        //
-        // For the round-trip, we want: the server decrypts what the
-        // client encrypted. That means the server's "receive" path uses
-        // the *client_signing*/*client_sealing* pair, not the
-        // server_signing/server_sealing pair. Accordingly:
-        let mut server_rx_sealing = Rc4::new(&derive_ntlmv2_keys(&session_key).client_sealing);
-        let server_rx_signing = derive_ntlmv2_keys(&session_key).client_signing;
+        // Server side: the client's outbound keystream is what the server
+        // uses to DECRYPT, so rebuild it from the same derived key.
+        let keys = derive_ntlmv2_keys(&session_key);
+        let mut server_rx_sealing = Rc4::new(&keys.client_sealing);
 
-        // Decrypt stub
-        let mut sealed_copy = sealed.clone();
-        server_rx_sealing.transform(&mut sealed_copy);
-        // Decrypt checksum in signature
+        // The MAC covers SeqNum || prefix || PLAINTEXT padded stub ||
+        // sec_trailer — the input is taken before sealing, so the server
+        // can re-derive it from the decrypted PDU.
         let sig_start = SecTrailer::SIZE;
-        let mut sealed_checksum = [0u8; 8];
-        sealed_checksum.copy_from_slice(&auth_verifier[sig_start + 4..sig_start + 12]);
-        server_rx_sealing.transform(&mut sealed_checksum);
-
-        // Verify HMAC — must match the Impacket-mirror seal_request input:
-        // `SeqNum_LE(4) || plain_stub_padded` (no header, no sec_trailer).
-        let _ = dummy_hdr; // silence "unused"
         let seq_num = u32::from_le_bytes(
             auth_verifier[sig_start + 12..sig_start + 16]
                 .try_into()
                 .unwrap(),
         );
         let seqnum_le = seq_num.to_le_bytes();
-        let full_mic = hmac_md5_concat(&server_rx_signing, &[&seqnum_le, &sealed_copy]);
+        let mut plaintext_stub = stub.to_vec();
+        let pad_len = (4 - (stub.len() % 4)) % 4;
+        plaintext_stub.resize(stub.len() + pad_len, 0x00);
+        let full_mic = hmac_md5_concat(
+            &keys.client_signing,
+            &[
+                &seqnum_le,
+                &dummy_hdr,
+                &plaintext_stub,
+                &auth_verifier[..SecTrailer::SIZE],
+            ],
+        );
+
+        // Decrypt stub, then checksum — same keystream, same order as the
+        // sender applied them.
+        let mut sealed_copy = sealed.clone();
+        server_rx_sealing.transform(&mut sealed_copy);
+        let mut sealed_checksum = [0u8; 8];
+        sealed_checksum.copy_from_slice(&auth_verifier[sig_start + 4..sig_start + 12]);
+        server_rx_sealing.transform(&mut sealed_checksum);
+
         assert!(
             ct_eq(&sealed_checksum, &full_mic[..8]),
             "round-trip signature must verify"
@@ -1278,10 +1272,6 @@ mod tests {
 
         // Stub content matches original, with 1 pad byte.
         assert_eq!(&sealed_copy[..stub.len()], stub);
-
-        // The paired client/server authenticator round-trip with proper
-        // role-swapped sealing handles is exercised by
-        // `seal_request_unseal_response_full_roundtrip` below.
     }
 
     /// Symmetric pair: a client-facing authenticator seals; a mirror
