@@ -184,13 +184,6 @@ impl RpcChannel {
             )));
         }
         let server_trailer = SecTrailer::decode(&ack.server_auth_verifier[..SecTrailer::SIZE])?;
-        eprintln!(
-            "[DEBUG] BindAck sec_trailer: auth_type={:?}, auth_level={:?}, auth_pad_length={}, auth_context_id=0x{:04x}",
-            server_trailer.auth_type,
-            server_trailer.auth_level,
-            server_trailer.auth_pad_length,
-            server_trailer.auth_context_id
-        );
         if !matches!(server_trailer.auth_type, crate::auth::AuthType::Ntlmssp) {
             return Err(DceRpcError::Auth(format!(
                 "BindAck auth_type: expected NTLMSSP, got {:?}",
@@ -198,9 +191,6 @@ impl RpcChannel {
             )));
         }
         let challenge_blob = &ack.server_auth_verifier[SecTrailer::SIZE..];
-        let challenge_flags =
-            u32::from_le_bytes(challenge_blob[20..24].try_into().unwrap_or_default());
-        eprintln!("[DEBUG] NTLMSSP CHALLENGE flags: 0x{challenge_flags:08x}");
         binder.consume_challenge(challenge_blob)?;
 
         let (auth3_verifier, authenticator) = binder.finish()?;
