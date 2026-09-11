@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use netraze_dcerpc::auth::{AuthLevel, NtlmAuthenticator, NtlmBinder};
-use netraze_dcerpc::interfaces::srvsvc;
+use netraze_dcerpc::interfaces::{scmr, srvsvc};
+use netraze_dcerpc::uuid::Uuid;
 use netraze_dcerpc::{DceRpcError, Result as RpcResult, RpcChannel, RpcTransport};
 
 use super::connection::SmbCredential;
@@ -219,12 +220,12 @@ impl RpcTransport for SmbPipeTransport {
 /// 15+ years and every real-world RPC server tolerates it.
 const IMPACKET_AUTH_CTX_ID_OFFSET: u32 = 79231;
 
-/// Open `\PIPE\srvsvc` on an authenticated SMB session, then bind the
-/// SRVSVC v3.0 interface — NTLMSSP PKT_PRIVACY first, anonymous fallback.
+/// Open `\PIPE\<pipe_name>` on an authenticated SMB session, then bind the
+/// given interface — NTLMSSP PKT_PRIVACY first, anonymous fallback.
 ///
 /// Why the fallback: Windows domain controllers (observed on Server 2022,
 /// and reproducible with Impacket against the same hosts) answer an
-/// NTLMSSP-authenticated bind on the srvsvc endpoint with
+/// NTLMSSP-authenticated bind on some endpoints (notably srvsvc) with
 /// `bind_nak provider_reject_reason=8` ("authentication type not
 /// recognized") while BindAck-ing an anonymous bind without blinking —
 /// the server authorizes the subsequent calls through the **SMB session
@@ -238,51 +239,102 @@ const IMPACKET_AUTH_CTX_ID_OFFSET: u32 = 79231;
 /// integration tests exercise) and may refuse anonymous access, so the
 /// authenticated attempt stays the primary path. We only fall back when
 /// the endpoint explicitly BindNaks.
+///
+/// This is the one bind dance every `*_rpc` orchestrator (shares, info,
+/// users, dump, exec, enum_av) rides; the per-interface wrappers below
+/// just feed it the pipe name, UUID and version.
+pub async fn bind_interface_over_smb(
+    session: Arc<Mutex<Smb2Session>>,
+    ipc_tree_id: u32,
+    pipe_name: &str,
+    interface: Uuid,
+    version: (u16, u16),
+    cred: &SmbCredential,
+) -> Result<RpcChannel, String> {
+    // Open the pipe (blocking SMB I/O off the async runtime).
+    async fn open_pipe(
+        session: &Arc<Mutex<Smb2Session>>,
+        ipc_tree_id: u32,
+        pipe_name: &str,
+    ) -> Result<Arc<dyn RpcTransport>, String> {
+        let session_for_pipe = Arc::clone(session);
+        let pipe_name = pipe_name.to_owned();
+        let pipe = tokio::task::spawn_blocking(move || {
+            SmbPipeTransport::open(session_for_pipe, ipc_tree_id, &pipe_name)
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
+        Ok(Arc::new(pipe))
+    }
+
+    // ── Primary: NTLMSSP PKT_PRIVACY bind.
+    let transport = open_pipe(&session, ipc_tree_id, pipe_name).await?;
+    let binder = build_binder(cred, 0);
+    match RpcChannel::bind_authenticated(transport, interface, version, binder).await {
+        Ok(channel) => Ok(channel),
+        Err(e) if e.to_string().contains("BindNak") => {
+            // Endpoint refused the authenticated bind — retry anonymous on
+            // a fresh pipe (the NAKed association is dead server-side).
+            let transport = open_pipe(&session, ipc_tree_id, pipe_name).await?;
+            RpcChannel::bind(transport, interface, version)
+                .await
+                .map_err(|e| format!("{pipe_name} anonymous bind fallback (after BindNak): {e}"))
+        }
+        Err(e) => Err(format!("RpcChannel::bind_authenticated({pipe_name}): {e}")),
+    }
+}
+
+/// Bind the SRVSVC v3.0 interface over `\PIPE\srvsvc` — see
+/// [`bind_interface_over_smb`] for the auth dance.
 pub async fn bind_srvsvc_over_smb(
     session: Arc<Mutex<Smb2Session>>,
     ipc_tree_id: u32,
     cred: &SmbCredential,
 ) -> Result<RpcChannel, String> {
-    // ── Open the pipe (blocking SMB I/O off the async runtime).
-    let session_for_pipe = Arc::clone(&session);
-    let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
-        SmbPipeTransport::open(session_for_pipe, ipc_tree_id, "srvsvc")
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
-    let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
-
-    // ── Primary: NTLMSSP PKT_PRIVACY bind.
-    let binder = build_binder(cred, 0);
-    match RpcChannel::bind_authenticated(
-        transport,
+    bind_interface_over_smb(
+        session,
+        ipc_tree_id,
+        "srvsvc",
         srvsvc::uuid(),
         (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
-        binder,
+        cred,
     )
     .await
-    {
-        Ok(channel) => Ok(channel),
-        Err(e) if e.to_string().contains("BindNak") => {
-            // Endpoint refused the authenticated bind — retry anonymous on
-            // a fresh pipe (the NAKed association is dead server-side).
-            let session_for_pipe = Arc::clone(&session);
-            let pipe = tokio::task::spawn_blocking(move || -> Result<SmbPipeTransport, String> {
-                SmbPipeTransport::open(session_for_pipe, ipc_tree_id, "srvsvc")
-            })
-            .await
-            .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
-            let transport: Arc<dyn RpcTransport> = Arc::new(pipe);
-            RpcChannel::bind(
-                transport,
-                srvsvc::uuid(),
-                (srvsvc::VERSION_MAJOR, srvsvc::VERSION_MINOR),
-            )
-            .await
-            .map_err(|e| format!("srvsvc anonymous bind fallback (after BindNak): {e}"))
+}
+
+/// Bind the SCMR v2.0 interface over `\PIPE\svcctl` — the service-control
+/// channel smbexec (create/start/stop/delete nonce service) and enum_av
+/// (per-product service probes) drive. Real Windows SCM accepts NTLMSSP
+/// binds; the anonymous fallback stays in place for the odd hardened host
+/// where the SCM still services calls authorized by the SMB session.
+pub async fn bind_svcctl_over_smb(
+    session: Arc<Mutex<Smb2Session>>,
+    ipc_tree_id: u32,
+    cred: &SmbCredential,
+) -> Result<RpcChannel, String> {
+    bind_interface_over_smb(
+        session,
+        ipc_tree_id,
+        "svcctl",
+        scmr::uuid(),
+        (scmr::VERSION_MAJOR, scmr::VERSION_MINOR),
+        cred,
+    )
+    .await
+}
+
+/// Strip the `:port` (or `[ipv6]:port`) suffix off `target` so the result
+/// is a UNC-safe hostname. UNC paths reject ports; Windows refuses, Samba
+/// happens to tolerate them but we don't want to depend on that.
+pub fn host_only(target: &str) -> String {
+    if let Some(stripped) = target.strip_prefix('[') {
+        // [ipv6]:port → ipv6 (strip up to the closing bracket; ignore the
+        // suffix entirely)
+        if let Some(end) = stripped.find(']') {
+            return stripped[..end].to_owned();
         }
-        Err(e) => Err(format!("RpcChannel::bind_authenticated(srvsvc): {e}")),
     }
+    target.split(':').next().unwrap_or(target).to_owned()
 }
 
 /// Build the [`NtlmBinder`] driving the DCE/RPC NTLMSSP bind handshake from
@@ -356,6 +408,16 @@ impl Drop for SmbPipeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_only_strips_port_suffix() {
+        assert_eq!(host_only("dc01.lan"), "dc01.lan");
+        assert_eq!(host_only("dc01.lan:445"), "dc01.lan");
+        assert_eq!(host_only("10.0.0.5"), "10.0.0.5");
+        assert_eq!(host_only("10.0.0.5:1445"), "10.0.0.5");
+        assert_eq!(host_only("[fe80::1]:445"), "fe80::1");
+        assert_eq!(host_only("[fe80::1]"), "fe80::1");
+    }
 
     /// `SmbPipeTransport` is `Send + Sync`, which it must be to satisfy
     /// `RpcTransport`'s `Send + Sync` super-bound. This is a compile-time
