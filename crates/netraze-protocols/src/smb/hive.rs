@@ -44,10 +44,6 @@ impl Hive {
         u32::from_le_bytes(self.data[off..off + 4].try_into().unwrap())
     }
 
-    fn i32(&self, off: usize) -> i32 {
-        i32::from_le_bytes(self.data[off..off + 4].try_into().unwrap())
-    }
-
     /// Convert a relative cell offset (as stored in the hive) to a file offset
     /// that points past the 4-byte cell size, i.e., directly at the cell data.
     fn cell(&self, rel: u32) -> usize {

@@ -24,10 +24,12 @@ pub mod connection;
 #[path = "stubs/connection.rs"]
 pub mod connection;
 
-#[cfg(windows)]
-pub mod browser;
-#[cfg(not(windows))]
-#[path = "stubs/browser.rs"]
+// Phase D — portable share file browser: raw SMB2 file operations (list /
+// upload / download / mkdir / delete) on the pure-Rust stack. Single
+// backend; the Windows-only FindFirstFileW/CopyFileW implementation and the
+// Linux NOT_PORTED stub are retired. `pub mod` so integration tests under
+// `tests/` can reach `browser::*` directly (same pattern as `shares`).
+#[path = "browser_rpc.rs"]
 pub mod browser;
 
 // Phase B.2 — SRVSVC NetrShareEnum over a sealed DCE/RPC channel + per-share
