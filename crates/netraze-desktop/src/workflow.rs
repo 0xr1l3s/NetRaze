@@ -92,6 +92,11 @@ pub enum WorkflowNode {
         products: Vec<String>,
         #[serde(default)]
         error: Option<String>,
+        /// Set once the result event landed — distinguishes "still
+        /// scanning" from "finished, nothing found" (products may be
+        /// legitimately empty in both states).
+        #[serde(default)]
+        done: bool,
     },
 }
 
@@ -702,7 +707,10 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 });
             }
             WorkflowNode::EnumAvNode {
-                products, error, ..
+                products,
+                error,
+                done,
+                ..
             } => {
                 ui.set_min_width(260.0);
                 ui.set_max_width(380.0);
@@ -715,7 +723,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                                 .color(Color32::from_rgb(220, 170, 60)),
                         );
                     }
-                    if products.is_empty() && error.is_none() {
+                    if !done {
                         ui.label(
                             egui::RichText::new("⏳ Scanning...")
                                 .small()
@@ -744,7 +752,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                             ui.label(egui::RichText::new(status).small().color(color));
                         });
                     }
-                    if products.is_empty() && error.is_some() {
+                    if *done && products.is_empty() {
                         ui.label(
                             egui::RichText::new("No AV/EDR detected")
                                 .small()

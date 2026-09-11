@@ -630,12 +630,14 @@ impl AppState {
                                 host_ip: existing,
                                 products: p,
                                 error: err,
+                                done,
                                 ..
                             } = node
                             {
                                 if *existing == ip {
                                     *p = products.clone();
                                     *err = error.clone();
+                                    *done = true;
                                     break;
                                 }
                             }
@@ -653,6 +655,7 @@ impl AppState {
                                 hostname,
                                 products,
                                 error,
+                                done: true,
                             },
                         );
                         let node_id = egui_snarl::NodeId(host_node_id);
