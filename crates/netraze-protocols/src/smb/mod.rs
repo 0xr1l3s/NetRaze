@@ -60,10 +60,10 @@ pub mod users;
 #[path = "dump_rpc.rs"]
 pub mod dump;
 
-#[cfg(windows)]
-pub mod enum_av;
-#[cfg(not(windows))]
-#[path = "stubs/enum_av.rs"]
+// Phase F -- AV/EDR enumeration over SCMR probes + IPC$ pipe listing on
+// the pure-Rust SMB2 stack. Single backend; the Windows-only SCM/FindFirst
+// path and the Linux NOT_PORTED stub are retired.
+#[path = "enum_av_rpc.rs"]
 pub mod enum_av;
 
 // Phase E -- smbexec over DCE/RPC SCMR on the pure-Rust SMB2 stack.

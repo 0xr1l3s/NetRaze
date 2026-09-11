@@ -766,40 +766,30 @@ impl RuntimeServices {
         let hostname2 = hostname.clone();
         let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let ip3 = ip2.clone();
-            let result = tokio::task::spawn_blocking(move || enum_av(&ip3, Some(&smb_cred))).await;
+            // The portable backend is async — await it directly.
+            let av_result = enum_av(&ip2, Some(&smb_cred)).await;
 
-            let (products, error) = match result {
-                Ok(av_result) => {
-                    let lines: Vec<String> =
-                        av_result.products.iter().map(|p| p.to_line()).collect();
-                    if lines.is_empty() {
-                        let _ = tx.send(RuntimeEvent::Log {
-                            level: LogLevel::Warning,
-                            message: format!("{ip2}: No AV/EDR detected"),
-                        });
-                    } else {
-                        for p in &av_result.products {
-                            let _ = tx.send(RuntimeEvent::Log {
-                                level: LogLevel::Success,
-                                message: format!("{ip2}: Found {} {}", p.name, p.status_label()),
-                            });
-                        }
-                    }
-                    let err = if av_result.errors.is_empty() {
-                        None
-                    } else {
-                        Some(av_result.errors.join("; "))
-                    };
-                    (lines, err)
-                }
-                Err(e) => {
+            let (products, error) = {
+                let lines: Vec<String> = av_result.products.iter().map(|p| p.to_line()).collect();
+                if lines.is_empty() {
                     let _ = tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Error,
-                        message: format!("{ip2}: AV enum task panic: {e}"),
+                        level: LogLevel::Warning,
+                        message: format!("{ip2}: No AV/EDR detected"),
                     });
-                    (Vec::new(), Some(format!("task panic: {e}")))
+                } else {
+                    for p in &av_result.products {
+                        let _ = tx.send(RuntimeEvent::Log {
+                            level: LogLevel::Success,
+                            message: format!("{ip2}: Found {} {}", p.name, p.status_label()),
+                        });
+                    }
                 }
+                let err = if av_result.errors.is_empty() {
+                    None
+                } else {
+                    Some(av_result.errors.join("; "))
+                };
+                (lines, err)
             };
 
             let _ = tx.send(RuntimeEvent::EnumAvResult {

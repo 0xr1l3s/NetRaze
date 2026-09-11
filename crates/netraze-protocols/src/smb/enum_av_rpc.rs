@@ -1,26 +1,33 @@
-//! AV/EDR enumeration via Windows SCM service queries and named pipe detection.
+//! AV/EDR enumeration via SCM service probes and named pipe detection —
+//! pure Rust.
+//!
+//! Phase F of the cross-platform portage plan. Replaces the Windows-only
+//! `OpenSCManagerW`/`OpenServiceW` + `FindFirstFileW` implementation (and
+//! its `stubs/enum_av.rs` `NOT_PORTED` stub) with the same two-phase
+//! detection over DCE/RPC SCMR and SMB2 `query_directory` on IPC$:
+//!
+//! 1. **SCM phase** — for every product × service name in the database,
+//!    `ROpenServiceW(SERVICE_QUERY_STATUS)`: error 1060 means absent, other
+//!    errors are skipped, success means the service is installed. On a
+//!    successful open, `RQueryServiceStatus` additionally reports `running`
+//!    (the Windows impl only checked existence — the RPC path gets the
+//!    state for free).
+//! 2. **Pipe phase** — SMB2 `query_directory` on `\\host\IPC$` with pattern
+//!    `*` (exactly what the Windows impl's `FindFirstFileW` did under the
+//!    hood) matched against the database's pipe globs. Any failure skips
+//!    the phase silently — pipe listing is best-effort on every platform.
 //!
 //! Inspired by NetExec's enum_av module (credit: @an0n_r0, @mpgn_x64).
-//! Detects installed and running endpoint protection by:
-//! 1. Querying service existence/status via Service Control Manager
-//! 2. Listing named pipes on IPC$ to detect running processes
 
-use windows::Win32::Storage::FileSystem::{
-    FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
-};
-use windows::Win32::System::Services::*;
-use windows::core::PCWSTR;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use super::connection::{SmbCredential, connect_ipc};
+use netraze_dcerpc::channel::RpcChannel;
+use netraze_dcerpc::interfaces::scmr;
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn from_wide(s: &[u16]) -> String {
-    let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-    String::from_utf16_lossy(&s[..end])
-}
+use super::connection::SmbCredential;
+use super::rpc::{bind_svcctl_over_smb, connect_session, host_only};
+use super::smb2::Smb2Session;
 
 /// Result for a single detected AV/EDR product.
 #[derive(Debug, Clone)]
@@ -53,38 +60,81 @@ pub struct EnumAvResult {
 }
 
 /// Enumerate AV/EDR products on a remote host.
-/// Establishes an IPC$ session using the provided credential before querying.
-pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult {
+///
+/// The RPC path authenticates itself — no shared IPC$ mount. `None`
+/// credentials can't drive the NTLMSSP bind, so they surface as an error
+/// entry instead of a silent empty result.
+pub async fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult {
     let mut errors = Vec::new();
 
-    // Establish WNet session so SCM + pipe listing work
-    if let Err(e) = connect_ipc(target, credential) {
-        errors.push(format!("IPC$ connect: {e}"));
-    }
-
-    let mut product_map: std::collections::HashMap<String, AvProduct> =
-        std::collections::HashMap::new();
-
-    // Phase 1: Query services via SCM
-    match query_services(target) {
-        Ok(found) => {
-            for (product_name, _svc_name) in found {
-                let entry = product_map
-                    .entry(product_name.clone())
-                    .or_insert(AvProduct {
-                        name: product_name,
-                        installed: false,
-                        running: false,
-                    });
-                entry.installed = true;
-            }
+    let cred = match credential {
+        Some(c) => c,
+        None => {
+            return EnumAvResult {
+                products: Vec::new(),
+                errors: vec!["enum_av requires a credential".into()],
+            };
         }
-        Err(e) => errors.push(format!("SCM query: {e}")),
+    };
+
+    let host = host_only(target);
+    let session = match connect_session(target, cred) {
+        Ok(s) => s,
+        Err(e) => {
+            return EnumAvResult {
+                products: Vec::new(),
+                errors: vec![format!("session setup: {e}")],
+            };
+        }
+    };
+    let session = Arc::new(Mutex::new(session));
+    let tree = match session.lock() {
+        Ok(mut s) => s.tree_connect(&host, "IPC$"),
+        Err(e) => {
+            return EnumAvResult {
+                products: Vec::new(),
+                errors: vec![format!("session mutex poisoned: {e}")],
+            };
+        }
+    };
+    let ipc = match tree {
+        Ok(tid) => tid,
+        Err(e) => {
+            return EnumAvResult {
+                products: Vec::new(),
+                errors: vec![format!("tree_connect IPC$: {e}")],
+            };
+        }
+    };
+
+    let mut product_map: HashMap<String, AvProduct> = HashMap::new();
+
+    // Phase 1: service existence probes via SCMR.
+    match bind_svcctl_over_smb(session.clone(), ipc, cred).await {
+        Ok(mut ch) => match query_services_on_channel(&mut ch).await {
+            Ok(found) => {
+                for (product_name, _svc_name, running) in found {
+                    let entry = product_map
+                        .entry(product_name.clone())
+                        .or_insert(AvProduct {
+                            name: product_name,
+                            installed: false,
+                            running: false,
+                        });
+                    entry.installed = true;
+                    entry.running |= running;
+                }
+            }
+            Err(e) => errors.push(format!("SCM query: {e}")),
+        },
+        Err(e) => errors.push(format!("SCMR bind: {e}")),
     }
 
-    // Phase 2: Detect running via named pipes on IPC$
-    // Note: FindFirstFileW on IPC$ may not work on all targets — this is best-effort.
-    match list_pipes(target) {
+    // Phase 2: running detection via named pipes on IPC$.
+    // Directory listing on IPC$ is not supported by every server (Samba
+    // refuses it) — best-effort, skip silently, exactly like the Windows
+    // impl's FindFirstFileW fallback.
+    match list_pipes(&session, &host).await {
         Ok(pipes) => {
             for (product_name, _pipe) in match_pipes(&pipes) {
                 let entry = product_map
@@ -97,7 +147,11 @@ pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult
                 entry.running = true;
             }
         }
-        Err(_) => { /* Pipe listing not supported on this target — skip silently */ }
+        Err(_) => { /* Pipe listing not supported on this target — skip */ }
+    }
+
+    if let Ok(mut s) = session.lock() {
+        s.logoff();
     }
 
     let mut products: Vec<AvProduct> = product_map.into_values().collect();
@@ -106,67 +160,104 @@ pub fn enum_av(target: &str, credential: Option<&SmbCredential>) -> EnumAvResult
     EnumAvResult { products, errors }
 }
 
-// ---------- Service detection via SCM ----------
+// ---------- Service detection via SCMR ----------
 
-fn query_services(target: &str) -> Result<Vec<(String, String)>, String> {
-    let target_w = wide(&format!("\\\\{target}"));
-    let scm = unsafe { OpenSCManagerW(PCWSTR(target_w.as_ptr()), None, SC_MANAGER_CONNECT) }
-        .map_err(|e| format!("OpenSCManager: {e}"))?;
+/// Probe every database service name with `ROpenServiceW` on an already
+/// bound svcctl channel.
+///
+/// Returns `(product, service, running)` triples; `running` comes from
+/// `RQueryServiceStatus` on the open handle (service exists ⇒ at least
+/// installed). Error 1060 (does not exist) is the expected "absent" answer;
+/// every other error skips the probe silently — same tolerance as the
+/// Windows impl's `OpenServiceW` ignore arm.
+async fn query_services_on_channel(
+    ch: &mut RpcChannel,
+) -> Result<Vec<(String, String, bool)>, String> {
+    // ROpenSCManagerW — Impacket 'DUMMY\0' machine name (same precedent as
+    // the other SCMR orchestrators).
+    let stub = scmr::encode_ropen_sc_manager_w_request(
+        Some("DUMMY\0"),
+        Some("ServicesActive\0"),
+        scmr::SC_MANAGER_ACCESS,
+    );
+    let resp = ch
+        .call(scmr::Opnum::ROpenSCManagerW as u16, &stub)
+        .await
+        .map_err(|e| format!("ROpenSCManagerW: {e}"))?;
+    let (scm, status) = scmr::decode_ropen_sc_manager_w_response(&resp)
+        .map_err(|e| format!("decode ROpenSCManagerW: {e}"))?;
+    if status != 0 {
+        return Err(format!("ROpenSCManagerW failed with status 0x{status:08x}"));
+    }
 
     let mut found = Vec::new();
-
     for product in AV_PRODUCTS {
         for svc_name in product.services {
-            let svc_w = wide(svc_name);
-            let svc = unsafe { OpenServiceW(scm, PCWSTR(svc_w.as_ptr()), SERVICE_QUERY_STATUS) };
-            match svc {
-                Ok(handle) => {
-                    // Service exists → installed
-                    found.push((product.name.to_string(), svc_name.to_string()));
-                    unsafe {
-                        let _ = CloseServiceHandle(handle);
-                    }
-                }
-                Err(_) => {
-                    // Service doesn't exist or access denied — skip
+            let stub = scmr::encode_ropen_service_w_request(
+                &scm,
+                &format!("{svc_name}\0"),
+                scmr::SERVICE_QUERY_STATUS,
+            );
+            let resp = match ch.call(scmr::Opnum::ROpenServiceW as u16, &stub).await {
+                Ok(r) => r,
+                Err(_) => continue, // transport hiccup — skip this probe
+            };
+            let (svc, status) = match scmr::decode_ropen_service_w_response(&resp) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if status != 0 {
+                // 1060 = ERROR_SERVICE_DOES_NOT_EXIST (the expected
+                // "absent"); anything else (access denied, …) — skip.
+                continue;
+            }
+
+            // Exists → installed; query its state for `running`.
+            let mut running = false;
+            let stub = scmr::encode_rquery_service_status_request(&svc);
+            if let Ok(resp) = ch
+                .call(scmr::Opnum::RQueryServiceStatus as u16, &stub)
+                .await
+            {
+                if let Ok((info, 0)) = scmr::decode_rquery_service_status_response(&resp) {
+                    running = info.current_state == scmr::SERVICE_RUNNING;
                 }
             }
+
+            found.push((product.name.to_string(), svc_name.to_string(), running));
+
+            let stub = scmr::encode_rclose_service_handle_request(&svc);
+            let _ = ch
+                .call(scmr::Opnum::RCloseServiceHandle as u16, &stub)
+                .await;
         }
     }
 
-    unsafe {
-        let _ = CloseServiceHandle(scm);
-    }
+    let stub = scmr::encode_rclose_service_handle_request(&scm);
+    let _ = ch
+        .call(scmr::Opnum::RCloseServiceHandle as u16, &stub)
+        .await;
+
     Ok(found)
 }
 
 // ---------- Named pipe detection ----------
 
-fn list_pipes(target: &str) -> Result<Vec<String>, String> {
-    let search_path = format!("\\\\{}\\IPC$\\*", target);
-    let search_w = wide(&search_path);
-    let mut find_data = WIN32_FIND_DATAW::default();
-
-    let handle = unsafe { FindFirstFileW(PCWSTR(search_w.as_ptr()), &mut find_data) };
-    let handle = match handle {
-        Ok(h) => h,
-        Err(e) => return Err(format!("FindFirstFileW IPC$: {e}")),
-    };
-
-    let mut pipes = Vec::new();
-    loop {
-        let name = from_wide(&find_data.cFileName);
-        if !name.is_empty() && name != "." && name != ".." {
-            pipes.push(name);
-        }
-        if unsafe { FindNextFileW(handle, &mut find_data) }.is_err() {
-            break;
-        }
-    }
-    unsafe {
-        let _ = FindClose(handle);
-    }
-    Ok(pipes)
+/// List every pipe on IPC$ via SMB2 query_directory — the wire equivalent
+/// of the Windows impl's `FindFirstFileW(\\host\IPC$\*)`.
+async fn list_pipes(session: &Arc<Mutex<Smb2Session>>, host: &str) -> Result<Vec<String>, String> {
+    let session = Arc::clone(session);
+    let host = host.to_owned();
+    let pipes = tokio::task::spawn_blocking(move || {
+        let mut s = session
+            .lock()
+            .map_err(|e| format!("session mutex poisoned: {e}"))?;
+        s.query_directory(&host, "IPC$", "", "*")
+            .map_err(|e| e.as_str())
+    })
+    .await
+    .map_err(|e| format!("pipe listing task: {e}"))?;
+    Ok(pipes?.into_iter().map(|e| e.name).collect())
 }
 
 /// Match collected pipe names against known AV/EDR pipe patterns.
@@ -460,3 +551,64 @@ static AV_PRODUCTS: &[AvProductDef] = &[
         pipes: &["FS_CCFIPC_*"],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_exact_match_is_case_insensitive() {
+        assert!(pipe_matches("etw_sensor_pipe_ppl", "etw_sensor_pipe_ppl"));
+        assert!(pipe_matches("ETW_Sensor_Pipe_PPL", "etw_sensor_pipe_ppl"));
+        assert!(!pipe_matches("etw_sensor_pipe_pplx", "etw_sensor_pipe_ppl"));
+    }
+
+    #[test]
+    fn glob_single_star_prefix_suffix() {
+        // CrowdStrike's backslash pattern, the trickiest entry.
+        assert!(pipe_matches("CrowdStrike\\{abc-123}", "CrowdStrike\\{*"));
+        assert!(pipe_matches("crowdstrike\\{xyz}", "CrowdStrike\\{*"));
+        assert!(!pipe_matches("CrowdStrike", "CrowdStrike\\{*"));
+        assert!(!pipe_matches("FooCrowdStrike\\{x}", "CrowdStrike\\{*"));
+    }
+
+    #[test]
+    fn glob_star_only_matches_anything() {
+        assert!(pipe_matches("anything", "*"));
+    }
+
+    #[test]
+    fn glob_middle_star() {
+        // Two '*'s → the in-order-contains fallback path.
+        assert!(pipe_matches(
+            "CybereasonAPConsoleMinionHostIpc_42",
+            "CybereasonAPConsole*_*"
+        ));
+        assert!(pipe_matches("a-b-c", "a*b*c"));
+        assert!(!pipe_matches("a-c", "a*b*c"));
+    }
+
+    #[test]
+    fn match_pipes_finds_products_from_pipe_list() {
+        let pipes: Vec<String> = vec![
+            "srvsvc".into(),
+            "CrowdStrike\\{deadbeef}".into(),
+            "sophoslivequery_agent1".into(),
+            "lsarpc".into(),
+        ];
+        let found = match_pipes(&pipes);
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"CrowdStrike Falcon"));
+        assert!(names.contains(&"Sophos Intercept X"));
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn product_db_is_wellformed() {
+        for p in AV_PRODUCTS {
+            assert!(!p.name.is_empty());
+        }
+        // Windows Defender must stay in the DB — the common case.
+        assert!(AV_PRODUCTS.iter().any(|p| p.name == "Windows Defender"));
+    }
+}
