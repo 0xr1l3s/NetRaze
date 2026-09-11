@@ -497,7 +497,7 @@ async fn start_service_on_second_session(
 
     close_scm_handle(&mut ch, &svc).await;
     close_scm_handle(&mut ch, &scm).await;
-    if let Some(mut s) = session.lock().ok() {
+    if let Ok(mut s) = session.lock() {
         s.logoff();
     }
 

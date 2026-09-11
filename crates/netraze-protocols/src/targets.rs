@@ -80,7 +80,7 @@ fn expand_range(start: Ipv4Addr, end: Ipv4Addr) -> Vec<String> {
 /// Parse multiple target entries (comma/newline/space separated) and expand each.
 pub fn parse_target_list(input: &str) -> Vec<String> {
     input
-        .split(|c: char| c == ',' || c == '\n')
+        .split([',', '\n'])
         .flat_map(|entry| {
             let trimmed = entry.trim();
             if trimmed.is_empty() {
