@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use netraze_dcerpc::interfaces::srvsvc;
 
 use super::connection::SmbCredential;
-use super::rpc::{bind_srvsvc_over_smb, connect_session};
+use super::rpc::{bind_srvsvc_over_smb, connect_session, host_only};
 use super::smb2::Smb2Session;
 
 /// Subset of `SERVER_INFO_101` we surface to the rest of the workspace.
@@ -69,12 +69,7 @@ pub async fn get_server_info(target: &str, cred: &SmbCredential) -> Result<Serve
             // tree_connect builds a UNC path internally; strip any `:port`
             // suffix because UNC doesn't accept ports (would survive Samba
             // but Windows refuses).
-            let host_only = target_owned
-                .split(':')
-                .next()
-                .unwrap_or(&target_owned)
-                .to_owned();
-            let tid = s.tree_connect(&host_only, "IPC$")?;
+            let tid = s.tree_connect(&host_only(&target_owned), "IPC$")?;
             Ok((s, tid))
         })
         .await

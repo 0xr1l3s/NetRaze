@@ -16,7 +16,7 @@ use netraze_dcerpc::interfaces::srvsvc;
 use rand::RngCore;
 
 use super::connection::SmbCredential;
-use super::rpc::{bind_srvsvc_over_smb, connect_session};
+use super::rpc::{bind_srvsvc_over_smb, connect_session, host_only};
 use super::smb2::Smb2Session;
 
 /// Win32 status `ERROR_MORE_DATA` — server has more shares than fit in this
@@ -306,20 +306,6 @@ pub async fn can_access_admin_share(target: &str, cred: &SmbCredential) -> bool 
     .unwrap_or(false)
 }
 
-/// Strip the `:port` (or `[ipv6]:port`) suffix off `target` so the result
-/// is a UNC-safe hostname. UNC paths reject ports; Windows refuses, Samba
-/// happens to tolerate them but we don't want to depend on that.
-fn host_only(target: &str) -> String {
-    if let Some(stripped) = target.strip_prefix('[') {
-        // [ipv6]:port → ipv6 (strip up to the closing bracket; ignore the
-        // suffix entirely)
-        if let Some(end) = stripped.find(']') {
-            return stripped[..end].to_owned();
-        }
-    }
-    target.split(':').next().unwrap_or(target).to_owned()
-}
-
 /// Build a probe filename guaranteed (with overwhelming probability) not
 /// to exist on the target. 64 bits of entropy is enough that even a
 /// hostile server can't prearrange a collision.
@@ -351,16 +337,6 @@ mod tests {
         assert_eq!(ShareAccess::ReadWrite.display_str(), "RW");
         assert_eq!(ShareAccess::Read.display_str(), "R");
         assert_eq!(ShareAccess::NoAccess.display_str(), "NO ACCESS");
-    }
-
-    #[test]
-    fn host_only_strips_port_suffix() {
-        assert_eq!(host_only("dc01.lan"), "dc01.lan");
-        assert_eq!(host_only("dc01.lan:445"), "dc01.lan");
-        assert_eq!(host_only("10.0.0.5"), "10.0.0.5");
-        assert_eq!(host_only("10.0.0.5:1445"), "10.0.0.5");
-        assert_eq!(host_only("[fe80::1]:445"), "fe80::1");
-        assert_eq!(host_only("[fe80::1]"), "fe80::1");
     }
 
     #[test]
