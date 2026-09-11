@@ -24,8 +24,8 @@ const SMB2_CLOSE: u16 = 6;
 const SMB2_READ: u16 = 8;
 const SMB2_WRITE: u16 = 9;
 const SMB2_IOCTL: u16 = 11;
-const SMB2_QUERY_DIRECTORY: u16 = 12;
-const SMB2_SET_INFO: u16 = 15;
+const SMB2_QUERY_DIRECTORY: u16 = 14; // 0x000E — 12 is CANCEL, which servers never answer
+const SMB2_SET_INFO: u16 = 17; // 0x0011 — 15 is CHANGE_NOTIFY, which blocks until notified
 
 /// MS-FSCC §2.3 — bidirectional named-pipe transceive. Carrier for DCE/RPC
 /// PDUs over SMB2 (\PIPE\srvsvc, \PIPE\samr, \PIPE\svcctl, \PIPE\wkssvc).
