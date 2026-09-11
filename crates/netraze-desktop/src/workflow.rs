@@ -64,6 +64,13 @@ pub enum WorkflowNode {
         host_ip: String,
         hostname: String,
         shares: Vec<String>,
+        /// Label of the credential that enumerated these shares
+        /// (`DOMAIN\user` / `.\user`) — resolved back to a full
+        /// `CredentialRecord` at click time. Only the label is stored: snarl
+        /// nodes are serde-serialized into the persisted workspace and the
+        /// secret must not end up on disk.
+        #[serde(default)]
+        cred_label: Option<String>,
     },
     UsersNode {
         host_ip: String,
@@ -227,9 +234,7 @@ impl WorkflowNode {
                 }
             }
             WorkflowNode::SharesNode {
-                host_ip,
-                hostname,
-                shares: _,
+                host_ip, hostname, ..
             } => {
                 let host = if hostname.is_empty() {
                     host_ip.as_str()
@@ -278,14 +283,6 @@ impl WorkflowNode {
                 };
                 format!("🛡 AV/EDR ({}) — {host}", products.len())
             }
-        }
-    }
-
-    /// Display label for the logged-in credential, if any.
-    pub fn logged_in_label(&self) -> Option<&str> {
-        match self {
-            WorkflowNode::HostNode { logged_in_cred, .. } => logged_in_cred.as_deref(),
-            _ => None,
         }
     }
 }
@@ -388,8 +385,14 @@ pub struct WorkflowViewer {
     pub login_requests: Vec<(String, CredentialRecord)>,
     /// (source_node_id_raw, host_ip, hostname, credential) — trigger async share enum
     pub shares_requests: Vec<(NodeId, String, String, CredentialRecord)>,
-    /// (host_ip, share_name) — open browser window
-    pub browse_requests: Vec<(String, String)>,
+    /// (host_ip, share_name, credential) — open browser window. The credential
+    /// is resolved here from the SharesNode's label; `None` means the label
+    /// could not be resolved (the error is pushed to `menu_errors` instead).
+    pub browse_requests: Vec<(String, String, Option<CredentialRecord>)>,
+    /// User-facing error strings raised while handling node context menus
+    /// (e.g. an unresolvable credential label) — surfaced as log entries by
+    /// the canvas.
+    pub menu_errors: Vec<String>,
     /// (source_node_id, host_ip, hostname, credential) — trigger async user enum
     pub users_requests: Vec<(NodeId, String, String, CredentialRecord)>,
     /// (source_node_id, host_ip, hostname, dump_type, credential) — trigger async dump
@@ -409,6 +412,7 @@ impl WorkflowViewer {
             login_requests: Vec::new(),
             shares_requests: Vec::new(),
             browse_requests: Vec::new(),
+            menu_errors: Vec::new(),
             users_requests: Vec::new(),
             dump_requests: Vec::new(),
             enumav_requests: Vec::new(),
@@ -503,6 +507,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 host_ip: _,
                 hostname: _,
                 shares,
+                ..
             } => {
                 ui.set_min_width(200.0);
                 ui.set_max_width(280.0);
@@ -1106,9 +1111,25 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
 
         if is_shares {
             if let WorkflowNode::SharesNode {
-                host_ip, shares, ..
+                host_ip,
+                shares,
+                cred_label,
+                ..
             } = &snarl[node]
             {
+                // Resolve the share-enumeration credential at click time —
+                // the node only persists its label, never the secret.
+                let cred = match self.resolve_cred(cred_label) {
+                    Some(c) => Some(c),
+                    None => {
+                        self.menu_errors.push(format!(
+                            "Cannot browse shares on {host_ip}: credential {} not found \
+                             (it may have been renamed or deleted — re-run List Shares)",
+                            cred_label.as_deref().unwrap_or("(none)")
+                        ));
+                        None
+                    }
+                };
                 for s in shares {
                     let (name, _stype, access) = parse_share_string(s);
                     if access == "NO ACCESS" {
@@ -1116,8 +1137,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                     let label = format!("🔍 Browse {name}");
                     if ui.button(&label).clicked() {
-                        self.browse_requests
-                            .push((host_ip.clone(), name.to_string()));
+                        self.browse_requests.push((
+                            host_ip.clone(),
+                            name.to_string(),
+                            cred.clone(),
+                        ));
                         ui.close();
                     }
                 }

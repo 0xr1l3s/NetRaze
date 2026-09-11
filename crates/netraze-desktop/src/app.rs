@@ -152,21 +152,21 @@ impl eframe::App for NetRazeDesktopApp {
             );
         }
 
-        // Process pending browse directory requests
-        {
-            let pending: Vec<String> = self.state.pending_browse.drain(..).collect();
-            for unc_path in pending {
-                // Find the browser index for this UNC path
-                if let Some(idx) = self
-                    .state
-                    .share_browsers
-                    .iter()
-                    .position(|b| b.current_unc() == unc_path)
-                {
-                    self.state.share_browsers[idx].loading = true;
-                    self.state.share_browsers[idx].error = None;
-                    self.runtime.spawn_browse_directory(idx, unc_path);
-                }
+        // Process pending browse directory requests — (host, share, path,
+        // credential) come off the browser state itself; the id is the index.
+        for browser_id in self.state.pending_browse.drain(..).collect::<Vec<_>>() {
+            if let Some(browser) = self.state.share_browsers.get_mut(browser_id) {
+                browser.loading = true;
+                browser.error = None;
+                let host = browser.host_ip.clone();
+                let share = browser.share_name.clone();
+                let rel_path = browser.current_rel_path();
+                let cred = browser
+                    .credential
+                    .clone()
+                    .map(|c| crate::runtime::cred_to_smb(&c));
+                self.runtime
+                    .spawn_browse_directory(browser_id, host, share, rel_path, cred);
             }
         }
 
@@ -205,39 +205,57 @@ impl eframe::App for NetRazeDesktopApp {
         }
         // Remove closed browsers
         self.state.share_browsers.retain(|b| b.open);
-        // Process actions
+        // Process actions — payloads are entry names / rel paths; the
+        // (host, share, credential) context comes off the browser state.
         for (idx, action) in browser_actions {
+            let Some(browser) = self.state.share_browsers.get(idx) else {
+                continue;
+            };
+            let host = browser.host_ip.clone();
+            let share = browser.share_name.clone();
+            let cred = browser
+                .credential
+                .clone()
+                .map(|c| crate::runtime::cred_to_smb(&c));
             match action {
-                ui::share_browser::BrowserAction::Navigate(_) => {
-                    if let Some(browser) = self.state.share_browsers.get(idx) {
-                        let unc = browser.current_unc();
-                        self.state.pending_browse.push(unc);
-                    }
+                ui::share_browser::BrowserAction::Navigate => {
+                    // path_stack was already updated by the window — re-list.
+                    self.state.pending_browse.push(idx);
                 }
-                ui::share_browser::BrowserAction::DownloadDialog { unc, filename } => {
-                    // Use native file dialog via rfd or fallback to Downloads folder
+                ui::share_browser::BrowserAction::DownloadDialog { rel_path, filename } => {
                     let downloads = dirs_fallback();
-                    let local_path = format!("{}\\{}", downloads, filename);
-                    self.runtime.spawn_download(idx, unc, local_path);
+                    let local_path = std::path::Path::new(&downloads)
+                        .join(&filename)
+                        .to_string_lossy()
+                        .to_string();
+                    self.runtime
+                        .spawn_download(idx, host, share, rel_path, local_path, cred);
                 }
-                ui::share_browser::BrowserAction::UploadDialog(target_dir) => {
-                    // Open native file picker
-                    let target = target_dir.clone();
-                    let rt = &self.runtime;
+                ui::share_browser::BrowserAction::UploadDialog => {
+                    // Open native file picker; upload into the current dir.
+                    let target_dir = browser.current_rel_path();
                     if let Some(path) = native_open_file_dialog() {
                         let filename = std::path::Path::new(&path)
                             .file_name()
                             .map(|f| f.to_string_lossy().to_string())
                             .unwrap_or_else(|| "upload".to_string());
-                        let remote = format!("{}\\{}", target, filename);
-                        rt.spawn_upload(idx, path, remote);
+                        let rel_path = if target_dir.is_empty() {
+                            filename
+                        } else {
+                            format!("{target_dir}\\{filename}")
+                        };
+                        self.runtime
+                            .spawn_upload(idx, path, host, share, rel_path, cred);
                     }
                 }
-                ui::share_browser::BrowserAction::CreateFolder(unc) => {
-                    self.runtime.spawn_create_folder(idx, unc);
+                ui::share_browser::BrowserAction::CreateFolder(folder_name) => {
+                    let rel_path = browser.child_rel_path(&folder_name);
+                    self.runtime
+                        .spawn_create_folder(idx, host, share, rel_path, cred);
                 }
-                ui::share_browser::BrowserAction::Delete { unc, is_dir } => {
-                    self.runtime.spawn_delete(idx, unc, is_dir);
+                ui::share_browser::BrowserAction::Delete { rel_path, is_dir } => {
+                    self.runtime
+                        .spawn_delete(idx, host, share, rel_path, is_dir, cred);
                 }
                 ui::share_browser::BrowserAction::None => {}
             }
@@ -292,29 +310,88 @@ pub fn load_current_workspace(state: &mut AppState, runtime: &RuntimeServices) {
     }
 }
 
-/// Get a sensible download directory (USERPROFILE\Downloads or fallback to temp).
+/// Get a sensible download directory, per-platform:
+/// Windows → `%USERPROFILE%\Downloads`, Unix → `$HOME/Downloads`,
+/// with a temp-dir fallback.
 fn dirs_fallback() -> String {
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        let dl = format!("{}\\Downloads", profile);
-        if std::path::Path::new(&dl).is_dir() {
-            return dl;
+    #[cfg(windows)]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let dl = std::path::Path::new(&profile).join("Downloads");
+            if dl.is_dir() {
+                return dl.to_string_lossy().to_string();
+            }
+            return profile;
         }
-        return profile;
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let dl = std::path::Path::new(&home).join("Downloads");
+            if dl.is_dir() {
+                return dl.to_string_lossy().to_string();
+            }
+            if std::path::Path::new(&home).is_dir() {
+                return home;
+            }
+        }
     }
     std::env::temp_dir().to_string_lossy().to_string()
 }
 
-/// Open a native file open dialog (blocking). Returns the chosen file path, or None if cancelled.
+/// Open a native file open dialog (blocking). Returns the chosen file path,
+/// or None if cancelled. Windows uses the PowerShell WinForms dialog; Unix
+/// tries `zenity` then `kdialog` — no extra crate dependency either way.
 fn native_open_file_dialog() -> Option<String> {
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to upload'; if ($f.ShowDialog() -eq 'OK') { $f.FileName } else { '' }"#,
-        ])
-        .output()
-        .ok()?;
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to upload'; if ($f.ShowDialog() -eq 'OK') { $f.FileName } else { '' }"#,
+            ])
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() { None } else { Some(path) }
+    }
+    #[cfg(not(windows))]
+    {
+        // zenity: prints the chosen path to stdout, exit code 1 on cancel.
+        if let Ok(output) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--title=Select file to upload"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+            // Cancelled or printed nothing — fall through only on tool
+            // absence, not on user cancel.
+            if output.status.code() == Some(0) || output.status.code() == Some(1) {
+                return None;
+            }
+        }
+        // kdialog: same contract (exit 1 on cancel).
+        if let Ok(output) = std::process::Command::new("kdialog")
+            .args([
+                "--getopenfilename",
+                ".",
+                "All Files (*)",
+                "Select file to upload",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
 }

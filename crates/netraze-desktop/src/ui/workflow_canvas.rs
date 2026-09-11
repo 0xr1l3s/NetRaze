@@ -55,7 +55,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     // Collect browse requests — create browser windows
-    for (host_ip, share_name) in viewer.browse_requests.drain(..) {
+    for (host_ip, share_name, cred) in viewer.browse_requests.drain(..) {
         use crate::ui::share_browser::ShareBrowserState;
         // Check if already open for this share
         let already_open = state
@@ -63,11 +63,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             .iter()
             .any(|b| b.open && b.host_ip == host_ip && b.share_name == share_name);
         if !already_open {
-            let browser = ShareBrowserState::new(host_ip, share_name);
-            let unc = browser.current_unc();
+            let browser = ShareBrowserState::new(host_ip, share_name, cred);
+            let browser_id = state.share_browsers.len();
             state.share_browsers.push(browser);
-            state.pending_browse.push(unc);
+            state.pending_browse.push(browser_id);
         }
+    }
+
+    // Surface menu-handling errors (e.g. unresolvable credential label)
+    for err in viewer.menu_errors.drain(..) {
+        state.add_log(crate::runtime::LogLevel::Error, err);
     }
 
     // Drop: materialize dragged module node at cursor position on canvas.
