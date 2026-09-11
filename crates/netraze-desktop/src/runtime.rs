@@ -1056,40 +1056,33 @@ impl RuntimeServices {
         });
 
         self.runtime.spawn(async move {
-            let cmd_for_task = command.clone();
-            let ip_for_task = ip.clone();
-            // Clone the log channel into the blocking task so every trace line
-            // from execute_command_live streams to the UI immediately. This is
-            // essential for diagnosing hangs: if the function blocks on a Win32
-            // call we still see the last log before the hang.
+            // The portable exec backend is async — await it directly so the
+            // runtime can drive other tasks while the ADMIN$ poll loop
+            // sleeps. Trace lines still stream to the UI through `live_tx`
+            // (the closure stays sync).
             let live_tx = tx.clone();
             let ip_for_log = ip.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let cred = match cred_type {
-                    crate::state::CredType::Hash => {
-                        match SmbCredential::with_hash(&username, &domain, &secret) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                return (Err(format!("hash invalide: {e}")), Vec::<String>::new());
-                            }
-                        }
+            let logger = |line: &str| {
+                let _ = live_tx.send(RuntimeEvent::Log {
+                    level: LogLevel::Info,
+                    message: format!("{ip_for_log}[trace] {line}"),
+                });
+            };
+            let result = match cred_type {
+                crate::state::CredType::Hash => {
+                    match SmbCredential::with_hash(&username, &domain, &secret) {
+                        Ok(c) => execute_command_live(&ip, Some(&c), &command, &logger).await,
+                        Err(e) => (Err(format!("hash invalide: {e}")), Vec::new()),
                     }
-                    crate::state::CredType::Password => {
-                        SmbCredential::new(&username, &domain, &secret)
-                    }
-                };
-                let logger = |line: &str| {
-                    let _ = live_tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Info,
-                        message: format!("{}[trace] {}", ip_for_log, line),
-                    });
-                };
-                execute_command_live(&ip_for_task, Some(&cred), &cmd_for_task, &logger)
-            })
-            .await;
+                }
+                crate::state::CredType::Password => {
+                    let cred = SmbCredential::new(&username, &domain, &secret);
+                    execute_command_live(&ip, Some(&cred), &command, &logger).await
+                }
+            };
 
             match result {
-                Ok((Ok(output), _trace)) => {
+                (Ok(output), _trace) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
                         message: format!("{ip}: exec ok ({} bytes)", output.len()),
@@ -1101,7 +1094,7 @@ impl RuntimeServices {
                         error: None,
                     });
                 }
-                Ok((Err(e), _trace)) => {
+                (Err(e), _trace) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Error,
                         message: format!("{ip}: exec failed: {e}"),
@@ -1111,14 +1104,6 @@ impl RuntimeServices {
                         command,
                         output: String::new(),
                         error: Some(e),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::ExecResult {
-                        console_id,
-                        command,
-                        output: String::new(),
-                        error: Some(format!("task panicked: {e}")),
                     });
                 }
             }

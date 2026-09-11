@@ -66,10 +66,10 @@ pub mod enum_av;
 #[path = "stubs/enum_av.rs"]
 pub mod enum_av;
 
-#[cfg(windows)]
-pub mod exec;
-#[cfg(not(windows))]
-#[path = "stubs/exec.rs"]
+// Phase E -- smbexec over DCE/RPC SCMR on the pure-Rust SMB2 stack.
+// Single backend; the Windows-only OpenSCManagerW path and the Linux
+// NOT_PORTED stub are retired.
+#[path = "exec_rpc.rs"]
 pub mod exec;
 
 pub use browser::{
