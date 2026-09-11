@@ -8,8 +8,11 @@
 //! stopped — this unblocks the WINREG-based SAM dump path.
 //!
 //!   - opnum  0 — `RCloseServiceHandle`
+//!   - opnum  1 — `RControlService`
+//!   - opnum  2 — `RDeleteService`
 //!   - opnum  6 — `RQueryServiceStatus`
 //!   - opnum 11 — `RChangeServiceConfigW`
+//!   - opnum 12 — `RCreateServiceW`
 //!   - opnum 15 — `ROpenSCManagerW`
 //!   - opnum 16 — `ROpenServiceW`
 //!   - opnum 19 — `RStartServiceW`
@@ -47,14 +50,28 @@ pub const SERVICE_DISABLED: u32 = 0x0000_0004;
 pub const ERROR_SERVICE_DISABLED: u32 = 1058;
 /// Win32 error: service already running.
 pub const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+/// Win32 error: the specified service does not exist (open of an
+/// absent service name).
+pub const ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
+
+/// `SERVICE_ALL_ACCESS` — every right on a service handle (MS-SCMR §2.2.4).
+/// The access smbexec asks for on the nonce service it creates.
+pub const SERVICE_ALL_ACCESS: u32 = 0x000F_01FF;
+/// `SERVICE_WIN32_OWN_PROCESS` — `dwServiceType` for smbexec's nonce service.
+pub const SERVICE_WIN32_OWN_PROCESS: u32 = 0x0000_0010;
+/// `SERVICE_ERROR_IGNORE` — `dwErrorControl`: log nothing, never fail the
+/// boot on the nonce service.
+pub const SERVICE_ERROR_IGNORE: u32 = 0x0000_0000;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
 pub enum Opnum {
     RCloseServiceHandle = 0,
     RControlService = 1,
+    RDeleteService = 2,
     RQueryServiceStatus = 6,
     RChangeServiceConfigW = 11,
+    RCreateServiceW = 12,
     ROpenSCManagerW = 15,
     ROpenServiceW = 16,
     RStartServiceW = 19,
@@ -341,6 +358,116 @@ pub fn decode_rcontrol_service_response(stub: &[u8]) -> Result<(ServiceStatus, u
 }
 
 // ---------------------------------------------------------------------------
+// RCreateServiceW — opnum 12
+// ---------------------------------------------------------------------------
+
+/// Encode `RCreateServiceW` request stub (MS-SCMR §3.1.4.11.2).
+///
+/// Wire layout — validated against the Impacket reference encoder:
+/// ```text
+/// SC_RPC_HANDLE hSCManager           (20 bytes inline)
+/// WSTR          lpServiceName        (embedded conformant-varying wstring —
+///                                      NO pointer referent, same convention
+///                                      as ROpenServiceW)
+/// [unique] LPWSTR lpDisplayName      (referent + inline wstring, or NULL)
+/// DWORD         dwDesiredAccess
+/// DWORD         dwServiceType
+/// DWORD         dwStartType
+/// DWORD         dwErrorControl
+/// WSTR          lpBinaryPathName     (embedded, no referent)
+/// [unique] LPWSTR lpLoadOrderGroup   (NULL)
+/// [unique] LPDWORD lpdwTagId         (NULL)
+/// [unique] LPBYTE  lpDependencies    (NULL)
+/// DWORD         dwDependenciesSize = 0
+/// [unique] LPWSTR lpServiceStartName (NULL)
+/// [unique] LPBYTE  lpPassword        (NULL)
+/// DWORD         dwPwSize = 0
+/// ```
+///
+/// `lpServiceName` / `lpBinaryPathName` are `WSTR` in Impacket's IDL
+/// (`scmr.py`), not `LPWSTR` — only `lpDisplayName`, `lpLoadOrderGroup` and
+/// `lpServiceStartName` carry pointer referents. The pointee of a non-NULL
+/// `[unique]` parameter is packed inline immediately after its referent.
+// The parameter list mirrors the MS-SCMR §3.1.4.11.2 IDL signature (which
+// has 15) — grouping into a struct would just hide the wire order.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_rcreate_service_w_request(
+    scm_handle: &ScmHandle,
+    service_name: &str,
+    display_name: Option<&str>,
+    desired_access: u32,
+    service_type: u32,
+    start_type: u32,
+    error_control: u32,
+    binary_path_name: &str,
+) -> Vec<u8> {
+    let mut w = NdrWriter::new();
+    w.write_context_handle(scm_handle);
+    // lpServiceName — embedded WSTR. Same `[string]` NUL-terminator
+    // requirement as the other wstring args; normalise here.
+    w.write_conformant_varying_wstring(&ensure_nul(service_name));
+    // lpDisplayName — [unique] LPWSTR.
+    match display_name {
+        Some(s) => {
+            w.write_referent();
+            w.write_conformant_varying_wstring(&ensure_nul(s));
+        }
+        None => w.write_null_referent(),
+    }
+    w.write_u32(desired_access);
+    w.write_u32(service_type);
+    w.write_u32(start_type);
+    w.write_u32(error_control);
+    // lpBinaryPathName — embedded WSTR.
+    w.write_conformant_varying_wstring(&ensure_nul(binary_path_name));
+    // Everything after the bin path is NULL / zero for the smbexec use case.
+    w.write_null_referent(); // lpLoadOrderGroup
+    w.write_null_referent(); // lpdwTagId
+    w.write_null_referent(); // lpDependencies
+    w.write_u32(0); // dwDependenciesSize
+    w.write_null_referent(); // lpServiceStartName
+    w.write_null_referent(); // lpPassword
+    w.write_u32(0); // dwPwSize
+    w.finish()
+}
+
+/// Decode `RCreateServiceW` response stub.
+///
+/// Wire layout: `[in,out,unique] LPDWORD lpdwTagId` (NULL referent when the
+/// request carried NULL — our encoder always does), `SC_RPC_HANDLE
+/// lpServiceHandle`, `DWORD ErrorCode`.
+pub fn decode_rcreate_service_w_response(stub: &[u8]) -> Result<(Option<u32>, ScmHandle, u32)> {
+    let mut r = NdrReader::new(stub);
+    let tag_present = r.read_unique_referent()?;
+    let tag_id = if tag_present {
+        Some(r.read_u32()?)
+    } else {
+        None
+    };
+    let handle = r.read_context_handle()?;
+    let status = r.read_u32()?;
+    Ok((tag_id, handle, status))
+}
+
+// ---------------------------------------------------------------------------
+// RDeleteService — opnum 2
+// ---------------------------------------------------------------------------
+
+/// Encode `RDeleteService` request stub: just the open service handle.
+pub fn encode_rdelete_service_request(service_handle: &ScmHandle) -> Vec<u8> {
+    let mut w = NdrWriter::new();
+    w.write_context_handle(service_handle);
+    w.finish()
+}
+
+/// Decode `RDeleteService` response stub: `DWORD ErrorCode` only.
+pub fn decode_rdelete_service_response(stub: &[u8]) -> Result<u32> {
+    let mut r = NdrReader::new(stub);
+    let status = r.read_u32()?;
+    Ok(status)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -498,5 +625,174 @@ mod tests {
         let (h2, s) = decode_rclose_service_handle_response(&resp).unwrap();
         assert_eq!(h2, h);
         assert_eq!(s, 0);
+    }
+
+    /// Pin the wire layout of `RCreateServiceW` against the Impacket
+    /// reference encoder. Fixture: service name `netraze_XYZ1` (12 chars),
+    /// display name `Netraze Exec` (12 chars), binPath `%COMSPEC% /Q /c dir`
+    /// (19 chars). Same convention as `ropen_sc_manager_fixture_matches_impacket`:
+    /// referent IDs are allocator-dependent, so we assert every
+    /// semantically-meaningful byte at its known offset and only check the
+    /// referents for non-zero.
+    #[test]
+    fn rcreate_service_w_request_layout_matches_impacket() {
+        let scm = [0xAAu8; 20];
+        let stub = encode_rcreate_service_w_request(
+            &scm,
+            "netraze_XYZ1",
+            Some("Netraze Exec"),
+            SERVICE_ALL_ACCESS,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_IGNORE,
+            "%COMSPEC% /Q /c dir",
+        );
+        assert_eq!(stub.len(), 200, "stub length must match Impacket");
+        assert_eq!(&stub[0..20], &scm[..], "hSCManager");
+
+        // lpServiceName — embedded WSTR, NO referent: header starts right
+        // after the handle. "netraze_XYZ1\0" = 13 WCHARs.
+        assert_eq!(&stub[20..24], &13u32.to_le_bytes(), "name max_count");
+        assert_eq!(&stub[24..28], &0u32.to_le_bytes(), "name offset");
+        assert_eq!(&stub[28..32], &13u32.to_le_bytes(), "name actual_count");
+        let name_utf16: Vec<u8> = "netraze_XYZ1\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(&stub[32..58], &name_utf16[..], "name UTF-16 payload");
+        assert_eq!(&stub[58..60], &[0, 0], "pad to u32 before lpDisplayName");
+
+        // lpDisplayName — [unique] LPWSTR: referent then inline pointee.
+        assert_ne!(
+            u32::from_le_bytes(stub[60..64].try_into().unwrap()),
+            0,
+            "lpDisplayName referent must be non-zero (present)"
+        );
+        assert_eq!(&stub[64..68], &13u32.to_le_bytes(), "display max_count");
+        assert_eq!(&stub[68..72], &0u32.to_le_bytes(), "display offset");
+        assert_eq!(&stub[72..76], &13u32.to_le_bytes(), "display actual_count");
+        let display_utf16: Vec<u8> = "Netraze Exec\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(&stub[76..102], &display_utf16[..], "display UTF-16 payload");
+        assert_eq!(&stub[102..104], &[0, 0], "pad to u32 before DWORDs");
+
+        // Four DWORDs.
+        assert_eq!(
+            &stub[104..108],
+            &SERVICE_ALL_ACCESS.to_le_bytes(),
+            "dwDesiredAccess"
+        );
+        assert_eq!(
+            &stub[108..112],
+            &SERVICE_WIN32_OWN_PROCESS.to_le_bytes(),
+            "dwServiceType"
+        );
+        assert_eq!(
+            &stub[112..116],
+            &SERVICE_DEMAND_START.to_le_bytes(),
+            "dwStartType"
+        );
+        assert_eq!(
+            &stub[116..120],
+            &SERVICE_ERROR_IGNORE.to_le_bytes(),
+            "dwErrorControl"
+        );
+
+        // lpBinaryPathName — embedded WSTR, NO referent. "%COMSPEC% /Q /c
+        // dir\0" = 20 WCHARs = 40 bytes, 172 % 4 == 0 so no trailing pad.
+        assert_eq!(&stub[120..124], &20u32.to_le_bytes(), "binPath max_count");
+        assert_eq!(&stub[124..128], &0u32.to_le_bytes(), "binPath offset");
+        assert_eq!(&stub[128..132], &20u32.to_le_bytes(), "binPath actual_count");
+        let path_utf16: Vec<u8> = "%COMSPEC% /Q /c dir\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(&stub[132..172], &path_utf16[..], "binPath UTF-16 payload");
+
+        // Trailing NULL pointers / sizes: 7 zero DWORDs.
+        for off in (172..200).step_by(4) {
+            assert_eq!(
+                &stub[off..off + 4],
+                &0u32.to_le_bytes(),
+                "trailing DWORD at {off} must be zero"
+            );
+        }
+    }
+
+    /// `lpDisplayName = None` collapses to a single NULL referent — the shape
+    /// smbexec actually sends.
+    #[test]
+    fn rcreate_service_w_null_display_name() {
+        let stub = encode_rcreate_service_w_request(
+            &[0u8; 20],
+            "svc",
+            None,
+            SERVICE_ALL_ACCESS,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_DEMAND_START,
+            SERVICE_ERROR_IGNORE,
+            "cmd",
+        );
+        // 20 (handle) + 12 (name header) + 8 ("svc\0") + 4 (NULL display
+        // referent) + 16 (4 DWORDs) + 12 ("cmd\0" header) + 8 ("cmd\0",
+        // ends u32-aligned) + 28 (7 trailing DWORDs)
+        assert_eq!(stub.len(), 108);
+        // NULL display referent sits right after the (already aligned)
+        // service name.
+        assert_eq!(&stub[40..44], &0u32.to_le_bytes(), "NULL lpDisplayName referent");
+    }
+
+    /// `[string]` NUL normalization: `lpBinaryPathName` passed with or
+    /// without the trailing NUL must produce identical stubs.
+    #[test]
+    fn rcreate_service_w_normalises_missing_nul() {
+        let args = |path: &str| {
+            encode_rcreate_service_w_request(
+                &[0u8; 20],
+                "svc",
+                None,
+                SERVICE_ALL_ACCESS,
+                SERVICE_WIN32_OWN_PROCESS,
+                SERVICE_DEMAND_START,
+                SERVICE_ERROR_IGNORE,
+                path,
+            )
+        };
+        let with_nul = args("C:\\x\\s.exe\0");
+        let without_nul = args("C:\\x\\s.exe");
+        assert_eq!(with_nul, without_nul);
+        // actual_count must include the NUL: "C:\x\s.exe\0" = 11 WCHARs.
+        // The binPath header sits at a fixed offset: 20 (handle) + 12 + 8
+        // ("svc\0") + 4 (NULL display) + 16 (DWORDs) = 60.
+        assert_eq!(
+            u32::from_le_bytes(with_nul[68..72].try_into().unwrap()),
+            11,
+            "binPath actual_count must include the NUL"
+        );
+    }
+
+    #[test]
+    fn rcreate_service_w_response_decode() {
+        // NULL tag referent + handle + error 0.
+        let mut resp = vec![0u8; 4];
+        resp.extend_from_slice(&[0x42u8; 20]);
+        resp.extend_from_slice(&0u32.to_le_bytes());
+        let (tag, handle, status) = decode_rcreate_service_w_response(&resp).unwrap();
+        assert_eq!(tag, None);
+        assert_eq!(handle, [0x42u8; 20]);
+        assert_eq!(status, 0);
+    }
+
+    #[test]
+    fn rdelete_service_roundtrip() {
+        let h = [0xEFu8; 20];
+        let stub = encode_rdelete_service_request(&h);
+        assert_eq!(stub.len(), 20, "RDeleteService request is handle-only");
+        assert_eq!(&stub[..], &h[..]);
+
+        let resp = 1056u32.to_le_bytes();
+        assert_eq!(decode_rdelete_service_response(&resp).unwrap(), 1056);
     }
 }
