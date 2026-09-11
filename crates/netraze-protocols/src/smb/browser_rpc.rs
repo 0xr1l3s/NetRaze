@@ -120,8 +120,7 @@ pub async fn upload_file(
     rel_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
-    let data =
-        std::fs::read(local_path).map_err(|e| format!("read {local_path}: {e}"))?;
+    let data = std::fs::read(local_path).map_err(|e| format!("read {local_path}: {e}"))?;
     let share = share.to_owned();
     let rel_path = rel_path.to_owned();
     with_session(target, cred, move |session, host| {
