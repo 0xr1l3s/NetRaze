@@ -29,6 +29,12 @@ pub const PIPE: &str = "\\\\PIPE\\\\svcctl";
 /// Matches Impacket default (`SERVICE_START|STOP|CHANGE_CONFIG|QUERY_CONFIG|QUERY_STATUS|ENUMERATE_DEPENDENTS|SC_MANAGER_ENUMERATE_SERVICE` = 0x3F).
 pub const SC_MANAGER_ACCESS: u32 = 0x0000_003F;
 
+/// `SC_MANAGER_CONNECT` alone — the minimal right, granted to any
+/// authenticated user. Enough for `ROpenServiceW` existence probes
+/// (enum_av); anything needing create/start/delete must use
+/// [`SC_MANAGER_ACCESS`] instead.
+pub const SC_MANAGER_CONNECT: u32 = 0x0000_0001;
+
 /// `SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG`
 pub const SERVICE_ACCESS_START: u32 = 0x0004 | 0x0010 | 0x0002;
 

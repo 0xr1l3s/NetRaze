@@ -174,11 +174,14 @@ async fn query_services_on_channel(
     ch: &mut RpcChannel,
 ) -> Result<Vec<(String, String, bool)>, String> {
     // ROpenSCManagerW — Impacket 'DUMMY\0' machine name (same precedent as
-    // the other SCMR orchestrators).
+    // the other SCMR orchestrators). SC_MANAGER_CONNECT only (the minimal
+    // right, granted to any authenticated user) — the Windows impl used the
+    // same mask; the admin-grade 0x3F gets refused with 0x5 for non-admin
+    // accounts, which would kill the whole phase on standard users.
     let stub = scmr::encode_ropen_sc_manager_w_request(
         Some("DUMMY\0"),
         Some("ServicesActive\0"),
-        scmr::SC_MANAGER_ACCESS,
+        scmr::SC_MANAGER_CONNECT,
     );
     let resp = ch
         .call(scmr::Opnum::ROpenSCManagerW as u16, &stub)
