@@ -124,7 +124,18 @@ async fn open_sc_manager(ch: &mut RpcChannel) -> Result<scmr::ScmHandle, String>
     let (handle, status) = scmr::decode_ropen_sc_manager_w_response(&resp)
         .map_err(|e| format!("decode ROpenSCManagerW: {e}"))?;
     if status != 0 {
-        return Err(format!("ROpenSCManagerW failed with status 0x{status:08x}"));
+        let hint = match status {
+            5 => {
+                " (access denied: smbexec needs an admin credential on a \
+                  real Windows target — a non-admin account, UAC remote \
+                  restrictions, or a non-Windows server such as Samba, whose \
+                  SCM cannot create services at all, all land here)"
+            }
+            _ => "",
+        };
+        return Err(format!(
+            "ROpenSCManagerW failed with status 0x{status:08x}{hint}"
+        ));
     }
     Ok(handle)
 }
