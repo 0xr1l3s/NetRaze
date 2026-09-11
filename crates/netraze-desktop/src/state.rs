@@ -181,7 +181,9 @@ pub struct AppState {
     /// (host_node_id_raw, ip, hostname, credential)
     pub pending_enumav: Vec<(usize, String, String, CredentialRecord)>,
     pub share_browsers: Vec<crate::ui::share_browser::ShareBrowserState>,
-    pub pending_browse: Vec<String>,
+    /// Browser indices to (re)list — dispatched to the runtime by app.rs,
+    /// which reads (host, share, path, credential) off the browser state.
+    pub pending_browse: Vec<usize>,
     pub pending_fingerprints: Vec<String>,
     pub consoles: Vec<crate::ui::console::ConsoleState>,
     /// (console_id, ip, credential, command)
@@ -412,6 +414,7 @@ impl AppState {
                     ip,
                     hostname,
                     shares,
+                    cred_label,
                 } => {
                     // Sync shares back to networks
                     for net in &mut self.networks {
@@ -438,6 +441,7 @@ impl AppState {
                                 host_ip: ip,
                                 hostname,
                                 shares,
+                                cred_label,
                             },
                         );
                         // Connect host → shares
@@ -478,7 +482,7 @@ impl AppState {
                     if let Some(browser) = self.share_browsers.get_mut(browser_id) {
                         browser.status = Some((message, success));
                         if success {
-                            self.pending_browse.push(browser.current_unc());
+                            self.pending_browse.push(browser_id);
                         }
                     }
                 }

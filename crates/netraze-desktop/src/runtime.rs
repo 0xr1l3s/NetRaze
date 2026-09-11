@@ -47,6 +47,9 @@ pub enum RuntimeEvent {
         ip: String,
         hostname: String,
         shares: Vec<String>,
+        /// Label of the credential that ran the enumeration — stored on the
+        /// SharesNode so later Browse clicks can resolve it back.
+        cred_label: Option<String>,
     },
     BrowseResult {
         browser_id: usize,
@@ -530,6 +533,12 @@ impl RuntimeServices {
         let ip_clone = ip.clone();
         let hostname_clone = hostname.clone();
         let smb_cred = cred_to_smb(&cred);
+        // Same label format as spawn_login_attempt — resolve_cred matches on it.
+        let cred_label = if cred.domain.is_empty() {
+            format!(".\\{}", cred.username)
+        } else {
+            format!("{}\\{}", cred.domain, cred.username)
+        };
         self.runtime.spawn(async move {
             let mut client = SmbClient::new(&ip_clone).with_credential(smb_cred);
             let result = client.connect().await;
@@ -576,6 +585,7 @@ impl RuntimeServices {
                 ip: ip_clone,
                 hostname: hostname_clone,
                 shares,
+                cred_label: Some(cred_label),
             });
         });
     }
@@ -597,7 +607,9 @@ impl RuntimeServices {
         let hostname_clone = hostname.clone();
         let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            let target = format!("{ip_clone}:445");
+            // Keep an explicitly typed port (e.g. a container harness on
+            // :1445); default to 445 only for bare hosts.
+            let target = netraze_protocols::targets::with_default_port(&ip_clone, 445);
             let result = netraze_protocols::smb::users::enum_users(&target, &smb_cred).await;
 
             let users = match result {
@@ -800,13 +812,29 @@ impl RuntimeServices {
         });
     }
 
-    pub fn spawn_browse_directory(&self, browser_id: usize, unc_path: String) {
+    /// List a directory on a remote share. `rel_path` is relative to the
+    /// share root (`""` = root). A missing credential surfaces as a browse
+    /// error instead of a silent no-op.
+    pub fn spawn_browse_directory(
+        &self,
+        browser_id: usize,
+        host: String,
+        share: String,
+        rel_path: String,
+        cred: Option<SmbCredential>,
+    ) {
         let tx = self.log_tx.clone();
         self.runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || list_directory(&unc_path)).await;
-
-            match result {
-                Ok(Ok(entries)) => {
+            let Some(cred) = cred else {
+                let _ = tx.send(RuntimeEvent::BrowseResult {
+                    browser_id,
+                    entries: Vec::new(),
+                    error: Some("no credential available for this share".to_string()),
+                });
+                return;
+            };
+            match list_directory(&host, &cred, &share, &rel_path).await {
+                Ok(entries) => {
                     let mapped: Vec<(String, bool, u64)> = entries
                         .into_iter()
                         .map(|e| (e.name, e.is_dir, e.size))
@@ -817,154 +845,147 @@ impl RuntimeServices {
                         error: None,
                     });
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     let _ = tx.send(RuntimeEvent::BrowseResult {
                         browser_id,
                         entries: Vec::new(),
                         error: Some(e),
                     });
                 }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::BrowseResult {
-                        browser_id,
-                        entries: Vec::new(),
-                        error: Some(format!("task panicked: {e}")),
-                    });
-                }
             }
         });
     }
 
-    pub fn spawn_download(&self, browser_id: usize, remote_unc: String, local_path: String) {
+    /// Download `rel_path` on `share` to `local_path`.
+    pub fn spawn_download(
+        &self,
+        browser_id: usize,
+        host: String,
+        share: String,
+        rel_path: String,
+        local_path: String,
+        cred: Option<SmbCredential>,
+    ) {
         let tx = self.log_tx.clone();
         self.runtime.spawn(async move {
-            let r = remote_unc.clone();
-            let l = local_path.clone();
-            let result = tokio::task::spawn_blocking(move || download_file(&r, &l)).await;
-            match result {
-                Ok(Ok(())) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: true,
-                        message: format!("Downloaded to {local_path}"),
-                    });
-                }
-                Ok(Err(e)) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: e,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: format!("task panicked: {e}"),
-                    });
-                }
-            }
+            let Some(cred) = cred else {
+                let _ = tx.send(RuntimeEvent::FileOpResult {
+                    browser_id,
+                    success: false,
+                    message: "no credential available for this share".to_string(),
+                });
+                return;
+            };
+            let (success, message) =
+                match download_file(&host, &cred, &share, &rel_path, &local_path).await {
+                    Ok(()) => (true, format!("Downloaded to {local_path}")),
+                    Err(e) => (false, e),
+                };
+            let _ = tx.send(RuntimeEvent::FileOpResult {
+                browser_id,
+                success,
+                message,
+            });
         });
     }
 
-    pub fn spawn_upload(&self, browser_id: usize, local_path: String, remote_unc: String) {
+    /// Upload `local_path` to `rel_path` on `share`.
+    pub fn spawn_upload(
+        &self,
+        browser_id: usize,
+        local_path: String,
+        host: String,
+        share: String,
+        rel_path: String,
+        cred: Option<SmbCredential>,
+    ) {
         let tx = self.log_tx.clone();
         self.runtime.spawn(async move {
-            let l = local_path.clone();
-            let r = remote_unc.clone();
-            let result = tokio::task::spawn_blocking(move || upload_file(&l, &r)).await;
-            match result {
-                Ok(Ok(())) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: true,
-                        message: "Upload complete".to_string(),
-                    });
-                }
-                Ok(Err(e)) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: e,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: format!("task panicked: {e}"),
-                    });
-                }
-            }
+            let Some(cred) = cred else {
+                let _ = tx.send(RuntimeEvent::FileOpResult {
+                    browser_id,
+                    success: false,
+                    message: "no credential available for this share".to_string(),
+                });
+                return;
+            };
+            let result = upload_file(&host, &cred, &share, &rel_path, &local_path).await;
+            let _ = tx.send(RuntimeEvent::FileOpResult {
+                browser_id,
+                success: result.is_ok(),
+                message: match result {
+                    Ok(()) => "Upload complete".to_string(),
+                    Err(e) => e,
+                },
+            });
         });
     }
 
-    pub fn spawn_create_folder(&self, browser_id: usize, unc_path: String) {
+    /// Create a directory at `rel_path` on `share`.
+    pub fn spawn_create_folder(
+        &self,
+        browser_id: usize,
+        host: String,
+        share: String,
+        rel_path: String,
+        cred: Option<SmbCredential>,
+    ) {
         let tx = self.log_tx.clone();
         self.runtime.spawn(async move {
-            let p = unc_path.clone();
-            let result = tokio::task::spawn_blocking(move || create_directory(&p)).await;
-            match result {
-                Ok(Ok(())) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: true,
-                        message: "Folder created".to_string(),
-                    });
-                }
-                Ok(Err(e)) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: e,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: format!("task panicked: {e}"),
-                    });
-                }
-            }
+            let Some(cred) = cred else {
+                let _ = tx.send(RuntimeEvent::FileOpResult {
+                    browser_id,
+                    success: false,
+                    message: "no credential available for this share".to_string(),
+                });
+                return;
+            };
+            let result = create_directory(&host, &cred, &share, &rel_path).await;
+            let _ = tx.send(RuntimeEvent::FileOpResult {
+                browser_id,
+                success: result.is_ok(),
+                message: match result {
+                    Ok(()) => "Folder created".to_string(),
+                    Err(e) => e,
+                },
+            });
         });
     }
 
-    pub fn spawn_delete(&self, browser_id: usize, unc_path: String, is_dir: bool) {
+    /// Delete `rel_path` on `share` (file or directory — directories must
+    /// be empty, same contract as the old RemoveDirectoryW backend).
+    pub fn spawn_delete(
+        &self,
+        browser_id: usize,
+        host: String,
+        share: String,
+        rel_path: String,
+        is_dir: bool,
+        cred: Option<SmbCredential>,
+    ) {
         let tx = self.log_tx.clone();
         self.runtime.spawn(async move {
-            let p = unc_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                if is_dir {
-                    delete_remote_directory(&p)
-                } else {
-                    delete_remote_file(&p)
-                }
-            })
-            .await;
-            match result {
-                Ok(Ok(())) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: true,
-                        message: "Deleted".to_string(),
-                    });
-                }
-                Ok(Err(e)) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: e,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(RuntimeEvent::FileOpResult {
-                        browser_id,
-                        success: false,
-                        message: format!("task panicked: {e}"),
-                    });
-                }
-            }
+            let Some(cred) = cred else {
+                let _ = tx.send(RuntimeEvent::FileOpResult {
+                    browser_id,
+                    success: false,
+                    message: "no credential available for this share".to_string(),
+                });
+                return;
+            };
+            let result = if is_dir {
+                delete_remote_directory(&host, &cred, &share, &rel_path).await
+            } else {
+                delete_remote_file(&host, &cred, &share, &rel_path).await
+            };
+            let _ = tx.send(RuntimeEvent::FileOpResult {
+                browser_id,
+                success: result.is_ok(),
+                message: match result {
+                    Ok(()) => "Deleted".to_string(),
+                    Err(e) => e,
+                },
+            });
         });
     }
 
@@ -1107,7 +1128,7 @@ impl RuntimeServices {
 
 /// Convert a desktop `CredentialRecord` into an `SmbCredential` usable by
 /// the protocol layer.
-fn cred_to_smb(cred: &crate::state::CredentialRecord) -> SmbCredential {
+pub(crate) fn cred_to_smb(cred: &crate::state::CredentialRecord) -> SmbCredential {
     match cred.cred_type {
         crate::state::CredType::Password => {
             SmbCredential::new(&cred.username, &cred.domain, &cred.secret)

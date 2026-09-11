@@ -12,6 +12,9 @@ pub struct ShareBrowserState {
     pub open: bool,
     pub host_ip: String,
     pub share_name: String,
+    /// Credential used for every remote operation in this window
+    /// (runtime-only — browser state is never persisted).
+    pub credential: Option<crate::state::CredentialRecord>,
     pub path_stack: Vec<String>,
     pub entries: Vec<BrowserEntry>,
     pub loading: bool,
@@ -31,11 +34,16 @@ pub struct BrowserEntry {
 }
 
 impl ShareBrowserState {
-    pub fn new(host_ip: String, share_name: String) -> Self {
+    pub fn new(
+        host_ip: String,
+        share_name: String,
+        credential: Option<crate::state::CredentialRecord>,
+    ) -> Self {
         Self {
             open: true,
             host_ip,
             share_name,
+            credential,
             path_stack: Vec::new(),
             entries: Vec::new(),
             loading: true,
@@ -46,7 +54,7 @@ impl ShareBrowserState {
         }
     }
 
-    /// Full UNC path for current location.
+    /// Display-only UNC for the current location (window title).
     pub fn current_unc(&self) -> String {
         let mut path = format!("\\\\{}\\{}", self.host_ip, self.share_name);
         for seg in &self.path_stack {
@@ -56,9 +64,20 @@ impl ShareBrowserState {
         path
     }
 
-    /// UNC path for a child entry.
-    pub fn child_unc(&self, name: &str) -> String {
-        format!("{}\\{}", self.current_unc(), name)
+    /// Current directory relative to the share root (`""` = root) —
+    /// the `rel_path` the portable browser backend expects.
+    pub fn current_rel_path(&self) -> String {
+        self.path_stack.join("\\")
+    }
+
+    /// Relative path of a child entry of the current directory.
+    pub fn child_rel_path(&self, name: &str) -> String {
+        let cur = self.current_rel_path();
+        if cur.is_empty() {
+            name.to_string()
+        } else {
+            format!("{cur}\\{name}")
+        }
     }
 }
 
@@ -69,10 +88,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
         return action;
     }
 
-    let title = format!(
-        "📂 {} — \\\\{}\\{}",
-        browser.share_name, browser.host_ip, browser.share_name
-    );
+    let title = format!("📂 {}", browser.current_unc());
 
     let mut is_open = browser.open;
     egui::Window::new(title)
@@ -105,7 +121,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                     browser.path_stack.pop();
                     browser.error = None;
                     browser.status = None;
-                    action = BrowserAction::Navigate(browser.current_unc());
+                    action = BrowserAction::Navigate;
                 }
 
                 ui.add_space(4.0);
@@ -126,7 +142,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                     browser.path_stack.clear();
                     browser.error = None;
                     browser.status = None;
-                    action = BrowserAction::Navigate(browser.current_unc());
+                    action = BrowserAction::Navigate;
                 }
 
                 for (i, seg) in browser.path_stack.clone().iter().enumerate() {
@@ -146,7 +162,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                         browser.path_stack.truncate(i + 1);
                         browser.error = None;
                         browser.status = None;
-                        action = BrowserAction::Navigate(browser.current_unc());
+                        action = BrowserAction::Navigate;
                     }
                 }
             });
@@ -164,7 +180,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                 };
 
                 if ui.add(btn("⬆ Upload")).clicked() {
-                    action = BrowserAction::UploadDialog(browser.current_unc());
+                    action = BrowserAction::UploadDialog;
                 }
 
                 if ui.add(btn("📁+ New Folder")).clicked() {
@@ -175,7 +191,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                 if ui.add(btn("🔄")).clicked() {
                     browser.error = None;
                     browser.status = None;
-                    action = BrowserAction::Navigate(browser.current_unc());
+                    action = BrowserAction::Navigate;
                 }
             });
 
@@ -203,8 +219,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
 
                     if (enter || create_clicked) && !browser.new_folder_name.trim().is_empty() {
                         let folder_name = browser.new_folder_name.trim().to_string();
-                        let unc = browser.child_unc(&folder_name);
-                        action = BrowserAction::CreateFolder(unc);
+                        action = BrowserAction::CreateFolder(folder_name);
                         browser.new_folder_name.clear();
                         browser.show_new_folder = false;
                     }
@@ -348,29 +363,35 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 browser.path_stack.push(entry_name.clone());
                                 browser.error = None;
                                 browser.status = None;
-                                action = BrowserAction::Navigate(browser.current_unc());
+                                action = BrowserAction::Navigate;
                             }
 
                             // Right-click context menu
                             row_response.context_menu(|ui| {
                                 if *is_dir {
                                     if ui.button("🗑 Delete folder").clicked() {
-                                        let unc = browser.child_unc(entry_name);
-                                        action = BrowserAction::Delete { unc, is_dir: true };
+                                        let rel = browser.child_rel_path(entry_name);
+                                        action = BrowserAction::Delete {
+                                            rel_path: rel,
+                                            is_dir: true,
+                                        };
                                         ui.close();
                                     }
                                 } else {
                                     if ui.button("⬇ Download").clicked() {
-                                        let unc = browser.child_unc(entry_name);
+                                        let rel = browser.child_rel_path(entry_name);
                                         action = BrowserAction::DownloadDialog {
-                                            unc,
+                                            rel_path: rel,
                                             filename: entry_name.clone(),
                                         };
                                         ui.close();
                                     }
                                     if ui.button("🗑 Delete file").clicked() {
-                                        let unc = browser.child_unc(entry_name);
-                                        action = BrowserAction::Delete { unc, is_dir: false };
+                                        let rel = browser.child_rel_path(entry_name);
+                                        action = BrowserAction::Delete {
+                                            rel_path: rel,
+                                            is_dir: false,
+                                        };
                                         ui.close();
                                     }
                                 }
@@ -384,11 +405,22 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
     action
 }
 
+/// Commands from the browser window. Payloads are entry names / relative
+/// paths, not UNCs — app.rs composes `(host, share, rel_path, credential)`
+/// from the browser state so the portable backend never has to parse a UNC.
 pub enum BrowserAction {
     None,
-    Navigate(String),
-    DownloadDialog { unc: String, filename: String },
-    UploadDialog(String),
+    /// Re-list the (already updated) current directory.
+    Navigate,
+    DownloadDialog {
+        rel_path: String,
+        filename: String,
+    },
+    /// Upload into the current directory.
+    UploadDialog,
     CreateFolder(String),
-    Delete { unc: String, is_dir: bool },
+    Delete {
+        rel_path: String,
+        is_dir: bool,
+    },
 }
