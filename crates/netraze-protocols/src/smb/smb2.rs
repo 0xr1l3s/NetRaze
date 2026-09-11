@@ -171,14 +171,10 @@ impl Smb2Session {
         username: &str,
         domain: &str,
     ) -> Result<Self, String> {
-        // Heuristic: IPv6 literals contain `:` too, but always come wrapped in
-        // `[…]` when a port is attached. A bare `:` indicates "host already
-        // has a port" — anything else gets the default 445 tacked on.
-        let addr = if target.starts_with('[') || !target.contains(':') {
-            format!("{target}:445")
-        } else {
-            target.to_owned()
-        };
+        // One shared host:port normaliser (see `targets::with_default_port`)
+        // — bare hosts get 445, `host:port` / `[ipv6]:port` are kept verbatim,
+        // bare IPv6 literals get bracketed.
+        let addr = crate::targets::with_default_port(target, 445);
         let sock_addr = addr
             .to_socket_addrs()
             .map_err(|e| format!("DNS resolve failed: {e}"))?
@@ -417,8 +413,8 @@ impl Smb2Session {
             });
         }
 
-        let buffer = parse_query_directory_response(&resp)
-            .map_err(|e| SmbReadError::Other(0, e))?;
+        let buffer =
+            parse_query_directory_response(&resp).map_err(|e| SmbReadError::Other(0, e))?;
         let entries = parse_file_both_entries(&buffer)
             .map_err(|e| SmbReadError::Other(0, format!("query_dir buffer: {e}")))?;
         Ok(Some(entries))
@@ -645,7 +641,7 @@ impl Smb2Session {
         let mut body = vec![0u8; 48];
         body[0..2].copy_from_slice(&49u16.to_le_bytes()); // StructureSize
         body[2] = 0x50; // Padding (arbitrary dummy byte)
-                        // body[3] Flags = 0
+        // body[3] Flags = 0
         body[4..8].copy_from_slice(&length.to_le_bytes());
         body[8..16].copy_from_slice(&offset.to_le_bytes());
         body[16..32].copy_from_slice(file_id);
@@ -689,7 +685,7 @@ impl Smb2Session {
         let hdr = self.build_header(SMB2_CLOSE, tree_id);
         let mut body = vec![0u8; 24];
         body[0..2].copy_from_slice(&24u16.to_le_bytes()); // StructureSize
-                                                          // Flags=0, Reserved=0
+        // Flags=0, Reserved=0
         body[8..24].copy_from_slice(file_id);
 
         let mut packet = Vec::new();
@@ -1332,9 +1328,11 @@ fn negotiate_signing_required(resp: &[u8]) -> Result<bool, String> {
 ///
 /// `rel_path` is the path relative to the tree root (share or IPC$). Returns
 /// `(body, name_utf16)` so the caller appends the name buffer after the body
-/// when assembling the full SMB2 packet. An empty `rel_path` produces an
-/// `NameOffset = 0` body — the caller must append a 1-byte dummy buffer
-/// (SMB2 forbids zero-length buffers).
+/// when assembling the full SMB2 packet. For an empty `rel_path` (share root)
+/// NameOffset still points past the fixed body and NameLength is 0 — Windows
+/// rejects NameOffset=0 with STATUS_INVALID_PARAMETER even when the name is
+/// empty; the caller appends a 1-byte dummy buffer (SMB2 forbids zero-length
+/// buffers).
 fn build_create_body(params: &CreateParams, rel_path: &str) -> (Vec<u8>, Vec<u8>) {
     let name_utf16: Vec<u8> = rel_path
         .encode_utf16()
@@ -1343,21 +1341,20 @@ fn build_create_body(params: &CreateParams, rel_path: &str) -> (Vec<u8>, Vec<u8>
 
     let mut body = vec![0u8; 56];
     body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
-                                                      // body[2]      SecurityFlags=0
-                                                      // body[3]      RequestedOplockLevel=0
+    // body[2]      SecurityFlags=0
+    // body[3]      RequestedOplockLevel=0
     body[4..8].copy_from_slice(&2u32.to_le_bytes()); // ImpersonationLevel=Impersonation
-                                                     // body[8..16]  SmbCreateFlags=0
-                                                     // body[16..24] Reserved=0
+    // body[8..16]  SmbCreateFlags=0
+    // body[16..24] Reserved=0
     body[24..28].copy_from_slice(&params.desired_access.to_le_bytes());
     // body[28..32] FileAttributes=0 (directories are selected via CreateOptions)
     body[32..36].copy_from_slice(&params.share_access.to_le_bytes());
     body[36..40].copy_from_slice(&params.disposition.to_le_bytes());
     body[40..44].copy_from_slice(&params.create_options.to_le_bytes());
-    let name_offset = if name_utf16.is_empty() {
-        0u16
-    } else {
-        (SMB2_HEADER_SIZE + 56) as u16
-    };
+    // Always point past the fixed body (64-byte header + 56-byte body), even
+    // for the empty share-root name: Windows validates this field regardless
+    // of NameLength and returns STATUS_INVALID_PARAMETER on 0.
+    let name_offset = (SMB2_HEADER_SIZE + 56) as u16;
     body[44..46].copy_from_slice(&name_offset.to_le_bytes());
     body[46..48].copy_from_slice(&(name_utf16.len() as u16).to_le_bytes());
     // body[48..52] CreateContextsOffset=0
@@ -1388,16 +1385,16 @@ fn build_pipe_create_body(name: &str) -> (Vec<u8>, Vec<u8>) {
 fn build_pipe_transceive_body(file_id: &[u8; 16], request_len: u32) -> Vec<u8> {
     let mut body = vec![0u8; 56];
     body[0..2].copy_from_slice(&57u16.to_le_bytes()); // StructureSize
-                                                      // body[2..4]   Reserved=0
+    // body[2..4]   Reserved=0
     body[4..8].copy_from_slice(&FSCTL_PIPE_TRANSCEIVE.to_le_bytes());
     body[8..24].copy_from_slice(file_id);
 
     let input_offset = (SMB2_HEADER_SIZE + 56) as u32;
     body[24..28].copy_from_slice(&input_offset.to_le_bytes()); // InputOffset
     body[28..32].copy_from_slice(&request_len.to_le_bytes()); // InputCount
-                                                              // body[32..36] MaxInputResponse=0  (no input echoed back)
+    // body[32..36] MaxInputResponse=0  (no input echoed back)
     body[36..40].copy_from_slice(&input_offset.to_le_bytes()); // OutputOffset
-                                                               // body[40..44] OutputCount=0       (unused on request)
+    // body[40..44] OutputCount=0       (unused on request)
     body[44..48].copy_from_slice(&65_535u32.to_le_bytes()); // MaxOutputResponse
     body[48..52].copy_from_slice(&SMB2_0_IOCTL_IS_FSCTL.to_le_bytes());
     // body[52..56] Reserved2=0
@@ -1434,8 +1431,8 @@ fn build_write_body(file_id: &[u8; 16], offset: u64, data_len: u32) -> Vec<u8> {
 fn build_pipe_close_body(file_id: &[u8; 16]) -> Vec<u8> {
     let mut body = vec![0u8; 24];
     body[0..2].copy_from_slice(&24u16.to_le_bytes()); // StructureSize
-                                                      // body[2..4] Flags=0  (no SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB)
-                                                      // body[4..8] Reserved=0
+    // body[2..4] Flags=0  (no SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB)
+    // body[4..8] Reserved=0
     body[8..24].copy_from_slice(file_id);
     body
 }
@@ -1536,11 +1533,9 @@ fn build_query_directory_body(
     body[3] = if restart_scan { SMB2_RESTART_SCANS } else { 0 }; // Flags
     // body[4..8] FileIndex = 0 (resume via the FileId + no-restart convention)
     body[8..24].copy_from_slice(file_id);
-    let name_offset = if pattern_utf16.is_empty() {
-        0u16
-    } else {
-        (SMB2_HEADER_SIZE + 32) as u16
-    };
+    // Always point past the fixed body, even for an empty pattern (same
+    // Windows NameOffset validation as CREATE — see build_create_body).
+    let name_offset = (SMB2_HEADER_SIZE + 32) as u16;
     body[24..26].copy_from_slice(&name_offset.to_le_bytes()); // FileNameOffset
     body[26..28].copy_from_slice(&(pattern_utf16.len() as u16).to_le_bytes());
     body[28..32].copy_from_slice(&QUERY_DIR_MAX_BUFFER.to_le_bytes()); // OutputBufferLength
@@ -1878,7 +1873,7 @@ mod file_ops_tests {
     }
 
     #[test]
-    fn create_body_empty_path_produces_zero_offset() {
+    fn create_body_empty_path_still_points_past_body() {
         let (body, name) = build_create_body(
             &CreateParams {
                 desired_access: FILE_LIST_DIRECTORY_ACCESS,
@@ -1888,7 +1883,14 @@ mod file_ops_tests {
             },
             "",
         );
-        assert_eq!(&body[44..46], &0u16.to_le_bytes(), "NameOffset must be 0");
+        // NameOffset must still point past the fixed body (64+56): Windows
+        // returns STATUS_INVALID_PARAMETER for NameOffset=0 even when the
+        // name is empty (share root).
+        assert_eq!(
+            &body[44..46],
+            &120u16.to_le_bytes(),
+            "NameOffset must be 120"
+        );
         assert_eq!(&body[46..48], &0u16.to_le_bytes(), "NameLength must be 0");
         assert!(name.is_empty());
     }
@@ -1914,7 +1916,10 @@ mod file_ops_tests {
         assert_eq!(body.len(), 32, "fixed body must be exactly 32 bytes");
         assert_eq!(&body[0..2], &33u16.to_le_bytes()); // StructureSize
         assert_eq!(body[2], FILE_BOTH_DIRECTORY_INFORMATION);
-        assert_eq!(body[3], SMB2_RESTART_SCANS, "first request must restart scan");
+        assert_eq!(
+            body[3], SMB2_RESTART_SCANS,
+            "first request must restart scan"
+        );
         assert_eq!(&body[4..8], &[0u8; 4]); // FileIndex = 0
         assert_eq!(&body[8..24], &file_id);
         assert_eq!(&body[24..26], &96u16.to_le_bytes()); // FileNameOffset = 64+32

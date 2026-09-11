@@ -47,8 +47,9 @@ impl SmbFingerprint {
 }
 
 /// Perform SMB fingerprinting on a target (no authentication needed).
+/// `target` may carry its own port (`"host:1445"`); default is 445.
 pub fn fingerprint(target: &str) -> Result<SmbFingerprint, String> {
-    let addr = format!("{target}:445");
+    let addr = crate::targets::with_default_port(target, 445);
     let sock_addr = addr
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolve failed: {e}"))?
