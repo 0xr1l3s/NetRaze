@@ -877,27 +877,30 @@ impl Smb2Session {
 
     /// Probe whether the current session can write to `share` via `tree_id`.
     ///
-    /// Sends a CREATE Request with `DesiredAccess = FILE_WRITE_DATA` for a
-    /// non-existent probe filename (caller picks the random suffix). The
-    /// server checks ACLs **before** checking that the file exists, so:
+    /// Opens the share **root directory** (`""` on the tree) with
+    /// `DesiredAccess = FILE_WRITE_DATA` and `FILE_DIRECTORY_FILE`. The root
+    /// always exists, so the answer is a pure access check with no
+    /// name-resolution ambiguity, and opening a directory for write modifies
+    /// nothing:
     ///
-    /// - `STATUS_OBJECT_NAME_NOT_FOUND` (0xC0000034) → write would be granted
-    ///   if the file existed → `Ok(true)`. This is the canonical "writable"
-    ///   signal; we never actually create or modify anything.
-    /// - `STATUS_OBJECT_PATH_NOT_FOUND` (0xC000003A) → same idea, just a
-    ///   different leaf-vs-parent code path inside the server.
-    /// - `STATUS_ACCESS_DENIED` (0xC0000022) → server refused at the ACL
-    ///   check → `Ok(false)`. Read-only.
-    /// - `STATUS_SUCCESS` → file actually existed (collision on the random
-    ///   probe name); we close the handle and report `Ok(true)`.
+    /// - `STATUS_SUCCESS` → write access granted → `Ok(true)`.
+    /// - `STATUS_ACCESS_DENIED` (0xC0000022) → `Ok(false)`. Read-only.
     /// - Any other status is propagated as `Err` so the caller can log /
     ///   classify it; the share-access detection layer maps Err→Read as a
     ///   safe default.
     ///
+    /// Earlier versions probed a random non-existent *file*, reading
+    /// `STATUS_OBJECT_NAME_NOT_FOUND` as "writable" — that assumes the ACL
+    /// check precedes the existence check, which holds on Windows but not on
+    /// Samba ≥ 4.23 (it answers NAME_NOT_FOUND on read-only shares too,
+    /// classifying them as writable). The root-directory probe returns the
+    /// correct classification on both; verified against Impacket on the
+    /// Samba 4.23.8 harness.
+    ///
     /// Mirrors `check_share_access` in the Windows-native `shares.rs` but
     /// runs identically on every OS via raw SMB2.
-    pub fn probe_write(&mut self, tree_id: u32, rel_path: &str) -> Result<bool, String> {
-        let (body, name_utf16) = build_create_body(
+    pub fn probe_write(&mut self, tree_id: u32) -> Result<bool, String> {
+        let (body, _name_utf16) = build_create_body(
             &CreateParams {
                 // DesiredAccess = FILE_WRITE_DATA (0x02). The whole point of the
                 // probe is to ask the server "would you give me write?" — anything
@@ -905,37 +908,25 @@ impl Smb2Session {
                 desired_access: 0x0000_0002,
                 share_access: 0x0000_0007, // R|W|D
                 disposition: FILE_OPEN,
-                create_options: FILE_NON_DIRECTORY_FILE,
+                create_options: FILE_DIRECTORY_FILE,
             },
-            rel_path,
+            "",
         );
         let hdr = self.build_header(SMB2_CREATE, tree_id);
 
-        let mut packet = Vec::with_capacity(hdr.len() + body.len() + name_utf16.len().max(1));
+        let mut packet = Vec::with_capacity(hdr.len() + body.len() + 1);
         packet.extend_from_slice(&hdr);
         packet.extend_from_slice(&body);
-        if name_utf16.is_empty() {
-            packet.push(0);
-        } else {
-            packet.extend_from_slice(&name_utf16);
-        }
+        // Empty path buffer: SMB2 requires a 1-byte zero pad when the name
+        // is absent (same as a create with no name).
+        packet.push(0);
 
         self.send_packet(&packet)?;
         let resp = self.recv_packet()?;
 
         let status = u32::from_le_bytes(resp[8..12].try_into().unwrap());
         match status {
-            STATUS_SUCCESS => {
-                // File actually existed — close the handle we just got.
-                if resp.len() >= SMB2_HEADER_SIZE + 88 {
-                    let body_off = SMB2_HEADER_SIZE;
-                    let mut fid = [0u8; 16];
-                    fid.copy_from_slice(&resp[body_off + 64..body_off + 80]);
-                    let _ = self.close_file(tree_id, &fid);
-                }
-                Ok(true)
-            }
-            STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND => Ok(true),
+            STATUS_SUCCESS => Ok(true),
             STATUS_ACCESS_DENIED => Ok(false),
             other => Err(format!("probe_write: 0x{other:08x}")),
         }

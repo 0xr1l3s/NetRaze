@@ -73,12 +73,14 @@ async fn users_rpc_lists_samba_users() {
         "expected 'alice' in user list, got: {names:?}"
     );
 
-    // v1 fields are defaulted since we don't call SamrQueryInformationUser.
+    // alice is a plain domain user (RID 1000, not the Administrator RID 500
+    // nor Guest 501) → normal-user privilege, active, unlocked. The flags
+    // come from the SamrOpenUser + SamrQueryInformationUser enrichment.
     let alice = users
         .iter()
         .find(|u| u.name.eq_ignore_ascii_case("alice"))
         .unwrap();
-    assert_eq!(alice.privilege_level, 0);
-    assert_eq!(alice.disabled, false);
-    assert_eq!(alice.locked, false);
+    assert_eq!(alice.privilege_level, 1);
+    assert!(!alice.disabled);
+    assert!(!alice.locked);
 }

@@ -13,7 +13,6 @@
 use std::sync::{Arc, Mutex};
 
 use netraze_dcerpc::interfaces::srvsvc;
-use rand::RngCore;
 
 use super::connection::SmbCredential;
 use super::rpc::{bind_srvsvc_over_smb, connect_session, host_only};
@@ -199,14 +198,14 @@ pub async fn enum_shares(target: &str, cred: &SmbCredential) -> Result<Vec<Share
 }
 
 /// Enumerate shares **and** probe per-share read/write access. Equivalent
-/// of running [`enum_shares`] then poking each entry with a CREATE on a
-/// random non-existent path.
+/// of running [`enum_shares`] then poking each entry with a CREATE on the
+/// share root.
 ///
 /// Probing strategy:
 /// 1. Try `tree_connect`. Failure ⇒ [`ShareAccess::NoAccess`] (no point
 ///    asking about writes if we can't even mount the share).
-/// 2. Issue `Smb2Session::probe_write` on a random `__netraze_probe_<rand>__`
-///    path. Returns:
+/// 2. Issue `Smb2Session::probe_write` on the share root (an open of `""`
+///    with `FILE_WRITE_DATA` + `FILE_DIRECTORY_FILE`). Returns:
 ///    - `Ok(true)` ⇒ [`ShareAccess::ReadWrite`]
 ///    - `Ok(false)` ⇒ [`ShareAccess::Read`] (server returned ACCESS_DENIED)
 ///    - `Err(_)` ⇒ [`ShareAccess::Read`] as a safe fallback (unknown
@@ -258,8 +257,7 @@ pub async fn enum_shares_with_access(
             let access = match session.tree_connect(&host_only, &name) {
                 Err(_) => ShareAccess::NoAccess,
                 Ok(tid) => {
-                    let probe_name = random_probe_name();
-                    let access = match session.probe_write(tid, &probe_name) {
+                    let access = match session.probe_write(tid) {
                         Ok(true) => ShareAccess::ReadWrite,
                         Ok(false) => ShareAccess::Read,
                         Err(_) => ShareAccess::Read,
@@ -306,15 +304,6 @@ pub async fn can_access_admin_share(target: &str, cred: &SmbCredential) -> bool 
     .unwrap_or(false)
 }
 
-/// Build a probe filename guaranteed (with overwhelming probability) not
-/// to exist on the target. 64 bits of entropy is enough that even a
-/// hostile server can't prearrange a collision.
-fn random_probe_name() -> String {
-    let mut bytes = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    format!("__netraze_probe_{:016x}__", u64::from_le_bytes(bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,14 +326,5 @@ mod tests {
         assert_eq!(ShareAccess::ReadWrite.display_str(), "RW");
         assert_eq!(ShareAccess::Read.display_str(), "R");
         assert_eq!(ShareAccess::NoAccess.display_str(), "NO ACCESS");
-    }
-
-    #[test]
-    fn random_probe_name_is_unique_enough() {
-        let a = random_probe_name();
-        let b = random_probe_name();
-        assert_ne!(a, b);
-        assert!(a.starts_with("__netraze_probe_"));
-        assert!(a.ends_with("__"));
     }
 }
