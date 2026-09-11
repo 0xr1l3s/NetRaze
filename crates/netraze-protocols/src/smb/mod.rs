@@ -1,8 +1,7 @@
 /// Error string returned by non-Windows stubs for features that haven't been
-/// ported to the pure-Rust SMB2 / DCE-RPC stack yet. Tracked in Phases 1–6 of
-/// the cross-platform portage plan.
+/// ported to the pure-Rust SMB2 / DCE-RPC stack yet.
 pub(crate) const NOT_PORTED: &str =
-    "SMB backend not yet ported to this platform — tracked in Phase 1-6 of the portage plan";
+    "SMB backend not yet ported to this platform — see docs/protocol-stack-plan.md";
 
 // Portable modules — pure-Rust, compile on every platform.
 pub mod crypto;
@@ -14,10 +13,11 @@ pub mod rpc;
 pub mod sam;
 pub mod smb2;
 
-// Platform-gated modules. The Windows versions use native APIs
-// (WNet / NetAPI / SCM / Registry). The Linux stubs mirror the exact public
-// API so the rest of the workspace compiles on every target; each stub call
-// fails with `NOT_PORTED` until the pure-Rust replacement lands.
+// Platform-gated module. The Windows `connection.rs` carries the legacy WNet
+// IPC$ mount used only for anonymous connects in `SmbClient::connect`; the
+// Linux stub fails those with `NOT_PORTED` (out of scope for the portage
+// plan — every credential-driven path runs on the pure-Rust stack on every
+// platform).
 #[cfg(windows)]
 pub mod connection;
 #[cfg(not(windows))]

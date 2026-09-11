@@ -45,36 +45,51 @@ the tests don't race the daemon's startup.
 
 ### Run the Rust integration tests
 
-The smoke tests are in `crates/netraze-protocols/tests/samba_integration.rs`
-and are `#[ignore]` by default — you need to pass `--ignored` to run them:
+All suites live in `crates/netraze-protocols/tests/` and are `#[ignore]` by
+default — you need to pass `--ignored` to run them. The easiest way to run
+everything:
 
 ```shell
-cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1
+cargo test -p netraze-protocols -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` is belt-and-braces: Samba handles concurrent sessions
 fine, but parallel session setup against the same account occasionally
 races on the passdb lock in Samba 4.x.
 
-### What the smoke tests cover
+### Test suites
 
-- SMB2 Negotiate handshake (dialect, capabilities, security mode)
-- NTLMSSP Negotiate → Challenge → Authenticate dance
-- NTLMv2 response computed from `NT-hash("wonderland")`
-- Tree Connect to `\\server\IPC$` (the named-pipe entrypoint)
-- Negative path: a wrong password must be rejected
+| Suite (`--test <name>`) | Covers |
+|---|---|
+| `samba_integration` | SMB2 Negotiate, NTLMSSP session setup, tree connect to `IPC$`, wrong-password rejection, pipe open/transceive driving a real SRVSVC bind → BindAck |
+| `rpc_channel_samba` | `RpcChannel` end-to-end: NetrShareEnum over the sealed pipe transport |
+| `shares_rpc_samba` | `shares_rpc` (SRVSVC NetrShareEnum + per-share read/write access classification, ADMIN$ check) |
+| `info_rpc_samba` | `info_rpc` (NetrServerGetInfo) + negative path |
+| `users_rpc_samba` | `users_rpc` (SAMR user enumeration) |
+| `browser_ops_samba` | `browser_rpc` file ops: directory lifecycle, upload/download round-trip (byte fidelity, non-ASCII), listing order, negative paths. Also the env-gated `NETRAZE_LIVE_*` share-root smoke against a live Windows host |
+| `exec_samba` | `exec_rpc` (smbexec) wire smoke: svcctl bind succeeds, Samba's ROpenSCManagerW refusal surfaces as a clean error — no panic, no poll loop |
+| `enum_av_samba` | `enum_av` boundary behaviour: SCM refusal surfaces readably, IPC$ pipe-listing refusal skips silently, missing credential is an error |
 
-Not covered yet:
-- `FSCTL_PIPE_TRANSCEIVE` / DCE-RPC over named pipe — blocked on SMB2
-  IOCTL support in `smb2.rs`. Once that lands, a follow-up suite in
-  `crates/netraze-dcerpc/tests/` will drive the full SRVSVC stack
-  end-to-end against the same container.
+Known Samba limits pinned by these suites (identical behaviour confirmed
+against Impacket, so they're server policy — not stack bugs):
+
+- `ROpenSCManagerW` is refused with `0x5` (`rpc_s_access_denied`) — Samba
+  has no Windows SCM. `exec` / `enum_av` surface this readably.
+- IPC$ directory enumeration is refused at CREATE with `0xC0000236` — so
+  the `enum_av` pipe-detection phase exercises its silent-skip fallback
+  here. Windows serves pipe listings; that happy path is validated against
+  live Windows hosts.
+
+Not covered here:
 - SMB signing — implemented for dialects 2.0.2/2.1 (HMAC-SHA256 over the
   raw ExportedSessionKey, applied in `send_packet` when the server's
   Negotiate SecurityMode demands it), but not exercised here: the harness
   intentionally keeps Samba at its `server signing` default (auto = not
   required), so the container exercises the unsigned path only. Signing
   is validated against live signing-required hosts (domain controllers).
+- smbexec live semantics (service create/start/output capture) — needs a
+  Windows target with an admin credential. Wire format + channel only
+  against Samba.
 
 ### Tear down
 

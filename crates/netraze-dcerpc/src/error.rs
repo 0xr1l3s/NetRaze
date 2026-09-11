@@ -108,21 +108,27 @@ fn explain_rpc_fault(status: u32) -> &'static str {
         // ── Win32 RPC errors (winerror.h, surfaced as fault by some servers) ──
         0x0000_06D1 => "RPC_S_PROCNUM_OUT_OF_RANGE — opnum doesn't exist on this interface version",
         0x0000_06D8 => "EPT_S_NOT_REGISTERED — endpoint mapper has no entry for this interface",
-        0x0000_06E4 => "RPC_S_CANNOT_SUPPORT — server's RPC runtime refused the call. \
+        0x0000_06E4 => {
+            "RPC_S_CANNOT_SUPPORT — server's RPC runtime refused the call. \
                        Common causes: (1) auth_context_id == 0 (we now mirror Impacket's +79231 offset); \
                        (2) NEGOTIATE_TARGET_INFO flag missing (now set); \
                        (3) auth level mismatch between Bind and Request (we use PKT_PRIVACY); \
                        (4) NDR transfer syntax mismatch (we negotiate NDR20); \
                        (5) hardened server policy (e.g. Server 2019+ 'Restrict NTLM' or \
                        'Service Control Manager Remote Access' GPO denies SCMR over NP — \
-                       try Kerberos auth or test from a host inside the trust)",
-        0x0000_06F7 => "RPC_X_BAD_STUB_DATA — server can't unmarshal our payload. \
+                       try Kerberos auth or test from a host inside the trust)"
+        }
+        0x0000_06F7 => {
+            "RPC_X_BAD_STUB_DATA — server can't unmarshal our payload. \
                        Usually a [string] WCHAR* missing its NUL terminator, \
-                       or a union discriminator/body mismatch",
+                       or a union discriminator/body mismatch"
+        }
         0x0000_06F5 => "RPC_X_INVALID_BOUND — conformant array bound exceeded",
         0x0000_06F6 => "RPC_X_INVALID_TAG — discriminated union tag invalid",
-        0x0000_0721 => "RPC_S_SEC_PKG_ERROR — security package (NTLMSSP) failed mid-call. \
-                       Usually means our seal/sign keys diverged from the server's after a sealed Request",
+        0x0000_0721 => {
+            "RPC_S_SEC_PKG_ERROR — security package (NTLMSSP) failed mid-call. \
+                       Usually means our seal/sign keys diverged from the server's after a sealed Request"
+        }
         0x0000_0717 => "RPC_S_PROTECT_LEVEL_MISMATCH — auth level on Request differs from bind",
         _ => "see [MS-ERREF] / winerror.h for this status code",
     }

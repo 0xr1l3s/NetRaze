@@ -45,27 +45,27 @@ fn setup_cobalt_theme(ctx: &egui::Context) {
     visuals.faint_bg_color = bg_widget;
 
     visuals.widgets.noninteractive.bg_fill = bg_widget;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_dim);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, border);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text_dim);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5_f32, border);
     visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(2);
 
     visuals.widgets.inactive.bg_fill = bg_widget;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_primary);
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, border);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5_f32, border);
     visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(2);
 
     visuals.widgets.hovered.bg_fill = bg_hover;
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
     visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(2);
 
     visuals.widgets.active.bg_fill = accent_dark;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, accent);
     visuals.widgets.active.corner_radius = egui::CornerRadius::same(2);
 
     visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(102, 27, 28, 80);
-    visuals.selection.stroke = egui::Stroke::new(1.0, accent);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, accent);
 
     visuals.window_shadow = egui::Shadow::NONE;
     visuals.popup_shadow = egui::Shadow::NONE;
@@ -83,7 +83,7 @@ impl eframe::App for NetRazeDesktopApp {
         self.state.poll_logs();
 
         // Process pending login attempts from workspace context menu
-        for (ip, cred) in self.state.pending_logins.drain(..).collect::<Vec<_>>() {
+        for (ip, cred) in std::mem::take(&mut self.state.pending_logins) {
             self.runtime.spawn_login_attempt(
                 ip,
                 cred.username,
@@ -94,22 +94,18 @@ impl eframe::App for NetRazeDesktopApp {
         }
 
         // Process pending share enumeration requests
-        for (node_id, ip, hostname, cred) in
-            self.state.pending_share_enums.drain(..).collect::<Vec<_>>()
-        {
+        for (node_id, ip, hostname, cred) in std::mem::take(&mut self.state.pending_share_enums) {
             self.runtime.spawn_share_enum(node_id, ip, hostname, cred);
         }
 
         // Process pending user enumeration requests
-        for (node_id, ip, hostname, cred) in
-            self.state.pending_user_enums.drain(..).collect::<Vec<_>>()
-        {
+        for (node_id, ip, hostname, cred) in std::mem::take(&mut self.state.pending_user_enums) {
             self.runtime.spawn_user_enum(node_id, ip, hostname, cred);
         }
 
         // Process pending dump requests
         for (node_id, ip, hostname, dump_type, cred) in
-            self.state.pending_dumps.drain(..).collect::<Vec<_>>()
+            std::mem::take(&mut self.state.pending_dumps)
         {
             match dump_type.as_str() {
                 "SAM" => self.runtime.spawn_dump_sam(node_id, ip, hostname, cred),
@@ -119,27 +115,17 @@ impl eframe::App for NetRazeDesktopApp {
         }
 
         // Process pending AV enumeration requests
-        for (node_id, ip, hostname, cred) in self.state.pending_enumav.drain(..).collect::<Vec<_>>()
-        {
+        for (node_id, ip, hostname, cred) in std::mem::take(&mut self.state.pending_enumav) {
             self.runtime.spawn_enum_av(node_id, ip, hostname, cred);
         }
 
         // Process pending fingerprint requests
-        for ip in self
-            .state
-            .pending_fingerprints
-            .drain(..)
-            .collect::<Vec<_>>()
-        {
+        for ip in std::mem::take(&mut self.state.pending_fingerprints) {
             self.runtime.spawn_fingerprint(ip);
         }
 
         // Process pending console exec commands
-        for (console_id, ip, cred, command) in self
-            .state
-            .pending_exec_commands
-            .drain(..)
-            .collect::<Vec<_>>()
+        for (console_id, ip, cred, command) in std::mem::take(&mut self.state.pending_exec_commands)
         {
             self.runtime.spawn_exec_command(
                 console_id,
@@ -154,7 +140,7 @@ impl eframe::App for NetRazeDesktopApp {
 
         // Process pending browse directory requests — (host, share, path,
         // credential) come off the browser state itself; the id is the index.
-        for browser_id in self.state.pending_browse.drain(..).collect::<Vec<_>>() {
+        for browser_id in std::mem::take(&mut self.state.pending_browse) {
             if let Some(browser) = self.state.share_browsers.get_mut(browser_id) {
                 browser.loading = true;
                 browser.error = None;

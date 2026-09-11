@@ -22,7 +22,7 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
         .frame(egui::Frame {
             fill: BAR_BG,
             inner_margin: egui::Margin::symmetric(12, 5),
-            stroke: egui::Stroke::new(1.0, SEPARATOR),
+            stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
             ..Default::default()
         })
         .show(ctx, |ui| {
@@ -132,7 +132,7 @@ pub fn show_right_panel(ctx: &egui::Context, state: &mut AppState, runtime: &Run
         .frame(egui::Frame {
             fill: BAR_BG,
             inner_margin: egui::Margin::same(10),
-            stroke: egui::Stroke::new(0.5, SEPARATOR),
+            stroke: egui::Stroke::new(0.5_f32, SEPARATOR),
             ..Default::default()
         })
         .show(ctx, |ui| {
@@ -148,7 +148,7 @@ pub fn show_bottom_panel(ctx: &egui::Context, state: &mut AppState) {
         .frame(egui::Frame {
             fill: BAR_BG,
             inner_margin: egui::Margin::same(4),
-            stroke: egui::Stroke::new(0.5, SEPARATOR),
+            stroke: egui::Stroke::new(0.5_f32, SEPARATOR),
             ..Default::default()
         })
         .show(ctx, |ui| {
@@ -172,7 +172,7 @@ pub fn show_status_bar(ctx: &egui::Context, state: &mut AppState) {
         .frame(egui::Frame {
             fill: egui::Color32::from_rgb(18, 21, 28),
             inner_margin: egui::Margin::symmetric(10, 2),
-            stroke: egui::Stroke::new(0.5, SEPARATOR),
+            stroke: egui::Stroke::new(0.5_f32, SEPARATOR),
             ..Default::default()
         })
         .show(ctx, |ui| {

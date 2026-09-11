@@ -100,7 +100,7 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
         .frame(egui::Frame {
             fill: PANEL_BG,
             inner_margin: egui::Margin::same(8),
-            stroke: egui::Stroke::new(1.0, SEPARATOR),
+            stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
             corner_radius: egui::CornerRadius::same(6),
             ..Default::default()
         })

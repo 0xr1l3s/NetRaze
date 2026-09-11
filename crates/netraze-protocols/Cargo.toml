@@ -25,18 +25,12 @@ md4 = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 
-# Windows-only: the native NetAPI / WNet / SCM / Registry backend used by
-# connection.rs, shares.rs, users.rs, info.rs, exec.rs, dump.rs, browser.rs,
-# enum_av.rs. Slated for removal in Phase 7 once the DCE/RPC-over-socket
-# stack in `netraze-dcerpc` takes over.
+# Windows-only: the legacy WNet IPC$ mount in `connection.rs` (anonymous
+# connects in `SmbClient::connect`). Everything else — shares, users, info,
+# dump, browser, exec, enum_av — runs on the pure-Rust SMB2 + DCE-RPC stack
+# on every platform.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_NetworkManagement_NetManagement",
     "Win32_NetworkManagement_WNet",
-    "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Registry",
-    "Win32_System_Services",
 ] }

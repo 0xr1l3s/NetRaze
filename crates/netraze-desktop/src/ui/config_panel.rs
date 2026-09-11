@@ -171,7 +171,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
         let targets: Vec<String> = state
             .target_config
             .target
-            .split(|c: char| c == ',' || c == ' ' || c == '\n')
+            .split([',', ' ', '\n'])
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();

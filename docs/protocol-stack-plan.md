@@ -63,11 +63,11 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | Tree Connect / Tree Disconnect | ✅ | live |
 | Diagnostic actionnable sur tree_connect failures | ✅ | unit |
 | Pipe Open/Transceive/Write/Close | ✅ | live |
-| File CREATE / READ (read_full_file) | ✅ | live (utilisé par dump_rpc) |
-| File WRITE | 🔜 | Phase D — bloque exec_rpc |
-| File DELETE (DELETE_ON_CLOSE) | 🔜 | Phase D — cleanup côté exec |
-| Query Directory (FileBothDirectoryInformation) | 🔜 | Phase D — bloque browser_rpc |
-| Create Directory (FILE_DIRECTORY_FILE) | 🔜 | Phase D |
+| File CREATE / READ (read_full_file) | ✅ | live Samba (utilisé par dump_rpc) |
+| File WRITE | ✅ | Phase D — write_full_file (60 KiB chunks) ; round-trip live Samba via browser upload |
+| File DELETE (DELETE_ON_CLOSE) | ✅ | Phase D — delete_on_close ; live Samba (browser + cleanup exec) |
+| Query Directory (FileBothDirectoryInformation) | ✅ | Phase D — boucle QUERY_DIRECTORY + resume cookie ; live Samba (browser, pipe listing enum_av) |
+| Create Directory (FILE_DIRECTORY_FILE) | ✅ | Phase D — live Samba (browser) |
 | **SMB signing (HMAC-SHA256)** | ✅ | Dialectes 2.0.2/2.1 — HMAC-SHA256(ExportedSessionKey) sur le message entier ; appliqué dans `send_packet` quand le Negotiate serveur exige la signature (DC). Vérifié live contre un DC |
 | SMB3 encryption (AES-CCM/GCM) | ⚪ | Out v1 — la plupart des cibles acceptent SMB2 unencrypted |
 | Kerberos session setup (AP-REQ in SPNEGO) | 🔜 | Couplé avec `netraze-kerberos` |
@@ -88,8 +88,8 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | **srvsvc** | `4b324fc8-…` | srvsvc | `NetrShareEnum` (15), `NetrServerGetInfo` (21) | ✅ | `smb::shares`, `smb::info` |
 | **samr** | `12345778-…` | samr | Connect2 (62), CloseHandle (1), EnumDomains (6), LookupDomain (5), OpenDomain (7), EnumUsers (13), OpenUser (34), QueryInfoUser (36) | ✅ | `smb::users` |
 | **winreg** | `338cd001-…` | winreg | OpenLocalMachine (2), CloseKey (5), OpenKey (15), QueryInfoKey (16), SaveKey (20) | ✅ | `smb::dump` |
-| **scmr** | `367abb81-…` | svcctl | OpenSCManagerW (15), OpenServiceW (16), CloseServiceHandle (0), QueryServiceStatus (6), StartServiceW (19), ChangeServiceConfigW (11) | ✅ | `smb::dump` (auto-start RemoteRegistry) |
-| **scmr** suite | — | — | CreateServiceW (12), DeleteService (2), ControlService (1) | 🔜 | Bloque `exec_rpc` (smbexec) |
+| **scmr** | `367abb81-…` | svcctl | OpenSCManagerW (15), OpenServiceW (16), CloseServiceHandle (0), QueryServiceStatus (6), StartServiceW (19), ChangeServiceConfigW (11) | ✅ | `smb::dump` (auto-start RemoteRegistry), `smb::enum_av` (probes service) |
+| **scmr** suite | — | — | CreateServiceW (12), DeleteService (2), ControlService (1) | ✅ | `smb::exec` (smbexec complet — create/start/stop/delete) |
 | **lsarpc** | `12345778-…` | lsarpc | OpenPolicy2, LookupSids, LookupNames, QueryInformationPolicy | 🔜 | Account/SID resolution, helps secret naming dans LSA dump |
 | **drsuapi** | `e3514235-…` | lsass (RPC over named pipe) | DRSBind, DRSCrackNames, DRSGetNCChanges | 🔜 | **DCSync** — jackpot du pentest AD |
 | **wkssvc** | `6bffd098-…` | wkssvc | NetrWkstaGetInfo, NetrWkstaUserEnum | ⚪ | Alternative à srvsvc pour info — pas urgent |
@@ -190,7 +190,7 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 
 | Module NetExec | Crate consumer | Statut | Bloqué par |
 |---|---|---|---|
-| `enum_av` | `protocols::smb::enum_av` | ❌ Windows-only v1 | DCOM/WMI ou SCMR enum services + IPC$ pipe listing |
+| `enum_av` | `protocols::smb::enum_av` | 🟡 portable (SCMR probes + IPC$ pipe listing) | validation live contre cible Windows en attente |
 | `enum_dns` | — | 🔜 | netraze-ldap (DNS records dans `MicrosoftDNS` partition) |
 | `enum_ca` | — | ⚪ | netraze-ldap + netraze-dcerpc::interfaces::icpr (cert enrollment) |
 | `gpp_password` | `modules::reconnaissance::gpp_password` | ✅ (factory only — logic à porter) | smb file ops + Crypto AES (déjà là) |
@@ -223,7 +223,7 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 
 | Module | Statut | Bloqué par |
 |---|---|---|
-| smbexec (SCMR) | 🔜 | Phase D — SMB2 file ops + scmr CreateServiceW |
+| smbexec (SCMR) | 🟡 | portable via `smb::exec` (exec_rpc) — wire-smoke Samba OK, validation live cible Windows (admin) en attente |
 | atexec | ⚪ | dcerpc.atsvc |
 | wmiexec | ⚪ | netraze-dcom + netraze-wmi |
 | psexec | ⚪ | smbexec variant — fait en même temps |

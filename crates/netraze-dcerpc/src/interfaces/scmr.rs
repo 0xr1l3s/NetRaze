@@ -707,7 +707,11 @@ mod tests {
         // dir\0" = 20 WCHARs = 40 bytes, 172 % 4 == 0 so no trailing pad.
         assert_eq!(&stub[120..124], &20u32.to_le_bytes(), "binPath max_count");
         assert_eq!(&stub[124..128], &0u32.to_le_bytes(), "binPath offset");
-        assert_eq!(&stub[128..132], &20u32.to_le_bytes(), "binPath actual_count");
+        assert_eq!(
+            &stub[128..132],
+            &20u32.to_le_bytes(),
+            "binPath actual_count"
+        );
         let path_utf16: Vec<u8> = "%COMSPEC% /Q /c dir\0"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
@@ -744,7 +748,11 @@ mod tests {
         assert_eq!(stub.len(), 108);
         // NULL display referent sits right after the (already aligned)
         // service name.
-        assert_eq!(&stub[40..44], &0u32.to_le_bytes(), "NULL lpDisplayName referent");
+        assert_eq!(
+            &stub[40..44],
+            &0u32.to_le_bytes(),
+            "NULL lpDisplayName referent"
+        );
     }
 
     /// `[string]` NUL normalization: `lpBinaryPathName` passed with or
