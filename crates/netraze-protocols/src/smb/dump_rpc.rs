@@ -505,12 +505,7 @@ impl RemoteRegistryHandle {
 
     /// Stop the service if we started it, and restore the disabled state
     /// if we enabled it.  Prints secretsdump.py-style messages.
-    pub async fn finish(
-        self,
-        session: &Arc<Mutex<Smb2Session>>,
-        ipc: u32,
-        cred: &SmbCredential,
-    ) {
+    pub async fn finish(self, session: &Arc<Mutex<Smb2Session>>, ipc: u32, cred: &SmbCredential) {
         println!("[*] Cleaning up...");
 
         if !self.was_stopped {
@@ -599,7 +594,9 @@ impl RemoteRegistryHandle {
                 scmr::SERVICE_DISABLED,
                 scmr::SERVICE_NO_CHANGE,
             );
-            let _ = ch.call(scmr::Opnum::RChangeServiceConfigW as u16, &stub).await;
+            let _ = ch
+                .call(scmr::Opnum::RChangeServiceConfigW as u16, &stub)
+                .await;
         }
 
         let _ = close_scm(&mut ch, &svc_handle).await;
@@ -645,7 +642,11 @@ pub async fn secrets_dump(
     // Print bootkey
     println!(
         "[*] Target system bootKey: 0x{}",
-        sam_result.bootkey.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        sam_result
+            .bootkey
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     );
 
     // Print SAM hashes

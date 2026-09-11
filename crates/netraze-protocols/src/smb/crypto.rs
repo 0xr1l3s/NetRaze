@@ -5,8 +5,8 @@
 //! (names, signatures, `Result<_, String>`) is preserved so callers in
 //! `sam.rs`, `ntlm.rs`, `dump.rs`, `hive.rs` don't need to change.
 
-use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use aes::Aes128;
+use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 use cipher::{BlockDecrypt, KeyInit};
 use des::Des;
 use hmac::{Hmac, Mac};

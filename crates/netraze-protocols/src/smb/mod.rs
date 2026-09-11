@@ -77,7 +77,10 @@ pub use browser::{
     format_size, list_directory, upload_file,
 };
 pub use connection::SmbCredential;
-pub use dump::{SamDumpResult, remote_dump_lsa, remote_dump_sam, secrets_dump, RemoteRegistryHandle, dump_sam, dump_lsa};
+pub use dump::{
+    RemoteRegistryHandle, SamDumpResult, dump_lsa, dump_sam, remote_dump_lsa, remote_dump_sam,
+    secrets_dump,
+};
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
 pub use exec::{execute_command, execute_command_live, execute_command_traced};
 pub use fingerprint::{SmbFingerprint, fingerprint as smb_fingerprint};
@@ -160,13 +163,11 @@ impl SmbClient {
             let tgt = target.clone();
 
             let session = match cred.nt_hash {
-                Some(hash) => {
-                    tokio::task::spawn_blocking(move || {
-                        smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
-                    })
-                    .await
-                    .map_err(|e| format!("spawn_blocking failed: {e}"))??
-                }
+                Some(hash) => tokio::task::spawn_blocking(move || {
+                    smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))??,
                 None => {
                     let password = cred.password.clone();
                     tokio::task::spawn_blocking(move || {
@@ -183,10 +184,9 @@ impl SmbClient {
         }
 
         // Anonymous connect: legacy WNet path (Windows only).
-        let result =
-            tokio::task::spawn_blocking(move || connection::connect_ipc(&target, None))
-                .await
-                .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+        let result = tokio::task::spawn_blocking(move || connection::connect_ipc(&target, None))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
         match result {
             Ok(()) => {
