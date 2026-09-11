@@ -129,9 +129,15 @@ async fn browser_ops_upload_download_round_trip() {
     std::fs::write(&local_src, &payload).expect("write local source");
 
     // Upload → listed with correct size.
-    browser::upload_file(&addr, &cred, WRITABLE_SHARE, &name, local_src.to_str().unwrap())
-        .await
-        .expect("upload_file");
+    browser::upload_file(
+        &addr,
+        &cred,
+        WRITABLE_SHARE,
+        &name,
+        local_src.to_str().unwrap(),
+    )
+    .await
+    .expect("upload_file");
     let listing = browser::list_directory(&addr, &cred, WRITABLE_SHARE, "")
         .await
         .expect("list after upload");
@@ -144,9 +150,15 @@ async fn browser_ops_upload_download_round_trip() {
 
     // Download → byte-identical.
     let local_dst = std::env::temp_dir().join(format!("{name}.dst"));
-    browser::download_file(&addr, &cred, WRITABLE_SHARE, &name, local_dst.to_str().unwrap())
-        .await
-        .expect("download_file");
+    browser::download_file(
+        &addr,
+        &cred,
+        WRITABLE_SHARE,
+        &name,
+        local_dst.to_str().unwrap(),
+    )
+    .await
+    .expect("download_file");
     let downloaded = std::fs::read(&local_dst).expect("read downloaded file");
     assert_eq!(downloaded, payload, "downloaded bytes must match upload");
 
@@ -262,4 +274,63 @@ async fn browser_ops_listing_order_dirs_first_case_insensitive() {
     browser::delete_remote_directory(&addr, &cred, WRITABLE_SHARE, &root)
         .await
         .expect("cleanup root");
+}
+
+/// Read-only share-root listing against an arbitrary live host (e.g. a real
+/// Windows box). Unlike the tests above there is no Samba harness and no
+/// writable-share assumption — this is the interop probe for Windows-only
+/// server strictness (e.g. CREATE NameOffset validation on the share root).
+///
+/// Everything comes from env vars so no host or credential ever lands in the
+/// repo; the test self-skips unless ALL of these are set:
+///
+/// ```text
+/// NETRAZE_LIVE_HOST   host[:port] (default port 445)
+/// NETRAZE_LIVE_SHARE  share name to list
+/// NETRAZE_LIVE_USER   username
+/// NETRAZE_LIVE_PASS   password
+/// NETRAZE_LIVE_DOMAIN optional domain / workgroup
+/// ```
+///
+/// ```shell
+/// NETRAZE_LIVE_HOST=... NETRAZE_LIVE_SHARE=... NETRAZE_LIVE_USER=... \
+/// NETRAZE_LIVE_PASS=... cargo test -p netraze-protocols --test \
+///     browser_ops_samba browser_ops_live_host -- --ignored
+/// ```
+#[tokio::test]
+#[ignore = "requires a live host via NETRAZE_LIVE_* env vars (read-only listing)"]
+async fn browser_ops_live_host_lists_share_root() {
+    let host = std::env::var("NETRAZE_LIVE_HOST").ok();
+    let share = std::env::var("NETRAZE_LIVE_SHARE").ok();
+    let user = std::env::var("NETRAZE_LIVE_USER").ok();
+    let pass = std::env::var("NETRAZE_LIVE_PASS").ok();
+    if host.is_none() || share.is_none() || user.is_none() || pass.is_none() {
+        // No live host configured — this is the normal case for the Samba
+        // suite run, so skip silently (the Samba tests above already cover
+        // the harness scenario).
+        return;
+    }
+    let host = host.unwrap();
+    let share = share.unwrap();
+    let domain = std::env::var("NETRAZE_LIVE_DOMAIN").unwrap_or_default();
+    let cred = SmbCredential::new(&user.unwrap(), &domain, &pass.unwrap());
+
+    // Share root (empty rel_path) — the exact case that Windows rejects with
+    // STATUS_INVALID_PARAMETER when CREATE NameOffset is 0.
+    let root = browser::list_directory(&host, &cred, &share, "")
+        .await
+        .expect("list share root on live host");
+    for e in &root {
+        assert!(!e.name.is_empty(), "entry names must be non-empty");
+        assert_ne!(e.name, ".", "dot entries must be filtered");
+        assert_ne!(e.name, "..", "dot entries must be filtered");
+    }
+
+    // If the root has a subdirectory, navigate one level in to prove
+    // non-empty rel_path listing works too.
+    if let Some(dir) = root.iter().find(|e| e.is_dir) {
+        browser::list_directory(&host, &cred, &share, &dir.name)
+            .await
+            .expect("list subdirectory on live host");
+    }
 }

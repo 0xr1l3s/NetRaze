@@ -92,6 +92,35 @@ pub fn parse_target_list(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Ensure a target carries a port, appending `default_port` when it doesn't.
+///
+/// Accepts `host`, `host:port`, `[ipv6]`, and `[ipv6]:port`. An explicit port
+/// in the target always wins — blindly appending would produce
+/// `"host:1445:445"`, which never resolves (this is how the desktop scan
+/// pre-check missed hosts published on non-445 ports).
+pub fn with_default_port(target: &str, default_port: u16) -> String {
+    if target.starts_with('[') {
+        // [ipv6] or [ipv6]:port — anything after the closing bracket decides.
+        if let Some(end) = target.find(']') {
+            let suffix = &target[end + 1..];
+            if suffix.is_empty() {
+                return format!("{target}:{default_port}");
+            }
+            return target.to_owned();
+        }
+        // Malformed bracket — fall through to the IPv4/hostname path.
+    }
+    // Bare IPv6 literals contain several ':'s — bracket them before the
+    // port can be appended (`"::1:445"` would parse as an address itself).
+    if target.matches(':').count() > 1 {
+        return format!("[{target}]:{default_port}");
+    }
+    if target.contains(':') {
+        return target.to_owned();
+    }
+    format!("{target}:{default_port}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +155,25 @@ mod tests {
     #[test]
     fn test_hostname() {
         assert_eq!(expand_targets("dc01.corp.local"), vec!["dc01.corp.local"]);
+    }
+
+    #[test]
+    fn test_with_default_port() {
+        use super::with_default_port;
+        assert_eq!(with_default_port("10.0.0.5", 445), "10.0.0.5:445");
+        assert_eq!(
+            with_default_port("10.0.0.5:1445", 445),
+            "10.0.0.5:1445",
+            "explicit port must win"
+        );
+        assert_eq!(with_default_port("dc01.lan", 445), "dc01.lan:445");
+        assert_eq!(with_default_port("dc01.lan:1445", 445), "dc01.lan:1445");
+        assert_eq!(with_default_port("[fe80::1]", 445), "[fe80::1]:445");
+        assert_eq!(with_default_port("[fe80::1]:1445", 445), "[fe80::1]:1445");
+        assert_eq!(
+            with_default_port("::1", 445),
+            "[::1]:445",
+            "bare IPv6 gets bracketed before the port"
+        );
     }
 }

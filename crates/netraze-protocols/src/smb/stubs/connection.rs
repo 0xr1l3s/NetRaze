@@ -58,11 +58,15 @@ pub fn disconnect_ipc(_target: &str) -> Result<(), String> {
 }
 
 /// Test if we can connect to a target TCP port. Portable — uses `std::net`.
+///
+/// `target` may carry its own port (`"host:1445"`, `"[ipv6]:445"`); an
+/// explicit port wins over `port` so the pre-scan works against hosts
+/// published on non-445 ports.
 pub fn is_port_open(target: &str, port: u16, timeout_ms: u64) -> bool {
     use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let addr = format!("{target}:{port}");
+    let addr = crate::targets::with_default_port(target, port);
     if let Ok(mut addrs) = addr.to_socket_addrs() {
         if let Some(sock_addr) = addrs.next() {
             return TcpStream::connect_timeout(&sock_addr, Duration::from_millis(timeout_ms))
