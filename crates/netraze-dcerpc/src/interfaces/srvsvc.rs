@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(&stub[4..8], 9u32.to_le_bytes()); // max_count
         assert_eq!(&stub[8..12], 0u32.to_le_bytes()); // offset
         assert_eq!(&stub[12..16], 9u32.to_le_bytes()); // actual_count
-                                                       // "\\SERVER\0" in UTF-16-LE
+        // "\\SERVER\0" in UTF-16-LE
         let expected_wstring: Vec<u8> = "\\\\SERVER\0"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())

@@ -97,10 +97,10 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                                 fh.shares_count = shares.len();
                             }
                         }
-                        WorkflowNode::UsersNode { host_ip, users, .. } => {
-                            if *host_ip == fh.ip && fh.users_count == 0 {
-                                fh.users_count = users.len();
-                            }
+                        WorkflowNode::UsersNode { host_ip, users, .. }
+                            if *host_ip == fh.ip && fh.users_count == 0 =>
+                        {
+                            fh.users_count = users.len();
                         }
                         _ => {}
                     }
@@ -197,7 +197,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         ui.painter().hline(
             (r.left() + pad)..=(r.right() - pad),
             r.top(),
-            egui::Stroke::new(1.0, SEPARATOR),
+            egui::Stroke::new(1.0_f32, SEPARATOR),
         );
         ui.add_space(2.0);
     }
@@ -246,7 +246,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
         ui.painter().hline(
             (r.left() + pad)..=(r.right() - pad),
             r.top(),
-            egui::Stroke::new(1.0, SEPARATOR),
+            egui::Stroke::new(1.0_f32, SEPARATOR),
         );
         ui.add_space(1.0);
     }

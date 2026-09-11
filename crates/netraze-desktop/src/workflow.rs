@@ -133,7 +133,7 @@ fn host_chip(ui: &mut Ui, text: &str, fg: Color32) {
     let bg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 36);
     egui::Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0, fg.gamma_multiply(0.55)))
+        .stroke(Stroke::new(1.0_f32, fg.gamma_multiply(0.55)))
         .corner_radius(egui::CornerRadius::same(3))
         .inner_margin(egui::Margin::symmetric(5, 1))
         .show(ui, |ui| {
@@ -779,7 +779,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         match &snarl[pin.id.node] {
             WorkflowNode::TargetInput { target } => {
-                ui.label(format!("{target}"));
+                ui.label(target.to_string());
                 PinInfo::triangle().with_fill(Color32::from_rgb(80, 220, 120))
             }
             WorkflowNode::ProtocolModule { protocol } => {
@@ -1256,27 +1256,25 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 } else {
                     (false, String::new(), String::new(), None)
                 };
-            if is_pwned {
-                if ui.button("🖥 Get Console").clicked() {
-                    if let Some(label) = pwned_cred_label.as_deref() {
-                        let cred_opt = self
-                            .credentials
-                            .iter()
-                            .find(|c| {
-                                let cl = if c.domain.is_empty() {
-                                    format!(".\\{}", c.username)
-                                } else {
-                                    format!("{}\\{}", c.domain, c.username)
-                                };
-                                cl == label
-                            })
-                            .cloned();
-                        if let Some(cred) = cred_opt {
-                            self.console_requests.push((pwned_ip, pwned_hostname, cred));
-                        }
+            if is_pwned && ui.button("🖥 Get Console").clicked() {
+                if let Some(label) = pwned_cred_label.as_deref() {
+                    let cred_opt = self
+                        .credentials
+                        .iter()
+                        .find(|c| {
+                            let cl = if c.domain.is_empty() {
+                                format!(".\\{}", c.username)
+                            } else {
+                                format!("{}\\{}", c.domain, c.username)
+                            };
+                            cl == label
+                        })
+                        .cloned();
+                    if let Some(cred) = cred_opt {
+                        self.console_requests.push((pwned_ip, pwned_hostname, cred));
                     }
-                    ui.close();
                 }
+                ui.close();
             }
 
             // "Enum AV" — detect installed AV/EDR

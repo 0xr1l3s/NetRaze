@@ -160,13 +160,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         });
         if ui.add(btn).clicked() && can_add {
             state.credentials.push(crate::state::CredentialRecord {
-                username: state.new_cred_username.drain(..).collect(),
+                username: std::mem::take(&mut state.new_cred_username),
                 domain: if state.new_cred_domain.is_empty() {
                     ".".to_owned()
                 } else {
-                    state.new_cred_domain.drain(..).collect()
+                    std::mem::take(&mut state.new_cred_domain)
                 },
-                secret: state.new_cred_secret.drain(..).collect(),
+                secret: std::mem::take(&mut state.new_cred_secret),
                 cred_type: state.new_cred_type.clone(),
                 valid: None,
                 active: true,

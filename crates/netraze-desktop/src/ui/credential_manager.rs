@@ -107,7 +107,7 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         ui.painter().hline(
             (r.left() + PAD)..=(r.right() - PAD),
             r.top(),
-            egui::Stroke::new(1.0, SEPARATOR),
+            egui::Stroke::new(1.0_f32, SEPARATOR),
         );
         ui.add_space(12.0);
     }
@@ -321,7 +321,7 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         ui.painter().hline(
             (r.left() + PAD)..=(r.right() - PAD),
             r.top(),
-            egui::Stroke::new(1.0, SEPARATOR),
+            egui::Stroke::new(1.0_f32, SEPARATOR),
         );
         ui.add_space(1.0);
     }
@@ -346,10 +346,10 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                     .iter()
                     .any(|t| t.to_ascii_lowercase().contains(&query));
             // Filters
-            let matches_type = filter_type.as_ref().map_or(true, |t| *t == c.cred_type);
+            let matches_type = filter_type.as_ref().is_none_or(|t| *t == c.cred_type);
             let matches_proto = filter_protocol.is_empty()
                 || c.protocol.to_ascii_lowercase().contains(&filter_protocol);
-            let matches_valid = filter_valid.map_or(true, |v| c.valid == Some(v));
+            let matches_valid = filter_valid.is_none_or(|v| c.valid == Some(v));
             let matches_active = !filter_active_only || c.active;
             matches_search && matches_type && matches_proto && matches_valid && matches_active
         })
