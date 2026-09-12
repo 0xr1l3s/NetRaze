@@ -11,9 +11,9 @@
 - **Single static binaries** — no Python runtime or native extension hell.
 - **Async I/O from the ground up** — `tokio` across the entire stack.
 - **Memory-safe wire protocols** — SMB2, NTLMSSP, and DCE/RPC are re-implemented in Rust and validated byte-for-byte against Impacket-generated fixtures. No FFI to Impacket or Samba libraries.
-- **Cross-platform attacker OS** — the long-term goal is that Linux and Windows are equally capable attacker platforms. Today, some post-exploitation modules are still Windows-native only.
+- **Cross-platform attacker OS** — Linux and Windows are equally capable attacker platforms. The cross-platform portage is complete: every SMB capability is pure Rust, and the `windows` crate is no longer a dependency of any protocol crate.
 
-**Status:** Alpha. SMB2 + NTLMv2 are the most mature protocols. The project is currently blocked on `FSCTL_PIPE_TRANSCEIVE` over SMB2 (Phase 3 of the cross-platform portage), which will unlock rewriting all Windows-native post-exploitation modules as pure-Rust code.
+**Status:** Alpha. SMB2 + NTLMv2 (including anonymous null sessions and guest access) are the most mature protocols; the SMB post-exploitation surface (share/user enumeration, file browser, smbexec, SAM/LSA dump, AV enum) is fully ported and covered by the Samba integration harness. The next protocol frontiers are LDAP and Kerberos (see `docs/protocol-stack-plan.md`).
 
 **License:** BSD-2-Clause.
 
@@ -45,8 +45,8 @@ This is a Cargo workspace with 14 members (13 application crates + `xtask`).
 | `netraze-app` | Composition root / service wiring. | The only crate allowed to know almost everything. Bootstraps registries, storage, output, config, and runtime. |
 | `netraze-cli` | Thin CLI binary (`clap`). | **Must contain zero protocol logic.** Entry point for headless use. |
 | `netraze-desktop` | `egui`/`eframe` GUI with node-graph workflow canvas. | Binary crate. Uses `wgpu` backend and `egui-snarl` for visual workflows. |
-| `netraze-protocols` | Wire-level protocol handlers. | SMB is the only significantly implemented protocol. Others (LDAP, SSH, WinRM, RDP, FTP, MSSQL, NFS, VNC, WMI) are scaffold-only. |
-| `netraze-dcerpc` | Pure-Rust DCE/RPC v5 stack. | NDR20, PDU framing, NTLMSSP auth verifier, MS-SRVS interface. No `cfg(windows)` allowed inside this crate. |
+| `netraze-protocols` | Wire-level protocol handlers. | SMB is the only significantly implemented protocol (`smb2`, `ntlm`, `browser`, `shares`, `users`, `dump`, `exec`, `enum_av`, … all pure Rust). Others (LDAP, SSH, WinRM, RDP, FTP, MSSQL, NFS, VNC, WMI) are scaffold-only. |
+| `netraze-dcerpc` | Pure-Rust DCE/RPC v5 stack. | NDR20, PDU framing, NTLMSSP auth verifier, interfaces: SRVSVC, SAMR, WINREG, SCMR. No `cfg(windows)` allowed inside this crate. |
 | `netraze-modules` | Post-exploitation module registry. | Categories: `active_directory`, `credentials`, `reconnaissance`. |
 | `netraze-auth` | Credential types and authentication methods. | `CredentialSet`, `SecretMaterial`, `AuthMethod`. |
 | `netraze-targets` | Target parsing and normalization. | Detects hostnames, IPs, CIDRs, file lists, Nmap XML, Nessus files. |
@@ -117,10 +117,10 @@ cargo build --release
 ### Per-Crate Testing
 
 ```bash
-# NDR / PDU / NTLMSSP / SRVSVC unit tests
+# NDR / PDU / NTLMSSP / interface unit tests
 cargo test -p netraze-dcerpc
 
-# SMB crypto, NTLM known-answer vectors
+# SMB crypto, NTLM known-answer vectors, anonymous AUTHENTICATE shape
 cargo test -p netraze-protocols
 ```
 
@@ -156,8 +156,8 @@ Python scripts in `crates/netraze-dcerpc/tests/` (e.g., `gen_srvs_fixture.py`) u
 Directory: `tests/samba/`
 
 - `docker-compose.yml` spins `servercontainers/samba:smbd-only-latest` on `127.0.0.1:1445` (high port to avoid colliding with the host OS SMB client).
-- `smb.conf` defines a pinned share inventory with user `alice` / `[REMOVED_TEST_PASSWORD]` in workgroup `NETRAZE`. Share names and comments are **load-bearing** — Rust tests assert on them exactly.
-- Integration tests are in `crates/netraze-protocols/tests/samba_integration.rs` and are `#[ignore]` by default.
+- `smb.conf` defines a pinned share inventory with user `alice` / `[REMOVED_TEST_PASSWORD]` in workgroup `NETRAZE`. Wrong passwords map onto the guest account (`map to guest = Bad Password`), which is what exercises the guest paths. Share names and comments are **load-bearing** — Rust tests assert on them exactly.
+- Integration tests live in `crates/netraze-protocols/tests/` (nine suites, 29 tests: `samba_integration`, `rpc_channel_samba`, `shares_rpc_samba`, `info_rpc_samba`, `users_rpc_samba`, `browser_ops_samba`, `exec_samba`, `enum_av_samba`, `anonymous_samba`) and are `#[ignore]` by default.
 
 Run locally:
 
@@ -165,8 +165,8 @@ Run locally:
 # Start the container
 docker compose -f tests/samba/docker-compose.yml up -d --wait
 
-# Run the ignored smoke tests (single-threaded to avoid Samba passdb-lock races)
-cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1
+# Run every ignored suite (single-threaded to avoid Samba passdb-lock races)
+cargo test -p netraze-protocols -- --ignored --test-threads=1
 
 # Tear down
 docker compose -f tests/samba/docker-compose.yml down -v
@@ -174,37 +174,19 @@ docker compose -f tests/samba/docker-compose.yml down -v
 
 Environment variable `NETRAZE_SAMBA_ADDR` defaults to `127.0.0.1:1445` and can be overridden to point at a custom endpoint.
 
+**Impacket cross-check is a standing rule:** when SMB wire behaviour changes, verify the new behaviour against Impacket running against the same harness before committing, and pin the result in a test. Several suites carry comments noting "identical to Impacket" for exactly this reason.
+
 ---
 
 ## CI/CD
 
-File: `.github/workflows/ci.yml`
+GitHub Actions ships a single workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
-Three jobs, triggered on `push`/`pull_request` to `main`/`master`, plus manual `workflow_dispatch`:
+- **Trigger:** pushing a `v*` tag (`git tag v0.1.1 && git push origin v0.1.1`).
+- **Build:** `cargo build --release -p netraze-desktop` on native Ubuntu and Windows runners, packaged as `netraze-desktop-{linux,windows}-x86_64` archives.
+- **Release:** binaries are attached to a GitHub Release with auto-generated notes.
 
-### Job 1: `fmt-and-clippy` (Ubuntu, fast gate)
-
-1. `cargo fmt --all --check`
-2. **Strict** clippy on `netraze-dcerpc`: `cargo clippy -p netraze-dcerpc --all-targets -- -D warnings` (zero tolerance — this is brand new code).
-3. **Advisory** clippy on full workspace: `cargo clippy --workspace --all-targets` (pre-existing warnings in legacy crates are allowed).
-
-### Job 2: `test` (Matrix: Ubuntu + Windows)
-
-- Depends on `fmt-and-clippy`.
-- `cargo check --workspace --all-targets`
-- `cargo test --workspace --no-fail-fast`
-- `fail-fast: false` on the matrix.
-
-### Job 3: `samba-integration` (Ubuntu, opt-in)
-
-- **Conditional**: only runs on `workflow_dispatch` or pushes to `main`/`master` (not PRs by default).
-- Depends on `fmt-and-clippy`.
-- Spins up `tests/samba/docker-compose.yml`.
-- Runs: `cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1`
-- Dumps Samba container logs on failure.
-- Always tears down the container (`down -v`).
-
-**Note:** `RUSTFLAGS=-D warnings` is **not** set globally because legacy crates carry pre-existing warnings.
+The fmt / clippy / test gates are not enforced by CI today — run them locally before pushing (see Quick Reference). The strict clippy gate (`-D warnings`) applies to `netraze-dcerpc`.
 
 ---
 
@@ -226,7 +208,7 @@ Three jobs, triggered on `push`/`pull_request` to `main`/`master`, plus manual `
 ### Naming and Structure
 
 - Follow standard Rust naming (`PascalCase` for types/traits, `snake_case` for functions/variables/modules, `SCREAMING_SNAKE_CASE` for constants).
-- Platform-gated code uses `#[cfg(windows)]` / `#[cfg(not(windows))]`. On non-Windows, stub files in `smb/stubs/` return `NOT_PORTED` until the pure-Rust implementation replaces them.
+- **Credential shape carries auth intent** in `SmbCredential`: empty username → anonymous null session; username with no hash and no password → guest; anything else → strict password/pass-the-hash (a wrong password is *rejected*, never silently downgraded to guest). Guest and null sessions bind DCE/RPC unauthenticated over the SMB session (Impacket parity) — see `smb/rpc.rs::bind_interface_over_smb`.
 - Sanity caps on untrusted input allocations (e.g., `MAX_SHARES_PER_RESPONSE = 65_536`, `64 KiB` wstring cap) to prevent malicious server inputs from forcing huge allocations.
 
 ---
@@ -239,33 +221,35 @@ Three jobs, triggered on `push`/`pull_request` to `main`/`master`, plus manual `
 
 3. **No `unsafe` Rust policy:** There is no project-wide ban on `unsafe`, but the wire-protocol crates (`netraze-dcerpc`, `netraze-protocols::smb2`) are written entirely in safe Rust. Any introduction of `unsafe` should be justified and documented.
 
-4. **Stub modules on Linux:** Non-Windows builds compile stub implementations that return `NOT_PORTED` errors. This prevents accidental execution of Windows-native code paths on the wrong platform, but also means an operator on Linux will see "not ported" for many capabilities until the pure-Rust stack catches up.
+4. **Strict auth semantics:** a credential carrying a secret must never accept a server-downgraded GUEST/NULL session — the error ("downgraded to GUEST") is the security property, pinned by tests in `anonymous_samba`.
 
 ---
 
-## Cross-Platform Portage Plan (Current Engineering Focus)
+## Cross-Platform Portage Plan (Complete)
 
-NetRaze inherited two implementation strategies for SMB post-exploitation:
+NetRaze inherited two implementation strategies for SMB post-exploitation.
+The migration from Windows-native APIs to the pure-Rust SMB2 + DCE/RPC
+stack is **finished** — every phase below is done, the Windows-native
+files and `smb/stubs/` are deleted, and the `windows` crate is no longer
+a dependency of `netraze-protocols`:
 
 | Strategy | Where it lives | Portability |
 |---|---|---|
-| **Windows-native** | `crates/netraze-protocols/src/smb/{connection,browser,shares,info,users,dump,enum_av,exec}.rs` | Windows attacker only. Uses `windows` crate (SCM, WNet, NetAPI, Registry). |
-| **Pure-Rust SMB2 + DCE/RPC** | `crates/netraze-protocols/src/smb/{smb2,ntlm,crypto,sam,hive,fingerprint}.rs` and `crates/netraze-dcerpc/` | Any attacker OS. Talks raw TCP. |
-
-The project is migrating from the first to the second. Phases:
+| **Pure-Rust SMB2 + DCE/RPC** (the only strategy left) | `crates/netraze-protocols/src/smb/*.rs` and `netraze-dcerpc/` | Any attacker OS |
 
 - **Phase 1** (Done) — Pure-Rust SMB2 wire foundation: Negotiate, NTLMv2, TreeConnect.
 - **Phase 2** (Done) — DCE/RPC primitives: NDR20, PDU framing, NTLMSSP auth verifier, MS-SRVS `NetrShareEnum`.
-- **Phase 3** (In Progress, **blocking**) — `FSCTL_PIPE_TRANSCEIVE` over SMB2. This unlocks DCE/RPC-over-named-pipe, which in turn unlocks porting every enumeration and execution module to pure Rust.
-- **Phase 4** (Planned) — Port read-only modules: `info`, `shares`, `users`.
-- **Phase 5** (Planned) — Port write-side modules: `exec`, `browser`.
-- **Phase 6** (Planned) — Port secret-dumping: `dump` (SAM/LSA).
-- **Phase 7** (Planned) — Retire Windows-native code path entirely.
+- **Phase 3** (Done) — `FSCTL_PIPE_TRANSCEIVE` over SMB2 (`rpc::SmbPipeTransport`).
+- **Phase 4** (Done) — Read-only modules: `info`, `shares`, `users`.
+- **Phase 5** (Done) — Write-side modules: `exec` (smbexec via SVCCTL), `browser` (file ops over SMB2).
+- **Phase 6** (Done) — Secret dumping: `dump` (SAM/LSA via WINREG + hive parser).
+- **Phase 7** (Done) — Windows-native code path retired; single pure-Rust implementation everywhere.
+- **Follow-up** (Done) — Anonymous null-session and guest access across the stack (credential-shape dispatch, unauthenticated DCE binds for guest/null sessions), plus the tag-driven release workflow.
 
 **What this means for agents:**
-- If you modify `netraze-dcerpc` or `netraze-protocols::smb2`, run the Samba integration suite.
+- If you modify `netraze-dcerpc` or `netraze-protocols::smb`, run the full Samba integration suite (`cargo test -p netraze-protocols -- --ignored --test-threads=1`) and cross-check behaviour changes against Impacket.
 - If you add a new DCE/RPC interface, follow the fixture pattern: write a `gen_*.py` script that uses Impacket to generate bytes, paste the bytes into a Rust test, and add a round-trip test.
-- Do not add new Windows-native code in `netraze-dcerpc` — that crate must remain 100% cross-platform.
+- Never re-introduce `#[cfg(windows)]` protocol paths in `netraze-protocols` or any `cfg`-gating in `netraze-dcerpc` — those crates are 100% cross-platform by policy.
 
 ---
 
@@ -276,11 +260,12 @@ The project is migrating from the first to the second. Phases:
 | `Cargo.toml` | Workspace members, shared dependencies, lints. |
 | `rust-toolchain.toml` | Pins stable Rust + clippy + rustfmt. |
 | `docs/architecture.md` | Target architecture (in French). Dependency rules and evolution plan. |
-| `docs/migration-roadmap.md` | Detailed structural roadmap + cross-platform portage plan (Phases 1–7). |
-| `tests/samba/README.md` | Operator guide for the live integration harness. |
+| `docs/migration-roadmap.md` | Detailed structural roadmap + the (now complete) cross-platform portage plan. |
+| `docs/protocol-stack-plan.md` | Operational inventory of every protocol interface NetRaze needs — the "what do we attack next" table. |
+| `tests/samba/README.md` | Operator guide for the live integration harness (suite list, known Samba limits). |
 | `crates/netraze-dcerpc/tests/gen_srvs_fixture.py` | Pattern for Impacket-pinned byte fixtures. |
-| `crates/netraze-protocols/tests/samba_integration.rs` | Live SMB2/NTLM smoke tests against the Samba container. |
-| `.github/workflows/ci.yml` | CI gates and their rationale. |
+| `crates/netraze-protocols/tests/` | The nine live Samba integration suites (`#[ignore]` by default). |
+| `.github/workflows/release.yml` | Tag-driven Linux + Windows desktop release builds. |
 
 ---
 
@@ -301,12 +286,15 @@ cargo run -p netraze-desktop
 # Full test suite (fast)
 cargo test --workspace --no-fail-fast
 
-# Strict lint (required before PR)
+# Lint gates (required before pushing)
 cargo fmt --all --check
 cargo clippy -p netraze-dcerpc --all-targets -- -D warnings
 
 # Samba integration (requires Docker)
 docker compose -f tests/samba/docker-compose.yml up -d --wait
-cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1
+cargo test -p netraze-protocols -- --ignored --test-threads=1
 docker compose -f tests/samba/docker-compose.yml down -v
+
+# Release (tag-driven — builds Linux + Windows binaries on GitHub Actions)
+git tag v0.1.2 && git push origin v0.1.2
 ```

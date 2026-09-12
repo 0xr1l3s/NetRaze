@@ -73,7 +73,7 @@ races on the passdb lock in Samba 4.x.
 | `browser_ops_samba` | `browser_rpc` file ops: directory lifecycle, upload/download round-trip (byte fidelity, non-ASCII), listing order, negative paths. Also the env-gated `NETRAZE_LIVE_*` share-root smoke against a live Windows host |
 | `exec_samba` | `exec_rpc` (smbexec) wire smoke: svcctl bind succeeds, Samba's ROpenSCManagerW refusal surfaces as a clean error — no panic, no poll loop |
 | `enum_av_samba` | `enum_av` boundary behaviour: SCM refusal surfaces readably, IPC$ pipe-listing refusal skips silently, missing credential is an error |
-| `anonymous_samba` | Anonymous (null session) + guest access: `connect_anonymous` / `connect_guest` session setup, guest-ok share browsing, share-name enumeration, alice-only shares stay refused, strict GUEST-downgrade rejection for secret-carrying credentials |
+| `anonymous_samba` | Anonymous (null session) + guest access: `connect_anonymous` / `connect_guest` session setup, guest-ok share browsing, anonymous and guest share-name enumeration, guest SAMR user enumeration, alice-only shares stay refused, strict GUEST-downgrade rejection for secret-carrying credentials |
 
 Known Samba limits pinned by these suites (identical behaviour confirmed
 against Impacket, so they're server policy — not stack bugs):
@@ -89,6 +89,13 @@ against Impacket, so they're server policy — not stack bugs):
   listing (identical to Impacket's null-session `listShares`). This
   mirrors Windows with `RestrictAnonymous = 0`; hardened hosts refuse the
   enumeration instead.
+- Guest sessions enumerate shares and SAMR users through an
+  **unauthenticated** DCE bind riding the SMB session — Impacket does the
+  same (its `DCERPC_v5` defaults to auth level `NONE`). An authenticated
+  NTLMSSP bind inside the pipe (AUTH3 for a non-existent user with a blank
+  hash) is accepted at bind time but every subsequent call faults with
+  `0x5`, which is why guest/null credentials take the unauthenticated
+  path in `bind_interface_over_smb`.
 
 Not covered here:
 - SMB signing — implemented for dialects 2.0.2/2.1 (HMAC-SHA256 over the
@@ -132,17 +139,19 @@ NETRAZE_SAMBA_ADDR=10.0.0.50:445 \
 
 ## CI
 
-The `samba-integration` job in `.github/workflows/ci.yml` runs this
-harness automatically on Linux runners, but **only** for:
+The suites are **not** run by GitHub Actions today — the repo's only
+workflow is the tag-driven `release.yml` (desktop binaries). Run them
+locally before pushing changes that touch SMB2, NTLM, or DCE-RPC code
+paths:
 
-- Pushes to `main` / `master`
-- Manual `workflow_dispatch` triggers
+```shell
+docker compose -f tests/samba/docker-compose.yml up -d --wait
+cargo test -p netraze-protocols -- --ignored --test-threads=1
+```
 
-Pull requests don't trigger it by default — the Impacket-pinned byte
-fixtures in `netraze-dcerpc` already catch most regressions, and
-docker-in-Actions adds ~1 minute of cold-start per run. Trigger it
-manually from the Actions tab when a PR touches SMB2, NTLM, or DCE-RPC
-code paths.
+The Impacket-pinned byte fixtures in `netraze-dcerpc` catch most
+regressions in `cargo test --workspace`; this harness is the layer that
+proves real-server interoperability.
 
 ---
 
