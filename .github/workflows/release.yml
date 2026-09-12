@@ -1,0 +1,86 @@
+# Release builds for netraze-desktop.
+#
+# Pushing a tag `v*` builds the desktop app on native Linux and Windows
+# runners and attaches the binaries to a GitHub Release. The releases page
+# (and the `releases/latest/download/<asset>` URL) then serves standalone
+# binaries — no clone required.
+#
+# ```shell
+# git tag v0.1.0 && git push origin v0.1.0
+# ```
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Required to create the Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: netraze-desktop-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: netraze-desktop-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      # eframe/winit X11 + Wayland build deps (the Linux binary links
+      # against these at build time; at runtime only the user's display
+      # libraries are needed).
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y
+          libxkbcommon-dev libwayland-dev
+          libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release -p netraze-desktop --target ${{ matrix.target }}
+
+      - name: Package (tar.gz)
+        if: runner.os == 'Linux'
+        run: tar -czf ${{ matrix.asset }}.tar.gz -C target/${{ matrix.target }}/release netraze-desktop
+
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/netraze-desktop.exe -DestinationPath ${{ matrix.asset }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.*
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
