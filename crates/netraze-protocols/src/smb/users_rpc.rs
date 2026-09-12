@@ -21,7 +21,7 @@ use netraze_dcerpc::channel::RpcChannel;
 use netraze_dcerpc::interfaces::samr;
 
 use super::connection::SmbCredential;
-use super::rpc::{SmbPipeTransport, build_binder, connect_session};
+use super::rpc::{bind_interface_over_smb, connect_session};
 
 /// Re-export so `mod.rs` can re-export it as `users::UserInfo`.
 #[derive(Debug, Clone)]
@@ -51,15 +51,18 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
         .tree_connect(target, "IPC$")
         .map_err(|e| format!("tree_connect IPC$: {e}"))?;
 
-    let pipe = Arc::new(
-        SmbPipeTransport::open(session.clone(), ipc, "samr")
-            .map_err(|e| format!("open samr pipe: {e}"))?,
-    );
-
-    let binder = build_binder(cred, 0);
-    let mut ch = RpcChannel::bind_authenticated(pipe, samr::uuid(), (1, 0), binder)
-        .await
-        .map_err(|e| format!("SAMR bind_authenticated: {e}"))?;
+    // Same bind dance as shares/info: unauthenticated for guest/null
+    // sessions (Impacket parity), NTLMSSP PKT_PRIVACY otherwise.
+    let mut ch = bind_interface_over_smb(
+        session.clone(),
+        ipc,
+        "samr",
+        samr::uuid(),
+        (1, 0),
+        cred,
+    )
+    .await
+    .map_err(|e| format!("SAMR bind: {e}"))?;
 
     // 2. SamrConnect2
     // Windows SAMR expects a NULL server name; passing an IP or hostname
