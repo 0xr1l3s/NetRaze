@@ -234,6 +234,10 @@ const IMPACKET_AUTH_CTX_ID_OFFSET: u32 = 79231;
 /// Open `\PIPE\<pipe_name>` on an authenticated SMB session, then bind the
 /// given interface — NTLMSSP PKT_PRIVACY first, anonymous fallback.
 ///
+/// Guest and null-session credentials skip straight to the unauthenticated
+/// bind (see the comment inside); every other credential gets the dance
+/// below.
+///
 /// Why the fallback: Windows domain controllers (observed on Server 2022,
 /// and reproducible with Impacket against the same hosts) answer an
 /// NTLMSSP-authenticated bind on some endpoints (notably srvsvc) with
@@ -278,15 +282,30 @@ pub async fn bind_interface_over_smb(
         Ok(Arc::new(pipe))
     }
 
-    // ── Null sessions: no key material exists to seal an NTLMSSP AUTH3
-    // with, so the authenticated primary is impossible — go straight to
-    // the unauthenticated bind. Server policy decides what it may reach
-    // (guest-ok pipes, share enumeration on RestrictAnonymous = 0 hosts).
-    if cred.username.is_empty() {
+    // ── Null sessions and guest sessions ride the **unauthenticated**
+    // bind, exactly like Impacket (whose `DCERPC_v5` defaults to
+    // `auth_level = NONE`, so `SMBConnection.listShares` never sends an
+    // authenticated bind either). The SMB session already carries the
+    // identity — null or guest — and authorizes the calls; that's what
+    // Samba answers `NetrShareEnum`/`SamrConnect2` from.
+    //
+    // For null sessions there is no choice: no key material exists to
+    // seal an NTLMSSP AUTH3 with. For guest there is a subtler trap: the
+    // pipe-level NTLMSSP AUTH3 would re-authenticate the (non-existent)
+    // username with a blank NT hash — Samba accepts the bind but faults
+    // every subsequent call with `status=0x00000005` (ACCESS_DENIED),
+    // because the DCE auth context is a failed login even though the SMB
+    // session was guest-mapped. The unauthenticated bind is the only
+    // shape the server honors for a guest session.
+    let guest_shape = !cred.username.is_empty()
+        && cred.nt_hash.is_none()
+        && cred.password.is_empty();
+    if cred.username.is_empty() || guest_shape {
+        let mode = if guest_shape { "guest" } else { "anonymous" };
         let transport = open_pipe(&session, ipc_tree_id, pipe_name).await?;
         return RpcChannel::bind(transport, interface, version)
             .await
-            .map_err(|e| format!("RpcChannel::bind({pipe_name}, anonymous): {e}"));
+            .map_err(|e| format!("RpcChannel::bind({pipe_name}, {mode}): {e}"));
     }
 
     // ── Primary: NTLMSSP PKT_PRIVACY bind.

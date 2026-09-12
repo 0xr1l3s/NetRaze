@@ -29,10 +29,11 @@ use netraze_protocols::smb::browser;
 use netraze_protocols::smb::connection::SmbCredential;
 use netraze_protocols::smb::shares;
 use netraze_protocols::smb::smb2::Smb2Session;
+use netraze_protocols::smb::users;
 
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "wonderland";
+/// Alice-only share pinned in the harness user database.
 const TEST_DOMAIN: &str = "NETRAZE";
 /// Guest-ok share pinned in `tests/samba/smb.conf` (`guest ok = yes`).
 const GUEST_SHARE: &str = "public";
@@ -189,6 +190,47 @@ async fn anonymous_share_enumeration_lists_names() {
     );
     // Name visibility only — `anonymous_session_browses_guest_share_only`
     // pins that the alice-only share stays unreachable at tree_connect.
+}
+
+/// Guest share enumeration — the regression for the RPC fault 0x5 bug:
+/// a guest credential used to take the authenticated NTLMSSP bind, whose
+/// pipe-level AUTH3 (non-existent user, blank hash) Samba faults with
+/// `status=0x00000005` on `NetrShareEnum`. Guest sessions now ride the
+/// unauthenticated bind like Impacket's `listShares` does, and enumerate
+/// the same share names a null session sees.
+#[tokio::test]
+#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
+async fn guest_share_enumeration_lists_names() {
+    require_samba();
+    let list = shares::enum_shares(&samba_addr(), &guest_cred())
+        .await
+        .expect("guest session must enumerate share names (unauthenticated bind)");
+    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+    println!("guest enum_shares: {names:?}");
+    assert!(
+        names.contains(&GUEST_SHARE),
+        "guest-ok share must be listed, got: {names:?}"
+    );
+}
+
+/// Guest user enumeration — same unauthenticated-bind fix for SAMR
+/// (`SamrConnect2` → domain enum → `SamrOpenDomain` → user enum). The
+/// harness answers a guest session with the same account list an
+/// authenticated session gets (Impacket parity verified: its guest
+/// `hSamrEnumerateUsersInDomain` returns the same single account).
+#[tokio::test]
+#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
+async fn guest_user_enumeration_lists_accounts() {
+    require_samba();
+    let users = users::enum_users(&samba_addr(), &guest_cred())
+        .await
+        .expect("guest session must enumerate SAMR accounts (unauthenticated bind)");
+    let names: Vec<&str> = users.iter().map(|u| u.name.as_str()).collect();
+    println!("guest enum_users: {names:?}");
+    assert!(
+        names.contains(&TEST_USER),
+        "guest enum must list {TEST_USER}, got: {names:?}"
+    );
 }
 
 /// Strictness regression: a real credential with a wrong password is
