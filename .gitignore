@@ -27,6 +27,8 @@ Thumbs.db
 .env
 *.yaml
 *.yml
+# CI workflows must be tracked despite the blanket *.yml rule above.
+!.github/workflows/*
 workspace_netraze.yaml
 workspace_netraze.yml
 workspace_netraze.*
