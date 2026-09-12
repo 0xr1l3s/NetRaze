@@ -427,15 +427,17 @@ impl WorkflowViewer {
     }
 
     /// Resolve a `CredentialRecord` from its display label (e.g. `DOMAIN\user`).
+    ///
+    /// `(anonymous)` resolves to the synthesized null-session record —
+    /// anonymous access needs no saved entry, it's the "no user provided"
+    /// fallback.
     fn resolve_cred(&self, label: &Option<String>) -> Option<CredentialRecord> {
         let label = label.as_ref()?;
+        if label == "(anonymous)" {
+            return Some(crate::state::anonymous_record());
+        }
         for c in &self.credentials {
-            let cl = if c.domain.is_empty() {
-                format!(".\\{}", c.username)
-            } else {
-                format!("{}\\{}", c.domain, c.username)
-            };
-            if &cl == label {
+            if &crate::state::cred_label(c) == label {
                 return Some(c.clone());
             }
         }
@@ -1166,7 +1168,9 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 ui.close();
             }
 
-            // "List Shares" — spawn a SharesNode
+            // "List Shares" — spawn a SharesNode. No login on the host →
+            // anonymous (null session): the server's policy decides what
+            // a null session may enumerate.
             if ui.button("📂 List Shares").clicked() {
                 if let WorkflowNode::HostNode {
                     ip,
@@ -1175,15 +1179,18 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     ..
                 } = &snarl[node]
                 {
-                    if let Some(cred) = self.resolve_cred(logged_in_cred) {
-                        self.shares_requests
-                            .push((node, ip.clone(), hostname.clone(), cred));
-                    }
+                    let cred = self
+                        .resolve_cred(logged_in_cred)
+                        .unwrap_or_else(crate::state::anonymous_record);
+                    self.shares_requests
+                        .push((node, ip.clone(), hostname.clone(), cred));
                 }
                 ui.close();
             }
 
-            // "List Users" — spawn a UsersNode
+            // "List Users" — spawn a UsersNode. Same anonymous fallback;
+            // hardened hosts refuse SAMR over a null session and the node
+            // surfaces that error.
             if ui.button("👥 List Users").clicked() {
                 if let WorkflowNode::HostNode {
                     ip,
@@ -1192,10 +1199,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     ..
                 } = &snarl[node]
                 {
-                    if let Some(cred) = self.resolve_cred(logged_in_cred) {
-                        self.users_requests
-                            .push((node, ip.clone(), hostname.clone(), cred));
-                    }
+                    let cred = self
+                        .resolve_cred(logged_in_cred)
+                        .unwrap_or_else(crate::state::anonymous_record);
+                    self.users_requests
+                        .push((node, ip.clone(), hostname.clone(), cred));
                 }
                 ui.close();
             }
@@ -1269,14 +1277,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     let cred_opt = self
                         .credentials
                         .iter()
-                        .find(|c| {
-                            let cl = if c.domain.is_empty() {
-                                format!(".\\{}", c.username)
-                            } else {
-                                format!("{}\\{}", c.domain, c.username)
-                            };
-                            cl == label
-                        })
+                        .find(|c| crate::state::cred_label(c) == label)
                         .cloned();
                     if let Some(cred) = cred_opt {
                         self.console_requests.push((pwned_ip, pwned_hostname, cred));
@@ -1295,20 +1296,16 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 } = &snarl[node]
                 {
                     // Resolve credential from logged_in_cred label
-                    let mut cred_found = None;
-                    if let Some(label) = logged_in_cred {
-                        for c in &self.credentials {
-                            let cl = if c.domain.is_empty() {
-                                format!(".\\{}", c.username)
-                            } else {
-                                format!("{}\\{}", c.domain, c.username)
-                            };
-                            if cl == *label {
-                                cred_found = Some(c.clone());
-                                break;
-                            }
-                        }
-                    }
+                    let cred_found = if logged_in_cred.as_deref() == Some("(anonymous)") {
+                        Some(crate::state::anonymous_record())
+                    } else {
+                        logged_in_cred.as_deref().and_then(|label| {
+                            self.credentials
+                                .iter()
+                                .find(|c| crate::state::cred_label(c) == label)
+                                .cloned()
+                        })
+                    };
                     if let Some(cred) = cred_found {
                         self.enumav_requests
                             .push((node, ip.clone(), hostname.clone(), cred));
@@ -1334,6 +1331,38 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             // "Login As" submenu
             ui.menu_button("🔑 Login As", |ui| {
                 ui.set_min_width(160.0);
+
+                // Anonymous (null session) — always available, saved
+                // credentials or not. It's the "no user provided" mode.
+                {
+                    let is_active = current_cred.as_deref() == Some("(anonymous)");
+                    let icon = if is_active { "✔" } else { "  " };
+                    let text_color = if is_active {
+                        Color32::from_rgb(80, 200, 120)
+                    } else {
+                        Color32::WHITE
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{icon} 👤 (anonymous)"))
+                                    .size(12.0)
+                                    .color(text_color),
+                            )
+                            .min_size(egui::vec2(150.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        if !is_active {
+                            if let WorkflowNode::HostNode { ip, .. } = &snarl[node] {
+                                self.login_requests
+                                    .push((ip.clone(), crate::state::anonymous_record()));
+                            }
+                        }
+                        ui.close();
+                    }
+                }
+
                 if self.credentials.is_empty() {
                     ui.label(
                         egui::RichText::new("No credentials saved")
@@ -1343,17 +1372,15 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     );
                 } else {
                     for cred in &self.credentials {
-                        let cred_label = if cred.domain.is_empty() {
-                            format!(".\\{}", cred.username)
-                        } else {
-                            format!("{}\\{}", cred.domain, cred.username)
-                        };
+                        let cred_label = crate::state::cred_label(cred);
 
                         let is_active = current_cred.as_deref() == Some(cred_label.as_str());
                         let icon = if is_active { "✔" } else { "  " };
 
                         let type_tag = match cred.cred_type {
                             crate::state::CredType::Hash => "🔒",
+                            // Secret-less password credential = guest access.
+                            crate::state::CredType::Password if cred.secret.is_empty() => "👤",
                             crate::state::CredType::Password => "🔑",
                         };
                         let label = format!("{icon} {type_tag} {cred_label}");

@@ -139,11 +139,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                     ui.set_min_width(180.0);
                                     let mut to_open: Option<crate::state::CredentialRecord> = None;
                                     for cred in &state.credentials {
-                                        let cred_label = if cred.domain.is_empty() {
-                                            format!(".\\{}", cred.username)
-                                        } else {
-                                            format!("{}\\{}", cred.domain, cred.username)
-                                        };
+                                        let cred_label = crate::state::cred_label(cred);
                                         let type_tag = match cred.cred_type {
                                             crate::state::CredType::Hash => "[H]",
                                             crate::state::CredType::Password => "[P]",

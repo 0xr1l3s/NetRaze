@@ -36,11 +36,7 @@ pub struct ConsoleState {
 
 impl ConsoleState {
     pub fn new(id: u64, host_ip: String, hostname: String, credential: CredentialRecord) -> Self {
-        let cred_label = if credential.domain.is_empty() || credential.domain == "." {
-            format!(".\\{}", credential.username)
-        } else {
-            format!("{}\\{}", credential.domain, credential.username)
-        };
+        let cred_label = crate::state::cred_label(&credential);
         Self {
             id,
             open: true,
