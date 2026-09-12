@@ -60,6 +60,7 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | SMB2 Negotiate (dialects 2.02, 2.10) | ✅ | unit |
 | Session Setup NTLMSSP NTLMv2 | ✅ | live Samba |
 | **GUEST/NULL session downgrade detection** | ✅ | post-fix de `0xC0000022` mystérieux |
+| **Anonymous (null session) + guest login** | ✅ | `connect_anonymous` (AUTHENTICATE vide, IS_NULL accepté) + `connect_guest` (user sans secret, IS_GUEST accepté) ; dispatch par forme du credential dans `connect_session` / `SmbClient::connect` ; live Samba (anonymous_samba) + parité Impacket |
 | Tree Connect / Tree Disconnect | ✅ | live |
 | Diagnostic actionnable sur tree_connect failures | ✅ | unit |
 | Pipe Open/Transceive/Write/Close | ✅ | live |

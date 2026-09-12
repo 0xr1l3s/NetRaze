@@ -23,16 +23,27 @@ use super::connection::SmbCredential;
 use super::smb2::{PipeHandle, Smb2Session};
 
 /// Open a fresh SMB2 session to `target` using whichever auth path
-/// `cred` provides — pass-the-hash if `nt_hash` is set, otherwise the
-/// password-derived hash. Used by every `*_rpc` orchestrator
-/// (`info_rpc`, `shares_rpc`, `users_rpc`, `dump_rpc`, `exec_rpc`) to
-/// avoid copy-pasting the same 6-line dispatch.
+/// `cred` provides:
+///
+/// - empty username → **anonymous** null session
+///   ([`Smb2Session::connect_anonymous`])
+/// - username without secret (no hash, no password) → **guest**
+///   ([`Smb2Session::connect_guest`])
+/// - `nt_hash` set → pass-the-hash; otherwise password-derived hash
+///
+/// Used by every `*_rpc` orchestrator (`info_rpc`, `shares_rpc`,
+/// `users_rpc`, `dump_rpc`, `exec_rpc`) to avoid copy-pasting the same
+/// 6-line dispatch.
 ///
 /// `target` may be `host`, `host:port`, or `[ipv6]:port` — same shapes
 /// `Smb2Session::connect` accepts. Returns the session ready for
 /// `tree_connect("IPC$")` plus any subsequent pipe opens.
 pub fn connect_session(target: &str, cred: &SmbCredential) -> Result<Smb2Session, String> {
-    if let Some(hash) = cred.nt_hash {
+    if cred.username.is_empty() {
+        Smb2Session::connect_anonymous(target)
+    } else if cred.nt_hash.is_none() && cred.password.is_empty() {
+        Smb2Session::connect_guest(target, &cred.username, &cred.domain)
+    } else if let Some(hash) = cred.nt_hash {
         Smb2Session::connect(target, &hash, &cred.username, &cred.domain)
     } else {
         Smb2Session::connect_with_password(target, &cred.username, &cred.domain, &cred.password)
@@ -265,6 +276,17 @@ pub async fn bind_interface_over_smb(
         .await
         .map_err(|e| format!("spawn_blocking(pipe_open): {e}"))??;
         Ok(Arc::new(pipe))
+    }
+
+    // ── Null sessions: no key material exists to seal an NTLMSSP AUTH3
+    // with, so the authenticated primary is impossible — go straight to
+    // the unauthenticated bind. Server policy decides what it may reach
+    // (guest-ok pipes, share enumeration on RestrictAnonymous = 0 hosts).
+    if cred.username.is_empty() {
+        let transport = open_pipe(&session, ipc_tree_id, pipe_name).await?;
+        return RpcChannel::bind(transport, interface, version)
+            .await
+            .map_err(|e| format!("RpcChannel::bind({pipe_name}, anonymous): {e}"));
     }
 
     // ── Primary: NTLMSSP PKT_PRIVACY bind.

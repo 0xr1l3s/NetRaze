@@ -251,6 +251,35 @@ pub fn build_authenticate(
     (msg, random_session_key)
 }
 
+/// Build an anonymous (null-session) NTLMSSP Authenticate message.
+///
+/// MS-NLMP anonymous authentication: every security field is empty and the
+/// UserName is empty — the server completes session setup and flags the
+/// session with `SMB2_SESSION_FLAG_IS_NULL`. No key material exists, so
+/// the flags drop everything key-dependent (KEY_EXCH, SEAL/SIGN,
+/// ALWAYS_SIGN, 128, 56): requesting key exchange with an empty encrypted
+/// session key makes servers that honor KEY_EXCH derive nonsense keys.
+pub fn build_anonymous_authenticate() -> Vec<u8> {
+    const ANON_FLAGS: u32 = NTLMSSP_NEGOTIATE_EXTENDED_SS
+        | NTLMSSP_NEGOTIATE_NTLM
+        | NTLMSSP_REQUEST_TARGET
+        | NTLMSSP_NEGOTIATE_UNICODE;
+
+    // All six fields (LM, NT, Domain, User, Workstation, SessionKey) are
+    // empty and share offset 72 — the payload is just the version trailer.
+    let payload_offset = 72u32;
+    let mut msg = Vec::with_capacity(payload_offset as usize);
+    msg.extend_from_slice(b"NTLMSSP\0");
+    msg.extend_from_slice(&3u32.to_le_bytes());
+    for _ in 0..6 {
+        write_fields(&mut msg, 0, payload_offset);
+    }
+    msg.extend_from_slice(&ANON_FLAGS.to_le_bytes());
+    // Version: 10.0, build 0, NTLM revision 15 — same as the authed path.
+    msg.extend_from_slice(&[10, 0, 0x00, 0x00, 0, 0, 0, 0x0f]);
+    msg
+}
+
 // ── SPNEGO wrappers ──
 
 /// Wrap NTLMSSP in SPNEGO NegTokenInit (first Session Setup).
@@ -347,4 +376,46 @@ fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
     rand::thread_rng().fill_bytes(&mut buf);
     buf
+}
+
+#[cfg(test)]
+mod anonymous_tests {
+    use super::*;
+
+    /// The null-session AUTHENTICATE: every security field empty, all
+    /// six field headers pointing at the same payload offset, and flags
+    /// free of everything key-dependent (KEY_EXCH above all — an empty
+    /// encrypted session key plus KEY_EXCH makes servers derive garbage
+    /// keys).
+    #[test]
+    fn anonymous_authenticate_has_empty_fields_and_no_key_exch() {
+        let msg = build_anonymous_authenticate();
+
+        assert_eq!(&msg[..8], b"NTLMSSP\0");
+        assert_eq!(u32::from_le_bytes(msg[8..12].try_into().unwrap()), 3);
+
+        // Six field headers (Len, MaxLen, Offset) starting at 12 — every
+        // one empty, all at payload offset 72.
+        for i in 0..6 {
+            let base = 12 + i * 8;
+            let len = u16::from_le_bytes(msg[base..base + 2].try_into().unwrap());
+            let offset = u32::from_le_bytes(msg[base + 4..base + 8].try_into().unwrap());
+            assert_eq!(len, 0, "field {i} must be empty");
+            assert_eq!(offset, 72);
+        }
+
+        // Flags at offset 60 (8 sig + 4 type + 6*8 field headers).
+        let flags = u32::from_le_bytes(msg[60..64].try_into().unwrap());
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_KEY_EXCH, 0, "no KEY_EXCH");
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_SEAL, 0, "no SEAL");
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_SIGN, 0, "no SIGN");
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_ALWAYS_SIGN, 0, "no ALWAYS_SIGN");
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_128, 0, "no 128");
+        assert_eq!(flags & NTLMSSP_NEGOTIATE_56, 0, "no 56");
+        assert_ne!(flags & NTLMSSP_NEGOTIATE_UNICODE, 0);
+
+        // Nothing but the version trailer past the flags: no payload.
+        assert_eq!(msg.len(), 72);
+        assert_eq!(&msg[64..72], &[10, 0, 0x00, 0x00, 0, 0, 0, 0x0f]);
+    }
 }

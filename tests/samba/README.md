@@ -19,7 +19,11 @@ in CI.
 | `smb.conf` | Pinned share inventory. Share names and `comment =` values are load-bearing — Rust tests assert on them. |
 
 The container provisions a single user, `alice` / `wonderland`, in the
-`NETRAZE` workgroup. These credentials are test-only and published here
+`NETRAZE` workgroup. Wrong passwords map onto the guest account
+(`map to guest = Bad Password` — mirroring Windows boxes with the guest
+account enabled): the client's strict path rejects the resulting
+GUEST-flagged session, which is how the bad-password tests assert failure.
+These credentials are test-only and published here
 openly — **do not reuse them anywhere real**.
 
 ### Share inventory (matches assertions in the Rust tests)
@@ -69,6 +73,7 @@ races on the passdb lock in Samba 4.x.
 | `browser_ops_samba` | `browser_rpc` file ops: directory lifecycle, upload/download round-trip (byte fidelity, non-ASCII), listing order, negative paths. Also the env-gated `NETRAZE_LIVE_*` share-root smoke against a live Windows host |
 | `exec_samba` | `exec_rpc` (smbexec) wire smoke: svcctl bind succeeds, Samba's ROpenSCManagerW refusal surfaces as a clean error — no panic, no poll loop |
 | `enum_av_samba` | `enum_av` boundary behaviour: SCM refusal surfaces readably, IPC$ pipe-listing refusal skips silently, missing credential is an error |
+| `anonymous_samba` | Anonymous (null session) + guest access: `connect_anonymous` / `connect_guest` session setup, guest-ok share browsing, share-name enumeration, alice-only shares stay refused, strict GUEST-downgrade rejection for secret-carrying credentials |
 
 Known Samba limits pinned by these suites (identical behaviour confirmed
 against Impacket, so they're server policy — not stack bugs):
@@ -79,6 +84,11 @@ against Impacket, so they're server policy — not stack bugs):
   the `enum_av` pipe-detection phase exercises its silent-skip fallback
   here. Windows serves pipe listings; that happy path is validated against
   live Windows hosts.
+- Null sessions see every share **name** (`ADMIN$`, `public`, `private`,
+  `IPC$`) via `NetrShareEnum` — access is enforced at tree_connect, not at
+  listing (identical to Impacket's null-session `listShares`). This
+  mirrors Windows with `RestrictAnonymous = 0`; hardened hosts refuse the
+  enumeration instead.
 
 Not covered here:
 - SMB signing — implemented for dialects 2.0.2/2.1 (HMAC-SHA256 over the
