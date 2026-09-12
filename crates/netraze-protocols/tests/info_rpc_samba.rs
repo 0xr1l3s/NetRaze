@@ -137,6 +137,9 @@ async fn info_rpc_rejects_bad_password() {
         );
     }
 
+    // Harness maps bad passwords to guest — the strict path rejects the
+    // GUEST downgrade, so this still surfaces as an error (not a silent
+    // guest session).
     let bad_cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, "definitely-not-the-password");
     let res = fetch_info(&samba_addr(), &bad_cred).await;
     assert!(

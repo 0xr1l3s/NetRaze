@@ -123,8 +123,14 @@ fn negotiate_sessionsetup_treeconnect_to_ipc() {
     assert_ne!(ipc, 0, "tree_id for IPC$ must be non-zero");
 }
 
-/// Wrong password must be rejected by Samba — verifies our negative-path
-/// error handling doesn't silently accept garbage credentials.
+/// Wrong password must be rejected — verifies our negative-path error
+/// handling doesn't silently accept garbage credentials.
+///
+/// The harness maps bad passwords to guest (`map to guest = Bad Password`),
+/// so Samba completes session setup with `SMB2_SESSION_FLAG_IS_GUEST`.
+/// The strict path must reject that downgrade — a secret-carrying
+/// credential that lands on the guest account is a failed login, never a
+/// silent guest session.
 #[test]
 #[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
 fn bad_password_is_rejected() {
@@ -140,10 +146,13 @@ fn bad_password_is_rejected() {
         TEST_DOMAIN,
         "definitely-not-the-password",
     );
-    assert!(
-        res.is_err(),
-        "Samba accepted a bogus password — NTLMv2 path is broken"
-    );
+    match res {
+        Err(e) => assert!(
+            e.contains("downgraded to GUEST"),
+            "expected the GUEST-downgrade rejection, got: {e}"
+        ),
+        Ok(_) => panic!("Samba accepted a bogus password — NTLMv2 path is broken"),
+    }
 }
 
 // ─── Phase 3: FSCTL_PIPE_TRANSCEIVE end-to-end against Samba ────────────

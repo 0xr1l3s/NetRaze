@@ -1,9 +1,5 @@
-/// Error string returned by non-Windows stubs for features that haven't been
-/// ported to the pure-Rust SMB2 / DCE-RPC stack yet.
-pub(crate) const NOT_PORTED: &str =
-    "SMB backend not yet ported to this platform — see docs/protocol-stack-plan.md";
-
 // Portable modules — pure-Rust, compile on every platform.
+pub mod connection;
 pub mod crypto;
 pub mod fingerprint;
 pub mod hive;
@@ -12,17 +8,6 @@ pub mod ntlm;
 pub mod rpc;
 pub mod sam;
 pub mod smb2;
-
-// Platform-gated module. The Windows `connection.rs` carries the legacy WNet
-// IPC$ mount used only for anonymous connects in `SmbClient::connect`; the
-// Linux stub fails those with `NOT_PORTED` (out of scope for the portage
-// plan — every credential-driven path runs on the pure-Rust stack on every
-// platform).
-#[cfg(windows)]
-pub mod connection;
-#[cfg(not(windows))]
-#[path = "stubs/connection.rs"]
-pub mod connection;
 
 // Phase D — portable share file browser: raw SMB2 file operations (list /
 // upload / download / mkdir / delete) on the pure-Rust stack. Single
@@ -149,52 +134,64 @@ impl SmbClient {
 
     /// Connect to the target via the pure-Rust SMB2 + NTLMv2 stack.
     ///
-    /// Both password and pass-the-hash credentials use `smb2::Smb2Session`
-    /// — identical behaviour on every OS. (The legacy WNet IPC$ mount path
-    /// remains only for anonymous connects on Windows; on Linux it is a
-    /// NOT_PORTED stub, which used to make every password `Login As` fail
-    /// there even though the credential was valid.)
+    /// The auth mode follows the credential shape: pass-the-hash and
+    /// password credentials authenticate strictly (a GUEST/NULL downgrade
+    /// is an error); a username without a secret maps to guest access; no
+    /// username (or no credential at all) opens an anonymous null session.
     pub async fn connect(&mut self) -> Result<(), String> {
         let target = self.target.clone();
 
-        if let Some(cred) = self.credential.clone() {
-            let user = cred.username.clone();
-            let domain = cred.domain.clone();
+        // Anonymous when no credential (or an empty-username credential)
+        // was configured — the null session rides the pure-Rust stack on
+        // every platform.
+        let anonymous = self
+            .credential
+            .as_ref()
+            .map(|cred| cred.username.is_empty())
+            .unwrap_or(true);
+        if anonymous {
             let tgt = target.clone();
-
-            let session = match cred.nt_hash {
-                Some(hash) => tokio::task::spawn_blocking(move || {
-                    smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
-                })
-                .await
-                .map_err(|e| format!("spawn_blocking failed: {e}"))??,
-                None => {
-                    let password = cred.password.clone();
-                    tokio::task::spawn_blocking(move || {
-                        smb2::Smb2Session::connect_with_password(&tgt, &user, &domain, &password)
-                    })
+            let session =
+                tokio::task::spawn_blocking(move || smb2::Smb2Session::connect_anonymous(&tgt))
                     .await
-                    .map_err(|e| format!("spawn_blocking failed: {e}"))??
-                }
-            };
-
+                    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
             self.raw_session = Some(session);
             self.connected = true;
             return Ok(());
         }
 
-        // Anonymous connect: legacy WNet path (Windows only).
-        let result = tokio::task::spawn_blocking(move || connection::connect_ipc(&target, None))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+        let cred = self.credential.clone().expect("checked anonymous above");
+        let user = cred.username.clone();
+        let domain = cred.domain.clone();
+        let tgt = target.clone();
 
-        match result {
-            Ok(()) => {
-                self.connected = true;
-                Ok(())
+        let session = match cred.nt_hash {
+            Some(hash) => tokio::task::spawn_blocking(move || {
+                smb2::Smb2Session::connect(&tgt, &hash, &user, &domain)
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))??,
+            None if cred.password.is_empty() => {
+                // Username without secret — guest access.
+                tokio::task::spawn_blocking(move || {
+                    smb2::Smb2Session::connect_guest(&tgt, &user, &domain)
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))??
             }
-            Err(e) => Err(e),
-        }
+            None => {
+                let password = cred.password.clone();
+                tokio::task::spawn_blocking(move || {
+                    smb2::Smb2Session::connect_with_password(&tgt, &user, &domain, &password)
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))??
+            }
+        };
+
+        self.raw_session = Some(session);
+        self.connected = true;
+        Ok(())
     }
 
     /// Disconnect.
@@ -204,59 +201,46 @@ impl SmbClient {
                 session.logoff();
             })
             .await;
-            self.connected = false;
-        } else if self.connected {
-            // Legacy anonymous WNet session (Windows only).
-            let target = self.target.clone();
-            let _ = tokio::task::spawn_blocking(move || connection::disconnect_ipc(&target)).await;
-            self.connected = false;
         }
+        self.connected = false;
     }
 
-    /// Enumerate shares on the target via SRVSVC `NetrShareEnum`. Requires
-    /// authenticated credentials — Microsoft's DCE/RPC over named pipes
-    /// always runs its own NTLMSSP bind regardless of the SMB session
-    /// state, so an unconfigured `SmbClient` would have nothing to seal
-    /// the request with.
+    /// The credential to hand to the `*_rpc` orchestrators. Falls back to
+    /// an anonymous (empty-username) credential when none was configured —
+    /// `connect_session` dispatches on the shape, so "no user provided"
+    /// means a null session, matching the `connect` behaviour.
+    fn cred_or_anonymous(&self) -> SmbCredential {
+        self.credential
+            .clone()
+            .unwrap_or_else(|| SmbCredential::new("", "", ""))
+    }
+
+    /// Enumerate shares on the target via SRVSVC `NetrShareEnum`. With a
+    /// real credential the DCE/RPC bind is sealed with NTLMSSP; with no
+    /// user provided it falls back to an anonymous bind — whether the
+    /// server answers that is its `RestrictAnonymous` policy.
     pub async fn enum_shares(&self) -> Result<Vec<ShareInfo>, String> {
-        let cred = self
-            .credential
-            .as_ref()
-            .ok_or("enum_shares requires credentials (SmbClient::with_credential)")?;
-        shares::enum_shares(&self.target, cred).await
+        shares::enum_shares(&self.target, &self.cred_or_anonymous()).await
     }
 
     /// Enumerate shares on the target with per-share read/write access
-    /// classification. Same authentication requirement as
+    /// classification. Same authentication behaviour as
     /// [`SmbClient::enum_shares`].
     pub async fn enum_shares_with_access(&self) -> Result<Vec<ShareInfo>, String> {
-        let cred = self
-            .credential
-            .as_ref()
-            .ok_or("enum_shares_with_access requires credentials (SmbClient::with_credential)")?;
-        shares::enum_shares_with_access(&self.target, cred).await
+        shares::enum_shares_with_access(&self.target, &self.cred_or_anonymous()).await
     }
 
     /// Get server information via SRVSVC `NetrServerGetInfo` (opnum 21).
-    /// Requires authenticated credentials — Microsoft DCE/RPC over named
-    /// pipes does its own NTLMSSP bind regardless of the SMB session
-    /// state, so an unconfigured `SmbClient` would have nothing to seal
-    /// the request with.
+    /// Same authentication behaviour as [`SmbClient::enum_shares`] —
+    /// anonymous callers get whatever the server's policy allows.
     pub async fn server_info(&self) -> Result<ServerInfo, String> {
-        let cred = self
-            .credential
-            .as_ref()
-            .ok_or("server_info requires credentials (SmbClient::with_credential)")?;
-        info::get_server_info(&self.target, cred).await
+        info::get_server_info(&self.target, &self.cred_or_anonymous()).await
     }
 
-    /// Enumerate users (requires admin).
+    /// Enumerate users (requires an admin credential — anonymous/guest
+    /// callers get the server's refusal as a readable error).
     pub async fn enum_users(&self) -> Result<Vec<UserInfo>, String> {
-        let cred = self
-            .credential
-            .as_ref()
-            .ok_or("enum_users requires credentials (SmbClient::with_credential)")?;
-        users::enum_users(&self.target, cred).await
+        users::enum_users(&self.target, &self.cred_or_anonymous()).await
     }
 
     /// Check if current credentials grant admin access.
@@ -268,8 +252,9 @@ impl SmbClient {
             return session.check_admin(&target);
         }
         // Password / hash path: open a fresh session and probe ADMIN$.
-        // Requires credentials — without them there's nothing to bind
-        // with, so report `false` (matches the historical contract).
+        // Anonymous / guest credentials can never open ADMIN$ — but probe
+        // anyway so the answer reflects the server, not a client-side
+        // shortcut (`false` for a credential-less client stays).
         let Some(cred) = self.credential.as_ref() else {
             return false;
         };

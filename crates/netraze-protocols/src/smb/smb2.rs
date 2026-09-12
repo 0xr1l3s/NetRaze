@@ -157,6 +157,52 @@ pub struct Smb2Session {
     signing_required: bool,
 }
 
+/// How a session intends to authenticate — drives both the round-2
+/// AUTHENTICATE variant and the GUEST/NULL session-flag policy after
+/// setup completes.
+enum SessionAuth {
+    /// Full NTLMv2 (password or pass-the-hash). `allow_guest` tolerates the
+    /// server mapping us onto the guest account instead of rejecting the
+    /// session — set only by [`Smb2Session::connect_guest`], where the
+    /// caller explicitly asked for guest-grade access.
+    Ntlm {
+        nt_hash: [u8; 16],
+        username: String,
+        domain: String,
+        allow_guest: bool,
+    },
+    /// Null session — empty AUTHENTICATE, no session key. See
+    /// [`Smb2Session::connect_anonymous`].
+    Anonymous,
+}
+
+impl SessionAuth {
+    fn ntlm(nt_hash: [u8; 16], username: &str, domain: &str, allow_guest: bool) -> Self {
+        Self::Ntlm {
+            nt_hash,
+            username: username.to_owned(),
+            domain: domain.to_owned(),
+            allow_guest,
+        }
+    }
+
+    /// Display helpers for the strict-downgrade error strings — only ever
+    /// read on the `Ntlm` variant (the anonymous variant never rejects).
+    fn username(&self) -> &str {
+        match self {
+            Self::Ntlm { username, .. } => username,
+            Self::Anonymous => "",
+        }
+    }
+
+    fn domain(&self) -> &str {
+        match self {
+            Self::Ntlm { domain, .. } => domain,
+            Self::Anonymous => "",
+        }
+    }
+}
+
 impl Smb2Session {
     /// Connect to `target` and authenticate using NT hash (pass-the-hash).
     ///
@@ -171,9 +217,69 @@ impl Smb2Session {
         username: &str,
         domain: &str,
     ) -> Result<Self, String> {
-        // One shared host:port normaliser (see `targets::with_default_port`)
-        // — bare hosts get 445, `host:port` / `[ipv6]:port` are kept verbatim,
-        // bare IPv6 literals get bracketed.
+        let mut session = Self::handshake_transport(target)?;
+        session.session_setup(&SessionAuth::ntlm(
+            *nt_hash, username, domain, /* allow_guest: */ false,
+        ))?;
+        Ok(session)
+    }
+
+    /// Connect using a password (computes NT hash via MD4).
+    pub fn connect_with_password(
+        target: &str,
+        username: &str,
+        domain: &str,
+        password: &str,
+    ) -> Result<Self, String> {
+        let hash = super::ntlm::nt_hash_from_password(password)?;
+        Self::connect(target, &hash, username, domain)
+    }
+
+    /// Connect as a named user **without a secret** — guest access.
+    ///
+    /// The client performs a normal NTLMv2 exchange with the NT hash of the
+    /// empty password. Two outcomes, both acceptable here:
+    ///
+    /// - the account really has a blank password → genuine login;
+    /// - the server's `map to guest` policy (Samba) or guest fallback
+    ///   (Windows) completes session setup with
+    ///   `SMB2_SESSION_FLAG_IS_GUEST` — accepted instead of rejected,
+    ///   because the caller explicitly asked for guest-grade access.
+    ///   The NTLMv2 session key is valid for guest sessions, so tree
+    ///   connects to guest-ok shares and sealed RPC work as usual.
+    pub fn connect_guest(target: &str, username: &str, domain: &str) -> Result<Self, String> {
+        let hash = super::ntlm::nt_hash_from_password("")?;
+        let mut session = Self::handshake_transport(target)?;
+        session.session_setup(&SessionAuth::ntlm(
+            hash, username, domain, /* allow_guest: */ true,
+        ))?;
+        Ok(session)
+    }
+
+    /// Connect with a null session (anonymous).
+    ///
+    /// Round 1 (NTLMSSP negotiate) is unchanged; round 2 carries an
+    /// AUTHENTICATE with every field empty, which the server flags with
+    /// `SMB2_SESSION_FLAG_IS_NULL`. No session key exists — the session
+    /// cannot sign or seal, so `session_key` stays `None` and RPC binds
+    /// must ride the unauthenticated DCE path (see
+    /// `rpc::bind_interface_over_smb`). What a null session can reach is
+    /// purely server policy: guest-ok shares, and — on hosts with
+    /// `RestrictAnonymous = 0` — share enumeration.
+    pub fn connect_anonymous(target: &str) -> Result<Self, String> {
+        let mut session = Self::handshake_transport(target)?;
+        session.session_setup(&SessionAuth::Anonymous)?;
+        Ok(session)
+    }
+
+    /// TCP connect + negotiate — the transport half every `connect_*`
+    /// variant shares.
+    ///
+    /// `target` may be a bare host (`dc01.corp.lan`, `10.0.0.5` — port 445
+    /// is assumed), a `host:port` string (used verbatim; required by the
+    /// Samba harness on 1445), or a bracketed IPv6 literal. See
+    /// `targets::with_default_port`.
+    fn handshake_transport(target: &str) -> Result<Self, String> {
         let addr = crate::targets::with_default_port(target, 445);
         let sock_addr = addr
             .to_socket_addrs()
@@ -193,22 +299,8 @@ impl Smb2Session {
             session_key: None,
             signing_required: false,
         };
-
         session.negotiate()?;
-        session.session_setup(nt_hash, username, domain)?;
-
         Ok(session)
-    }
-
-    /// Connect using a password (computes NT hash via MD4).
-    pub fn connect_with_password(
-        target: &str,
-        username: &str,
-        domain: &str,
-        password: &str,
-    ) -> Result<Self, String> {
-        let hash = super::ntlm::nt_hash_from_password(password)?;
-        Self::connect(target, &hash, username, domain)
     }
 
     /// Open → Read all → Close a file on a share. Fresh CREATE on every call —
@@ -991,12 +1083,7 @@ impl Smb2Session {
         Ok(())
     }
 
-    fn session_setup(
-        &mut self,
-        nt_hash: &[u8; 16],
-        username: &str,
-        domain: &str,
-    ) -> Result<(), String> {
+    fn session_setup(&mut self, auth: &SessionAuth) -> Result<(), String> {
         // === Round 1: NTLMSSP Negotiate ===
         let negotiate_msg = ntlm::build_negotiate();
         let spnego1 = ntlm::wrap_spnego_init(&negotiate_msg);
@@ -1034,11 +1121,33 @@ impl Smb2Session {
             ntlm::extract_ntlmssp(spnego_data).ok_or("No NTLMSSP in server challenge response")?;
         let challenge = ntlm::parse_challenge(challenge_data)?;
 
-        // === Round 2: NTLMv2 Authenticate ===
-        let auth = ntlm::compute_ntlmv2(nt_hash, username, domain, &challenge)?;
-        let (auth_msg, exported_session_key) =
-            ntlm::build_authenticate(&auth, username, domain, challenge.negotiate_flags);
-        let spnego2 = ntlm::wrap_spnego_resp(&auth_msg);
+        // === Round 2: NTLMv2 Authenticate (or the anonymous variant) ===
+        let (spnego2, exported_session_key) = match auth {
+            SessionAuth::Ntlm {
+                nt_hash,
+                username,
+                domain,
+                ..
+            } => {
+                let ntlm_auth = ntlm::compute_ntlmv2(nt_hash, username, domain, &challenge)?;
+                let (auth_msg, exported_session_key) = ntlm::build_authenticate(
+                    &ntlm_auth,
+                    username,
+                    domain,
+                    challenge.negotiate_flags,
+                );
+                (
+                    ntlm::wrap_spnego_resp(&auth_msg),
+                    Some(exported_session_key),
+                )
+            }
+            SessionAuth::Anonymous => {
+                // Null session — every AUTHENTICATE field is empty and no
+                // session key exists (see `build_anonymous_authenticate`).
+                let auth_msg = ntlm::build_anonymous_authenticate();
+                (ntlm::wrap_spnego_resp(&auth_msg), None)
+            }
+        };
 
         let hdr2 = self.build_header(SMB2_SESSION_SETUP, 0);
         let body2 = self.build_session_setup_body(&spnego2);
@@ -1073,29 +1182,47 @@ impl Smb2Session {
                     .try_into()
                     .unwrap(),
             );
-            if session_flags & 0x0001 != 0 {
-                self.session_id = 0;
-                return Err(format!(
-                    "auth downgraded to GUEST for {domain}\\{username} \
-                     — credentials are invalid (wrong password / wrong domain) \
-                     or the server's account policy refused them. \
-                     IPC$ and every authenticated share will be denied."
-                ));
-            }
-            if session_flags & 0x0002 != 0 {
-                self.session_id = 0;
-                return Err(format!(
-                    "auth downgraded to ANONYMOUS for {domain}\\{username} \
-                     — server treated us as a null session. \
-                     IPC$ tree_connect will be denied on any hardened host."
-                ));
+            let guest = session_flags & 0x0001 != 0;
+            let null_session = session_flags & 0x0002 != 0;
+
+            // Guest-intent logins (username without a secret) and null
+            // sessions expect the downgrade — it IS the requested access
+            // level. Only secret-carrying credentials treat it as failure.
+            let downgrade_expected = match auth {
+                SessionAuth::Ntlm { allow_guest, .. } => *allow_guest,
+                SessionAuth::Anonymous => true,
+            };
+
+            if !downgrade_expected {
+                if guest {
+                    self.session_id = 0;
+                    return Err(format!(
+                        "auth downgraded to GUEST for {}\\{} \
+                         — credentials are invalid (wrong password / wrong domain) \
+                         or the server's account policy refused them. \
+                         IPC$ and every authenticated share will be denied.",
+                        auth.domain(),
+                        auth.username()
+                    ));
+                }
+                if null_session {
+                    self.session_id = 0;
+                    return Err(format!(
+                        "auth downgraded to ANONYMOUS for {}\\{} \
+                         — server treated us as a null session. \
+                         IPC$ tree_connect will be denied on any hardened host.",
+                        auth.domain(),
+                        auth.username()
+                    ));
+                }
             }
         }
 
         // Stash the ExportedSessionKey now that the server has confirmed the
         // AUTHENTICATE message. `RpcChannel::bind_authenticated` will read it
         // back via `exported_session_key()` to build its NTLMSSP authenticator.
-        self.session_key = Some(exported_session_key);
+        // Null sessions have none — signing/sealing stay off.
+        self.session_key = exported_session_key;
 
         Ok(())
     }
