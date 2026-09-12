@@ -1,9 +1,9 @@
 # NetRaze
 
-[![CI](https://img.shields.io/badge/CI-Linux%20%2B%20Windows-brightgreen)](.github/workflows/ci.yml)
+[![Release](https://github.com/Ah4ds/NetRaze/actions/workflows/release.yml/badge.svg)](https://github.com/Ah4ds/NetRaze/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue)](#license)
 [![Rust Edition](https://img.shields.io/badge/rust-2024%20edition%20%28MSRV%201.85%29-orange)](rust-toolchain.toml)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20port%20in%20progress-yellow)](#current-status)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20SMB%20stack%20cross--platform-yellow)](#current-status)
 
 **NetRaze** is an offensive network-execution toolkit, rewritten from scratch
 in pure Rust. It is the spiritual successor to the NetExec / CrackMapExec
@@ -66,36 +66,41 @@ workspace-per-engagement — and rebases it on:
 
 ## Current status
 
-NetRaze is **alpha**. The core engineering foundations are solid, but the
-protocol coverage is narrow — and capability by capability, the
-**attacker-side OS matters**: a lot of the post-exploitation modules are
-still Windows-only native-API implementations today, with Linux stubs
-that return `NOT_PORTED` until the pure-Rust replacement lands.
+NetRaze is **alpha**. The SMB/DCE-RPC post-exploitation stack is fully
+ported to pure Rust and behaves identically from Linux and Windows
+attackers — the cross-platform portage (Phases 1–7 of the portage plan)
+is complete, and the `windows` crate is no longer a dependency of any
+protocol crate.
 
 ### SMB capability matrix
 
-Rows are capabilities; columns are the attacker OS you're running NetRaze
-from. "Windows-native" means the code uses the `windows` crate (SCM,
-WNet, NetAPI, Registry) — very much functional, just not portable yet.
-"Pure-Rust" means it talks SMB2/DCE-RPC directly over TCP and works from
-any OS.
+Every capability below is **pure Rust** — SMB2/DCE-RPC over raw TCP —
+and works from any attacker OS.
 
-| Capability | Windows attacker | Linux attacker | Implementation |
-|---|---|---|---|
-| SMB2 Negotiate + NTLMv2 Session Setup + Tree Connect | Works | Works | Pure-Rust (`smb2`, `ntlm`) |
-| Host fingerprinting | Works | Stub | Windows-native |
-| Share enumeration | Works | Stub | Windows-native (WNet / NetAPI) |
-| User enumeration | Works | Stub | Windows-native (SAMR via local APIs) |
-| SAM / LSA secret dump | Works | Stub | Windows-native (RemoteRegistry + hive parse) |
-| AV product enumeration | Works | Stub | Windows-native (WMI local) |
-| Remote command execution (smbexec via SCM) | Works | Stub | Windows-native (Service Control Manager) |
-| Pass-the-hash authentication | Works | Works | Pure-Rust NTLMv2 |
-| Browser / file transfer on shares | Works | Stub | Windows-native (WNet) |
+| Capability | Implementation |
+|---|---|
+| SMB2 Negotiate + NTLMv2 Session Setup + Tree Connect | `smb2`, `ntlm` |
+| Anonymous (null session) access | `connect_anonymous` — empty AUTHENTICATE, IS_NULL accepted |
+| Guest access (username, no secret) | `connect_guest` — rides the server's map-to-guest policy |
+| Pass-the-hash authentication | NTLMv2 with a supplied NT hash |
+| SMB signing (HMAC-SHA256, dialects 2.0.2/2.1) | applied in `smb2::send_packet` when the server demands it |
+| Host fingerprinting | `fingerprint` |
+| Share enumeration (SRVSVC `NetrShareEnum`) | `shares_rpc` |
+| User enumeration (SAMR) | `users_rpc` |
+| Server info (SRVSVC `NetrServerGetInfo`) | `info_rpc` |
+| SAM / LSA secret dump (WINREG + hive parse) | `dump_rpc`, `sam`, `hive` |
+| AV product enumeration (SCMR + IPC$ pipe listing) | `enum_av` |
+| Remote command execution (smbexec via SVCCTL) | `exec_rpc` |
+| Browser / file transfer on shares (SMB2 file ops) | `browser_rpc` |
+| DCE/RPC over named pipes (`FSCTL_PIPE_TRANSCEIVE`) | `rpc::SmbPipeTransport` |
 
-Pure-Rust cross-platform modules today: `smb2`, `ntlm`, `crypto`, `sam`
-(hive parsing), `hive`, `fingerprint`. The rest is Windows-native with
-Linux stubs — tracked as Phase 2 of the portage plan, which is the next
-major effort.
+Anonymous and guest access is expressed by **credential shape**: an
+empty username means a null session, a username without a secret means
+guest. Secret-carrying credentials stay strict — a wrong password is
+rejected even when the server would downgrade the session to guest.
+Guest and null sessions ride an unauthenticated DCE bind over the SMB
+session (exactly how Impacket drives them), so share and user
+enumeration work in both modes.
 
 ### Other protocols
 
@@ -107,22 +112,20 @@ major effort.
 
 - NDR20 reader/writer with BFS deferred-pointer walker (conformant arrays,
   unique/ref pointers, unions with pointer arms)
-- MS-RPCE PDU framing (Bind, Request, Response, Fault)
+- MS-RPCE PDU framing (Bind, BindAck, Auth3, Request, Response, Fault)
 - NTLMSSP auth verifier including seal/unseal (RC4 + HMAC-MD5 v2)
-- MS-SRVS interface: `NetrShareEnum` request/response validated against
+- Interfaces: SRVSVC, SAMR, WINREG, SCMR — each validated against
   Impacket-generated byte fixtures
 
-### Missing pieces blocking the pure-Rust port
+### What's next
 
-- **`FSCTL_PIPE_TRANSCEIVE`** over SMB2 — this is the single biggest
-  blocker. Once implemented, the 8 Windows-native SMB modules can be
-  rewritten on top of the pure-Rust SMB2 session + the existing DCE/RPC
-  interfaces (SRVSVC for shares, SAMR for users, WKSSVC for info,
-  SVCCTL for exec, …), making Linux a full first-class attacker OS.
-- SMB signing and encryption negotiation against the target.
 - Kerberos / AES-based authentication (only NTLMv2 today).
-- Relay attacks, coercion, ADCS abuse (planned as modules once the
-  DCE/RPC-over-pipe path is unblocked).
+- SMB3 encryption (AES-CCM/GCM) — most targets still accept unencrypted
+  SMB2.
+- LDAP stack (`netraze-ldap`) — AD user/group enumeration,
+  Kerberoast/AS-REP-roast discovery.
+- Relay attacks, coercion (PetitPotam, PrinterBug), ADCS abuse, DCSync
+  (see `docs/protocol-stack-plan.md`).
 
 ## What's inside
 
@@ -137,7 +140,7 @@ logic**. Everything else flows from those two constraints.
 | `netraze-cli` | Thin CLI binary (`clap`). Maps arguments to use-cases. |
 | `netraze-desktop` | `egui`/`eframe` GUI with `egui-snarl` workflow graph and `egui_graphs` network view. |
 | `netraze-protocols` | Wire-level protocol handlers (SMB is the only one significantly implemented). |
-| `netraze-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth, MS-SRVS interface. |
+| `netraze-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth; SRVSVC, SAMR, WINREG, SCMR interfaces. |
 | `netraze-modules` | Post-exploitation modules organised by category (`active_directory`, `credentials`, `reconnaissance`). |
 | `netraze-auth` | Credential types and authentication methods. |
 | `netraze-targets` | Target parsing and normalisation. |
@@ -153,10 +156,19 @@ phased delivery.
 
 ## Installation
 
-No published crates yet. Build from source:
+Prebuilt desktop binaries for Linux and Windows are attached to every
+release (built by the tag-driven
+[`release`](https://github.com/Ah4ds/NetRaze/actions/workflows/release.yml)
+workflow):
 
 ```shell
-git clone https://github.com/0xr1l3s/NetRaze.git
+curl -LO https://github.com/Ah4ds/NetRaze/releases/latest/download/netraze-desktop-linux-x86_64.tar.gz
+```
+
+Or build from source:
+
+```shell
+git clone https://github.com/Ah4ds/NetRaze.git
 cd NetRaze
 cargo build --release
 ```
@@ -212,6 +224,13 @@ interactive workflows today.
 cargo run -p netraze-desktop
 ```
 
+Anonymous and guest access are first-class in the GUI: hosts can be
+listed and browsed with no login at all (null session), credentials can
+be saved without a secret for guest access (badged `GUEST`), and a
+`👤 (anonymous)` entry is always available in the per-host login menu.
+Secret-less credentials can also be imported in bulk through the
+Credential Manager's CSV import.
+
 Backend is `wgpu` by default, which works natively on Linux (Vulkan),
 Windows (DX12), macOS (Metal), and in WSL (via Lavapipe software
 fallback).
@@ -259,23 +278,17 @@ cargo fmt --all                      # format
 ### Per-crate testing
 
 ```shell
-cargo test -p netraze-dcerpc         # NDR / PDU / NTLMSSP / SRVSVC suites
-cargo test -p netraze-protocols      # SMB crypto, NTLM vectors
+cargo test -p netraze-dcerpc         # NDR / PDU / NTLMSSP / interface suites
+cargo test -p netraze-protocols      # SMB crypto, NTLM vectors, anonymous AUTHENTICATE shape
 ```
 
-### CI gate
+### CI / release
 
-`.github/workflows/ci.yml` enforces, on every push and PR:
-
-1. `cargo fmt --all --check` (Linux).
-2. Strict clippy on `netraze-dcerpc` (the new pure-Rust stack has zero
-   warning tolerance); advisory clippy on the rest of the workspace.
-3. `cargo check --workspace --all-targets` on both **Ubuntu** and
-   **Windows**.
-4. Full `cargo test --workspace` on both OS.
-5. An opt-in `samba-integration` job that spins up the pinned Samba
-   container (see below) and runs the live SMB2 smoke tests. Triggered
-   by `workflow_dispatch` or pushes to `main`.
+GitHub Actions ships a single workflow, [`release.yml`](.github/workflows/release.yml):
+pushing a `v*` tag builds `netraze-desktop` on native Linux and Windows
+runners and attaches the binaries to a GitHub Release. Run the fmt /
+clippy / test gates locally before pushing — the strict clippy gate
+(`-D warnings`) applies to `netraze-dcerpc`, the newest pure-Rust stack.
 
 ## Validation methodology
 
@@ -293,11 +306,13 @@ Three independent layers protect the SMB/DCE-RPC stack:
    a test failure with a clear byte-level diff.
 3. **Live Samba integration harness.** `tests/samba/` ships a
    `docker-compose.yml` + `smb.conf` that pin a Samba server with a
-   known share inventory. Rust integration tests in
-   `crates/netraze-protocols/tests/samba_integration.rs` drive SMB2
-   Negotiate + NTLMv2 Session Setup + Tree Connect against the real
-   daemon, proving the wire is not just internally consistent but
-   actually interoperable.
+   known share inventory. Nine integration suites (29 tests) in
+   `crates/netraze-protocols/tests/` drive the full stack against the
+   real daemon — session setup (including anonymous and guest), share
+   and user enumeration, file ops, smbexec, AV probes, SAM dump —
+   proving the wire is not just internally consistent but actually
+   interoperable. Each behaviour change is cross-checked against
+   Impacket against the same harness before it lands.
 
 See [`tests/samba/README.md`](tests/samba/README.md) for how to run the
 integration suite locally.
@@ -308,7 +323,7 @@ integration suite locally.
 |---|---|---|
 | Phase 0 | Workspace hygiene, wgpu backend, CI matrix | Done |
 | Phase 1 | DCE/RPC primitives, NTLMSSP, SMB2 auth, SRVSVC, Samba harness | Done |
-| Phase 2 | SMB2 IOCTL / FSCTL_PIPE_TRANSCEIVE, SMB signing, SAM RemoteOperations, SQLite workspace, CLI execution path | In progress |
+| Phase 2 | SMB2 IOCTL / FSCTL_PIPE_TRANSCEIVE, SMB signing, SAM RemoteOperations, SQLite workspace, CLI execution path | Mostly done — pipe transport, signing and SAM remote ops landed; SQLite workspace and the CLI execution path remain |
 | Phase 3 | Split `netraze-protocols` per protocol, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
 | Phase 4 | Integration test corpus, network fixtures, TUI or machine-friendly API, Kerberos | Planned |
 
@@ -318,9 +333,11 @@ Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
 
 This is an early-stage port. The highest-leverage contributions right now:
 
-- **SMB2 IOCTL support**, unlocking the full DCE/RPC-over-named-pipe
-  path and most of the interesting post-exploitation surface.
-- **SMB signing**, required to talk to hardened targets.
+- **The LDAP stack** (`netraze-ldap`) — unlocks stable AD user/group
+  enumeration and Kerberoast/AS-REP-roast discovery; see
+  `docs/protocol-stack-plan.md` for the planned crate layout.
+- **Kerberos** (`netraze-kerberos`) — AS/TGS exchange, RC4/AES key
+  handling; the next big authentication milestone after NTLMv2.
 - **Per-protocol crates** as NetRaze grows beyond SMB.
 - **Impacket-pinned fixtures** for each new DCE/RPC interface added
   (see `crates/netraze-dcerpc/tests/gen_*.py` for the pattern).

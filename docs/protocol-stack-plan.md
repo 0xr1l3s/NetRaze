@@ -7,9 +7,10 @@ qui ajoute une opération wire-level.
 
 ## Pourquoi ce document existe
 
-NetRaze remplace progressivement les API Windows-natives par une stack
-réseau pure-Rust qui tourne sur tout OS attaquant. Le "comment" est
-documenté dans `migration-roadmap.md` (phases A→D pour SMB).
+NetRaze a remplacé les API Windows-natives par une stack réseau pure-Rust
+qui tourne sur tout OS attaquant — le portage est **terminé** (phases
+1–7 de `migration-roadmap.md`, plus l'accès anonymous/guest). Le "comment"
+est documenté dans `migration-roadmap.md`.
 
 Ce document-ci est **différent** : c'est l'inventaire opérationnel de
 **chaque interface protocol** dont NetRaze a besoin pour couvrir un
@@ -61,6 +62,7 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | Session Setup NTLMSSP NTLMv2 | ✅ | live Samba |
 | **GUEST/NULL session downgrade detection** | ✅ | post-fix de `0xC0000022` mystérieux |
 | **Anonymous (null session) + guest login** | ✅ | `connect_anonymous` (AUTHENTICATE vide, IS_NULL accepté) + `connect_guest` (user sans secret, IS_GUEST accepté) ; dispatch par forme du credential dans `connect_session` / `SmbClient::connect` ; live Samba (anonymous_samba) + parité Impacket |
+| **Bind DCE non authentifié pour guest/null** | ✅ | `bind_interface_over_smb` route les credentials guest/null vers `RpcChannel::bind` (niveau auth NONE, comme Impacket) — l'AUTH3 NTLMSSP dans le pipe avec un user inexistant est fauté `0x5` par Samba à l'appel. Enum shares + users guest vérifiée, parité Impacket byte-pour-byte |
 | Tree Connect / Tree Disconnect | ✅ | live |
 | Diagnostic actionnable sur tree_connect failures | ✅ | unit |
 | Pipe Open/Transceive/Write/Close | ✅ | live |
@@ -234,22 +236,24 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 ## Roadmap d'attaque (ordre opérationnel)
 
 L'ordre **chronologique** dans lequel je recommande d'avancer.
-Chaque ligne débloque les suivantes.
+Les chantiers 1–3 et 8 (file ops SMB2, `exec_rpc`, `browser_rpc`, SMB
+signing) sont **faits** — validés contre le harness Samba (+ live pour
+signing). Reste, chaque ligne débloquant les suivantes :
 
 | # | Chantier | Coût | Débloque |
 |---|---|---|---|
-| 1 | **Phase D.1** — SMB2 file ops (write, delete, query_directory, create_directory) | 4j | smbexec, browser, NTDS dump path |
-| 2 | **Phase D.3** — `exec_rpc` via SCMR (CreateServiceW + StartServiceW + cleanup) | 4j | Lateral movement complet |
-| 3 | **Phase D.4** — `browser_rpc` (pure SMB2) + audit call sites desktop | 3j | Desktop file browser cross-platform |
+| ~~1~~ | ~~**Phase D.1** — SMB2 file ops~~ | ✅ fait | write/delete/query_directory/create_directory — live Samba (browser_ops) |
+| ~~2~~ | ~~**Phase D.3** — `exec_rpc` via SCMR~~ | ✅ fait | smbexec complet (create/start/stop/delete) — wire-smoke Samba OK |
+| ~~3~~ | ~~**Phase D.4** — `browser_rpc`~~ | ✅ fait | browser cross-platform + suites browser_ops |
 | 4 | **Crate `netraze-ldap`** — BER + LDAPMessage + bind SASL/NTLMSSP + search + paged_results | 5j | enum_users AD stable, enum_computers, enum_groups, find_kerberoastable |
 | 5 | **Crate `netraze-kerberos`** — ASN.1 Kerberos + AS-REQ/REP + TGS-REQ/REP + RC4/AES decrypt | 8j | AS-REProast + Kerberoast |
 | 6 | `dcerpc.lsarpc` — OpenPolicy2 + LookupSids/Names | 3j | Account naming dans LSA dump |
 | 7 | `dcerpc.drsuapi` — DRSBind + DRSGetNCChanges | 10j | **DCSync** = NTDS.dit complet sans toucher disque |
-| 8 | SMB signing HMAC-SHA256 | 4j | Targets avec "require signing" |
+| ~~8~~ | ~~SMB signing HMAC-SHA256~~ | ✅ fait | dialectes 2.0.2/2.1 — vérifié live contre un DC "require signing" |
 | 9 | `netraze-dcom` + `netraze-wmi` | 15j | wmiexec, dcomexec |
 | 10 | Coerced auth modules (PetitPotam/PrinterBug) | 5j | Relay attacks → ADCS abuse |
 
-**Total ~60j (≈3 mois plein temps)** pour un NetRaze qui couvre les use
+**Total ~46j restants** pour un NetRaze qui couvre les use
 cases pentest AD modernes essentiels. Comparé au "porter tout Impacket"
 qui prendrait ≥2 ans pour 80% de code mort.
 

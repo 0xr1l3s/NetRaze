@@ -7,12 +7,12 @@ This file documents two parallel tracks:
 2. **Cross-platform portage plan** — moving the SMB post-exploitation
    modules off Windows-native APIs (SCM / WNet / NetAPI / Registry) onto
    the pure-Rust SMB2 + DCE/RPC stack so Linux becomes a full
-   first-class attacker OS. The "what runs where" axis.
+   first-class attacker OS. The "what runs where" axis. **This track is
+   complete.**
 
-The two tracks progress independently. Code comments in
-`crates/netraze-protocols/src/smb/` reference the portage plan as
-"Phase 1–6"; this file is the authoritative source for what those phases
-mean.
+Code comments in `crates/netraze-protocols/src/smb/` reference the
+portage plan as "Phase 1–7"; this file is the authoritative source for
+what those phases mean.
 
 ---
 
@@ -54,22 +54,23 @@ mean.
 
 ---
 
-# Cross-platform portage plan
+# Cross-platform portage plan (complete)
 
-## Why this plan exists
+## Why this plan existed
 
-NetRaze inherits two implementation strategies for SMB post-exploitation
-features that need to converge:
+NetRaze inherited two implementation strategies for SMB post-exploitation
+features that needed to converge:
 
-| Strategy | What it is | Where it lives | Portability |
-|---|---|---|---|
-| Windows-native | Calls `windows` crate against local Win32 APIs (SCM, WNet, NetAPI, Registry) — ergonomic, fast to implement, but only runs from a Windows attacker. | `crates/netraze-protocols/src/smb/{connection,browser,shares,info,users,dump,enum_av,exec}.rs` | Windows attacker only |
-| Pure-Rust SMB2 + DCE/RPC | Talks SMB2 / NTLMSSP / DCE-RPC over a raw TCP socket — slower to implement (requires reimplementing each MS-SRVS / SAMR / SVCCTL / WKSSVC interface) but works from any OS. | `crates/netraze-protocols/src/smb/{smb2,ntlm,crypto,sam,hive,fingerprint}.rs` and `crates/netraze-dcerpc/` | Any attacker OS |
+| Strategy | What it was | Portability |
+|---|---|---|
+| Windows-native | Calls `windows` crate against local Win32 APIs (SCM, WNet, NetAPI, Registry) — ergonomic, fast to implement, but only runs from a Windows attacker. | Windows attacker only |
+| Pure-Rust SMB2 + DCE/RPC | Talks SMB2 / NTLMSSP / DCE-RPC over a raw TCP socket — slower to implement (requires reimplementing each MS-SRVS / SAMR / SVCCTL / WKSSVC interface) but works from any OS. | Any attacker OS |
 
-The portage plan is the migration path from the first strategy to the
-second. Until it completes, the Linux build provides API-compatible
-stubs that return a `NOT_PORTED` error so the rest of the workspace
-compiles and the Windows path stays usable.
+The portage plan was the migration path from the first strategy to the
+second. It is finished: the Windows-native files and the `smb/stubs/`
+`NOT_PORTED` stubs are deleted, the `windows` crate is no longer a
+dependency of `netraze-protocols`, and a single pure-Rust implementation
+serves every attacker OS.
 
 ## Phase 1 — Pure-Rust SMB2 wire foundation (done)
 
@@ -86,70 +87,65 @@ compiles and the Windows path stays usable.
 - MS-SRVS `NetrShareEnum` validated byte-for-byte against
   Impacket-generated fixtures.
 
-## Phase 3 — `FSCTL_PIPE_TRANSCEIVE` (next, blocking)
+## Phase 3 — `FSCTL_PIPE_TRANSCEIVE` (done)
 
-- Add SMB2 IOCTL to `smb/smb2.rs`.
-- Implement `FSCTL_PIPE_TRANSCEIVE` so DCE/RPC PDUs can ride over an
-  SMB named pipe (`\PIPE\srvsvc`, `\PIPE\samr`, `\PIPE\svcctl`,
-  `\PIPE\wkssvc`).
-- Smoke test: drive a real `NetrShareEnum` against the Samba container
-  end-to-end through this transport.
+- SMB2 IOCTL in `smb/smb2.rs`; `FSCTL_PIPE_TRANSCEIVE` carries DCE/RPC
+  PDUs over SMB named pipes (`\PIPE\srvsvc`, `\PIPE\samr`,
+  `\PIPE\svcctl`, `\PIPE\winreg`) via `rpc::SmbPipeTransport`.
+- Verified end-to-end with a real `NetrShareEnum` against the Samba
+  container through this transport.
 
-This phase is the single biggest unlock: it makes every subsequent
-module portable for free.
+## Phase 4 — Port the read-only enumeration modules (done)
 
-## Phase 4 — Port the read-only enumeration modules
+- `info` — `SRVSVC.NetrServerGetInfo`.
+- `shares` — `SRVSVC.NetrShareEnum` + per-share access classification
+  and ADMIN$ detection.
+- `users` — `SAMR.SamrConnect2` → domain enum → `SamrEnumerateUsersInDomain`.
 
-Replace the Windows-native impl in each of these with a pure-Rust call
-through the new pipe transport:
+## Phase 5 — Port the write-side modules (exec, file transfer) (done)
 
-- `info` — `WKSSVC.NetrWkstaGetInfo` (replace `NetWkstaGetInfo` Win32).
-- `shares` — `SRVSVC.NetrShareEnum` (replace `WNetEnumResource` Win32);
-  encoder/decoder already exist in `netraze-dcerpc`.
-- `users` — `SAMR.SamrEnumerateUsersInDomain` (replace local SAMR
-  ergonomics).
+- `exec` — smbexec via `SVCCTL.RCreateServiceW` + `RStartServiceW` over
+  a remote pipe, with service cleanup.
+- `browser` — SMB2 tree connect on the actual share + `CREATE` / `READ` /
+  `WRITE` / `QUERY_DIRECTORY` / create/delete directory.
 
-These are read-only and the lowest-risk to port first.
+## Phase 6 — Port secret-dumping (dump) (done)
 
-## Phase 5 — Port the write-side modules (exec, file transfer)
+- SAM / LSA secrets via `WINREG.OpenLocalMachine` over RPC + the
+  pure-Rust hive parser in `smb/hive.rs` and `smb/sam.rs`; the SCMR
+  interface auto-starts RemoteRegistry when needed.
+- DPAPI / DCSync / NTDS extraction — still future work (drsuapi), see
+  `protocol-stack-plan.md`.
 
-- `exec` — port smbexec from local SCM to `SVCCTL.RCreateServiceW` +
-  `SVCCTL.RStartServiceW` over a remote pipe. Add atexec
-  (`ATSVC.NetrJobAdd`) and wmiexec (`IWbemServices.ExecMethod` over
-  DCOM) as alternative execution methods.
-- `browser` — port file transfer from `WNetAddConnection2` to SMB2 tree
-  connect on the actual share + `CREATE` / `READ` / `WRITE` /
-  `IOCTL_PIPE_TRANSCEIVE` against the file pipe.
+## Phase 7 — Retire the Windows-native code path (done)
 
-Higher risk because writes can damage the target or leave artifacts.
-Each port needs a Samba-based integration test.
+Every module passes the Samba integration suite on the pure-Rust path;
+the `#[cfg(windows)]` arms, the native files, and the stubs are deleted.
+Linux is strictly equivalent to Windows as an attacker OS.
 
-## Phase 6 — Port secret-dumping (dump)
+## Post-portage follow-ups (done)
 
-- SAM / LSA secrets — port from `RemoteRegistry` + Win32 hive APIs to
-  `WINREG.OpenLocalMachine` over RPC + the existing pure-Rust hive
-  parser in `smb/hive.rs` and `smb/sam.rs`.
-- DPAPI / DCSync / NTDS extraction — Phase 6+, larger scope.
-
-## Phase 7 — Retire the Windows-native code path
-
-Once every module has a pure-Rust implementation that passes the
-Samba integration suite, delete the `#[cfg(windows)]` arms in
-`smb/mod.rs` and the corresponding native files. The stubs become the
-single implementation. Linux is then strictly equivalent to Windows as
-an attacker OS.
+- **Anonymous + guest access** — credential-shape dispatch (empty
+  username → null session, username without secret → guest) across
+  `connect_session` / `SmbClient::connect`, strict downgrade rejection
+  preserved for secret-carrying credentials, guest/null sessions riding
+  unauthenticated DCE binds (Impacket parity), desktop UI support
+  (anonymous login entry, GUEST-badged secret-less credentials, CSV
+  import). Covered by the `anonymous_samba` suite.
+- **SMB signing** (HMAC-SHA256, dialects 2.0.2/2.1) — applied when the
+  server's Negotiate SecurityMode demands it; validated against live
+  signing-required hosts.
+- **Release workflow** — tag-driven Linux + Windows desktop binaries
+  (`.github/workflows/release.yml`).
 
 ## Validation gate per phase
 
-Every phase ports a module by:
+Every phase ported a module by:
 
 1. Generating Impacket byte fixtures for the target RPC interface
    (pattern: `crates/netraze-dcerpc/tests/gen_*.py`).
 2. Adding round-trip encoder/decoder tests pinned to those fixtures.
 3. Adding a Samba integration test that exercises the new module
    end-to-end against the test container.
-4. Removing the `NOT_PORTED` stub for that module on `not(windows)` and
-   wiring the pure-Rust impl on every target.
-5. Confirming the existing Windows-native impl still passes its tests
-   (parallel implementations during migration), then deleting it once
-   the pure-Rust path is proven.
+4. Cross-checking the resulting behaviour against Impacket against the
+   same harness before landing it.
