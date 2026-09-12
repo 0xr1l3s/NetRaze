@@ -31,7 +31,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .show(ui, |ui| {
             for (i, cred) in state.credentials.iter().enumerate() {
                 let is_selected = state.selected_cred == Some(i);
-                let type_tag = match cred.cred_type {
+                // Secret-less password credential = guest access.
+                let type_tag = match &cred.cred_type {
+                    CredType::Password if cred.secret.is_empty() => "GUEST",
                     CredType::Password => "PWD",
                     CredType::Hash => "HASH",
                 };
@@ -41,7 +43,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                     None => ("●", TEXT_DIM),
                 };
 
-                let type_color = match cred.cred_type {
+                let type_color = match &cred.cred_type {
+                    CredType::Password if cred.secret.is_empty() => {
+                        egui::Color32::from_rgb(160, 220, 140)
+                    }
                     CredType::Password => egui::Color32::from_rgb(100, 180, 255),
                     CredType::Hash => egui::Color32::from_rgb(255, 180, 80),
                 };
@@ -127,7 +132,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         );
         ui.add(
             egui::TextEdit::singleline(&mut state.new_cred_secret)
-                .hint_text("secret")
+                .hint_text(if state.new_cred_type == CredType::Password {
+                    "secret (empty = guest)"
+                } else {
+                    "nt hash"
+                })
                 .desired_width(70.0)
                 .font(egui::TextStyle::Small),
         );
@@ -147,7 +156,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             state.new_cred_type = CredType::Hash;
         }
 
-        let can_add = !state.new_cred_username.is_empty() && !state.new_cred_secret.is_empty();
+        // Secret is optional for password credentials — a user without a
+        // secret is a guest login (the server's map-to-guest policy takes
+        // over). Hash credentials still need their 32-hex secret.
+        let has_secret = !state.new_cred_secret.is_empty();
+        let can_add = !state.new_cred_username.is_empty()
+            && (has_secret || state.new_cred_type == CredType::Password);
         let btn = egui::Button::new(
             egui::RichText::new("+ Add")
                 .small()

@@ -440,7 +440,12 @@ impl RuntimeServices {
         cred_type: crate::state::CredType,
     ) {
         let tx = self.log_tx.clone();
-        let cred_label = if domain.is_empty() {
+        // Same label logic as `state::cred_label` — "(anonymous)" for the
+        // null session, `.\user` / `DOMAIN\user` otherwise (guest logins
+        // are just users without a secret).
+        let cred_label = if username.is_empty() {
+            "(anonymous)".to_owned()
+        } else if domain.is_empty() {
             format!(".\\{username}")
         } else {
             format!("{domain}\\{username}")
@@ -534,11 +539,7 @@ impl RuntimeServices {
         let hostname_clone = hostname.clone();
         let smb_cred = cred_to_smb(&cred);
         // Same label format as spawn_login_attempt — resolve_cred matches on it.
-        let cred_label = if cred.domain.is_empty() {
-            format!(".\\{}", cred.username)
-        } else {
-            format!("{}\\{}", cred.domain, cred.username)
-        };
+        let cred_label = crate::state::cred_label(&cred);
         self.runtime.spawn(async move {
             let mut client = SmbClient::new(&ip_clone).with_credential(smb_cred);
             let result = client.connect().await;

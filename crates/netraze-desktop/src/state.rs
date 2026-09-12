@@ -73,6 +73,40 @@ pub struct CredentialRecord {
     pub created_at: Option<u64>,
 }
 
+/// Label under which a credential is tracked across the workspace
+/// (host `logged_in_cred`, SharesNode `cred_label`, login logs):
+/// `.\user`, `DOMAIN\user` — or `(anonymous)` when no username is set.
+pub fn cred_label(cred: &CredentialRecord) -> String {
+    if cred.username.is_empty() {
+        "(anonymous)".to_owned()
+    } else if cred.domain.is_empty() {
+        format!(".\\{}", cred.username)
+    } else {
+        format!("{}\\{}", cred.domain, cred.username)
+    }
+}
+
+/// The anonymous (null-session) credential. Empty username + empty
+/// secret — the protocol layer's shape dispatch turns exactly this into
+/// `Smb2Session::connect_anonymous`. Never appears in the saved list
+/// (Add requires a username); `resolve_cred` synthesizes it on demand
+/// for the `(anonymous)` label.
+pub fn anonymous_record() -> CredentialRecord {
+    CredentialRecord {
+        username: String::new(),
+        domain: String::new(),
+        secret: String::new(),
+        cred_type: CredType::Password,
+        valid: None,
+        active: true,
+        protocol: String::new(),
+        source: String::new(),
+        notes: String::new(),
+        tags: Vec::new(),
+        created_at: None,
+    }
+}
+
 fn bool_true() -> bool {
     true
 }
@@ -819,14 +853,11 @@ impl AppState {
                 }
                 // Re-login if they had credentials
                 if let Some(label) = logged_in_cred {
-                    if let Some(cred) = self.credentials.iter().find(|c| {
-                        let cred_label = if c.domain.is_empty() {
-                            format!(".\\{}", c.username)
-                        } else {
-                            format!("{}\\{}", c.domain, c.username)
-                        };
-                        cred_label == *label
-                    }) {
+                    if label == "(anonymous)" {
+                        self.pending_logins.push((ip.clone(), anonymous_record()));
+                    } else if let Some(cred) =
+                        self.credentials.iter().find(|c| &cred_label(c) == label)
+                    {
                         self.pending_logins.push((ip.clone(), cred.clone()));
                     }
                 }
