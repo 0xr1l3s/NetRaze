@@ -28,7 +28,7 @@ openly — **do not reuse them anywhere real**.
 |---|---|---|---|
 | `private` | Disk | `alice` only | `Alice's private share` |
 | `public`  | Disk | guest-ok, read-only | `Public read-only` |
-| `ADMIN$`  | Disk | `alice` admin, not browseable | `Remote Admin` |
+| `ADMIN$`  | Disk | `alice` admin, browseable (listed in NetrShareEnum — mirrors Windows, where admin sessions see `ADMIN$`) | `Remote Admin` |
 
 ---
 
