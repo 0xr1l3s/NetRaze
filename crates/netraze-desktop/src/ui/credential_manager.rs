@@ -439,9 +439,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 } else {
                     "••••••••".to_string()
                 };
-                let secret_color = match c.cred_type {
-                    CredType::Hash => YELLOW,
-                    CredType::Password => BLUE,
+                // Secret-less password credential = guest access.
+                let secret_color = match (&c.cred_type, c.secret.is_empty()) {
+                    (CredType::Hash, _) => YELLOW,
+                    (CredType::Password, true) => GREEN,
+                    (CredType::Password, false) => BLUE,
                 };
                 ui.painter().text(
                     Pos2::new(x + 4.0, y),
@@ -453,13 +455,19 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 x += c_secret;
 
                 // ── Type badge ──
-                let (type_label, type_color, type_bg) = match c.cred_type {
-                    CredType::Password => (
+                let (type_label, type_color, type_bg) = match (&c.cred_type, c.secret.is_empty())
+                {
+                    (CredType::Password, true) => (
+                        "GUEST",
+                        GREEN,
+                        Color32::from_rgba_premultiplied(16, 44, 26, 200),
+                    ),
+                    (CredType::Password, false) => (
                         "PWD",
                         BLUE,
                         Color32::from_rgba_premultiplied(16, 34, 51, 200),
                     ),
-                    CredType::Hash => (
+                    (CredType::Hash, _) => (
                         "HASH",
                         YELLOW,
                         Color32::from_rgba_premultiplied(44, 40, 12, 200),
@@ -749,6 +757,14 @@ fn show_edit_window(ctx: &egui::Context, state: &mut AppState) {
                         egui::TextEdit::singleline(&mut state.cm_state.form_secret)
                             .desired_width(f32::INFINITY)
                             .password(!state.cm_state.show_secrets)
+                            .hint_text(if matches!(
+                                state.cm_state.form_cred_type,
+                                CredType::Password
+                            ) {
+                                "empty = guest access"
+                            } else {
+                                "NT hash (32 hex chars)"
+                            })
                             .font(egui::TextStyle::Monospace),
                     );
                     ui.label(egui::RichText::new("Type").small().color(TEXT_DIM));
@@ -854,7 +870,10 @@ fn save_form(state: &mut AppState) {
         cm.form_domain.trim().to_string()
     };
     let secret = cm.form_secret.trim().to_string();
-    if username.is_empty() || secret.is_empty() {
+    // Empty secret is valid for password credentials — a username without
+    // a secret is a guest login. Hash credentials still need their 32-hex
+    // secret (nothing to derive an NTLM response from otherwise).
+    if username.is_empty() || (secret.is_empty() && cm.form_cred_type == CredType::Hash) {
         return;
     }
 
@@ -1001,15 +1020,17 @@ fn import_csv(state: &mut AppState, path: &str) -> Result<(usize, usize, usize),
         let domain = record.get(1).unwrap_or("").trim().to_string();
         let secret = record.get(2).unwrap_or("").trim().to_string();
         let cred_type_str = record.get(3).unwrap_or("password").trim().to_lowercase();
-        if username.is_empty() || secret.is_empty() {
-            errors += 1;
-            continue;
-        }
         let cred_type = if cred_type_str == "hash" {
             CredType::Hash
         } else {
             CredType::Password
         };
+        // Empty secret is fine for password rows (guest access); a hash
+        // row without its secret is unusable.
+        if username.is_empty() || (secret.is_empty() && cred_type == CredType::Hash) {
+            errors += 1;
+            continue;
+        }
         // Check duplicate
         let is_dup = state
             .credentials
