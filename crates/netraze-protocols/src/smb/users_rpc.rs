@@ -67,14 +67,28 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
     // 2. SamrConnect2
     // Windows SAMR expects a NULL server name; passing an IP or hostname
     // yields RPC_X_BAD_STUB_DATA on most targets.
+    //
+    // Windows 11 (and Win10 1607+) enables RestrictRemoteSam by default,
+    // which returns RPC fault 0x5 (access denied) for non-admin callers.
+    // Treat it as an empty result — same silent handling as enum_av_rpc.
     let stub_conn = samr::encode_samr_connect2_request(None, samr::MAXIMUM_ALLOWED);
-    let resp_conn = ch
-        .call(samr::Opnum::SamrConnect2 as u16, &stub_conn)
-        .await
-        .map_err(|e| format!("SamrConnect2: {e}"))?;
+    let resp_conn = match ch.call(samr::Opnum::SamrConnect2 as u16, &stub_conn).await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("0x00000005") || msg.contains("0x5") {
+                return Ok(Vec::new());
+            }
+            return Err(format!("SamrConnect2: {e}"));
+        }
+    };
     let (server_handle, status) =
         samr::decode_samr_connect2_response(&resp_conn).map_err(|e| e.to_string())?;
     if status != 0 {
+        // STATUS_ACCESS_DENIED (0x5) — RestrictRemoteSam, not a real failure.
+        if status == 0x0000_0005 {
+            return Ok(Vec::new());
+        }
         return Err(format!("SamrConnect2 failed with status 0x{status:08x}"));
     }
 
