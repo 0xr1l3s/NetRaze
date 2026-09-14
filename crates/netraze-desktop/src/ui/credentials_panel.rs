@@ -1,7 +1,5 @@
 use crate::state::{AppState, CredType};
-
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(102, 27, 28);
-const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(160, 165, 175);
+use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
@@ -9,19 +7,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             egui::RichText::new("🔑 Credentials")
                 .size(12.0)
                 .strong()
-                .color(egui::Color32::WHITE),
+                .color(theme::FG),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{}", state.credentials.len()))
                     .small()
-                    .color(TEXT_DIM),
+                    .color(theme::MUTED),
             );
         });
     });
     ui.add_space(2.0);
 
-    // -- Credential list --
     let mut to_delete: Option<usize> = None;
 
     egui::ScrollArea::vertical()
@@ -31,28 +28,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .show(ui, |ui| {
             for (i, cred) in state.credentials.iter().enumerate() {
                 let is_selected = state.selected_cred == Some(i);
-                // Secret-less password credential = guest access.
                 let type_tag = match &cred.cred_type {
                     CredType::Password if cred.secret.is_empty() => "GUEST",
                     CredType::Password => "PWD",
-                    CredType::Hash => "HASH",
+                    CredType::Hash     => "HASH",
                 };
                 let (valid_icon, valid_color) = match cred.valid {
-                    Some(true) => ("✔", egui::Color32::from_rgb(80, 200, 120)),
-                    Some(false) => ("✘", egui::Color32::from_rgb(220, 80, 80)),
-                    None => ("●", TEXT_DIM),
+                    Some(true)  => ("✔", theme::SUCCESS),
+                    Some(false) => ("✘", theme::ERROR),
+                    None        => ("●", theme::MUTED),
                 };
-
                 let type_color = match &cred.cred_type {
-                    CredType::Password if cred.secret.is_empty() => {
-                        egui::Color32::from_rgb(160, 220, 140)
-                    }
-                    CredType::Password => egui::Color32::from_rgb(100, 180, 255),
-                    CredType::Hash => egui::Color32::from_rgb(255, 180, 80),
+                    CredType::Password if cred.secret.is_empty() => theme::SUCCESS,
+                    CredType::Password => theme::INFO,
+                    CredType::Hash     => theme::WARNING,
                 };
 
                 let bg = if is_selected {
-                    egui::Color32::from_rgb(35, 40, 52)
+                    theme::ACC_BG
                 } else {
                     egui::Color32::TRANSPARENT
                 };
@@ -70,11 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                             egui::RichText::new(format!("{}\\{}", cred.domain, cred.username))
                                 .monospace()
                                 .size(10.5)
-                                .color(if is_selected {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::from_rgb(200, 205, 215)
-                                }),
+                                .color(if is_selected { theme::FG } else { theme::FG_2 }),
                         );
                     });
 
@@ -116,7 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // -- Add credential form (compact) --
+    // ── Compact add form ─────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut state.new_cred_username)
@@ -143,35 +132,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     });
     ui.horizontal(|ui| {
         let is_hash = state.new_cred_type == CredType::Hash;
-        if ui
-            .add(egui::Button::new("Pwd").selected(!is_hash))
-            .clicked()
-        {
+        if ui.add(egui::Button::new("Pwd").selected(!is_hash)).clicked() {
             state.new_cred_type = CredType::Password;
         }
-        if ui
-            .add(egui::Button::new("Hash").selected(is_hash))
-            .clicked()
-        {
+        if ui.add(egui::Button::new("Hash").selected(is_hash)).clicked() {
             state.new_cred_type = CredType::Hash;
         }
 
-        // Secret is optional for password credentials — a user without a
-        // secret is a guest login (the server's map-to-guest policy takes
-        // over). Hash credentials still need their 32-hex secret.
         let has_secret = !state.new_cred_secret.is_empty();
         let can_add = !state.new_cred_username.is_empty()
             && (has_secret || state.new_cred_type == CredType::Password);
         let btn = egui::Button::new(
-            egui::RichText::new("+ Add")
-                .small()
-                .color(egui::Color32::WHITE),
+            egui::RichText::new("+ Add").small().color(theme::FG),
         )
-        .fill(if can_add {
-            ACCENT
-        } else {
-            egui::Color32::from_rgb(40, 46, 58)
-        });
+        .fill(if can_add { theme::ACC_DIM } else { theme::ELEV_2 });
         if ui.add(btn).clicked() && can_add {
             state.credentials.push(crate::state::CredentialRecord {
                 username: std::mem::take(&mut state.new_cred_username),
@@ -199,11 +173,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
         if state.selected_cred.is_some() && state.selected_host.is_some() {
             let test_btn = egui::Button::new(
-                egui::RichText::new("⚡ Test")
-                    .small()
-                    .color(egui::Color32::WHITE),
+                egui::RichText::new("⚡ Test").small().color(theme::FG),
             )
-            .fill(egui::Color32::from_rgb(83, 21, 22));
+            .fill(theme::ACC_DIM);
             if ui.add(test_btn).clicked() {
                 // TODO: wire to runtime test
             }
