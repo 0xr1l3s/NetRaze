@@ -1,5 +1,5 @@
 use egui::{Color32, Pos2, Rect, Stroke, Style, Ui};
-use egui_snarl::ui::{BackgroundPattern, NodeLayout, SnarlStyle, SnarlViewer};
+use egui_snarl::ui::{BackgroundPattern, NodeLayout, NodeLayoutKind, SnarlStyle, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl, ui::PinInfo};
 use serde::{Deserialize, Serialize};
 
@@ -281,15 +281,13 @@ impl WorkflowDocument {
     /// Build our custom SnarlStyle with subtle dot-grid background.
     pub fn snarl_style() -> SnarlStyle {
         let mut style = SnarlStyle::new();
-        // We'll draw our own dot pattern via draw_background override
         style.bg_pattern = Some(BackgroundPattern::NoPattern);
         style.bg_pattern_stroke = Some(Stroke::NONE);
-        // Re-rasterize glyphs at the zoomed size instead of bilinear-scaling
-        // the original texture — keeps node labels sharp when zooming in.
         style.crisp_magnified_text = Some(true);
-        // Disable the collapse triangle — HostNodes are circles and collapsing
-        // breaks their appearance; no node kind benefits from collapsing here.
         style.collapsible = Some(false);
+        // Small pins and a thin wire keep the circular-node canvas uncluttered.
+        style.pin_size = Some(5.0);
+        style.wire_width = Some(1.5);
         style
     }
 }
@@ -437,9 +435,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 | WorkflowNode::EnumAvNode { .. }
         );
         if is_output_node {
-            PinInfo::circle()
-                .with_fill(Color32::TRANSPARENT)
-                .with_stroke(egui::Stroke::NONE)
+            PinInfo::circle().with_fill(theme::LINE_2)
         } else {
             PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
         }
@@ -477,9 +473,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 PinInfo::triangle().with_fill(Color32::from_rgb(200, 120, 220))
             }
             WorkflowNode::HostNode { .. } => {
-                PinInfo::circle()
-                    .with_fill(Color32::TRANSPARENT)
-                    .with_stroke(Stroke::NONE)
+                PinInfo::circle().with_fill(theme::LINE_2)
             }
             WorkflowNode::SharesNode { .. } => {
                 ui.label("-");
@@ -541,21 +535,24 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         _outputs: &[OutPin],
         snarl: &Snarl<WorkflowNode>,
     ) -> NodeLayout {
-        let is_circular = matches!(
-            &snarl[node],
-            WorkflowNode::HostNode { .. }
-                | WorkflowNode::SharesNode { .. }
-                | WorkflowNode::UsersNode { .. }
-                | WorkflowNode::DumpNode { .. }
-                | WorkflowNode::EnumAvNode { .. }
-        );
-        if is_circular {
-            NodeLayout {
+        match &snarl[node] {
+            WorkflowNode::HostNode { .. } => NodeLayout {
                 min_pin_row_height: HOST_BODY_H,
                 ..default
-            }
-        } else {
-            default
+            },
+            // Result nodes have 1 input + 0 outputs. With Coil (default) the input
+            // pin column appears on the left, pushing the body right. Sandwich stacks
+            // pins above/below the body so no side column is created and the circle
+            // stays centred.
+            WorkflowNode::SharesNode { .. }
+            | WorkflowNode::UsersNode { .. }
+            | WorkflowNode::DumpNode { .. }
+            | WorkflowNode::EnumAvNode { .. } => NodeLayout {
+                kind: NodeLayoutKind::Sandwich,
+                min_pin_row_height: 10.0,
+                ..default
+            },
+            _ => default,
         }
     }
 
