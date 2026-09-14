@@ -628,9 +628,14 @@ impl RuntimeServices {
                         .collect()
                 }
                 Err(e) => {
+                    let (level, prefix) = if e.contains("ACCESS_DENIED (0x5)") {
+                        (LogLevel::Warning, "accès refusé")
+                    } else {
+                        (LogLevel::Error, "erreur enum users")
+                    };
                     let _ = tx.send(RuntimeEvent::Log {
-                        level: LogLevel::Error,
-                        message: format!("{ip_clone}: erreur enum users: {e}"),
+                        level,
+                        message: format!("{ip_clone}: {prefix}: {e}"),
                     });
                     Vec::new()
                 }

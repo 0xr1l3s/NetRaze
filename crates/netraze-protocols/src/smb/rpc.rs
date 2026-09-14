@@ -325,6 +325,72 @@ pub async fn bind_interface_over_smb(
     }
 }
 
+/// Bind the SAMR v1.0 interface over `\PIPE\samr`.
+///
+/// SAMR uses **unauthenticated DCE bind first** (Impacket parity). Windows
+/// authorizes SamrConnect2 calls using the SMB session's security context —
+/// no separate NTLMSSP re-authentication at the DCE level — which avoids the
+/// double-filtered-token problem on Windows 11:
+///
+/// - NTLMSSP PKT_PRIVACY creates an *independent* network logon session whose
+///   token is filtered for local non-RID-500 admin accounts even after the
+///   SMB session was established with full credentials.
+/// - Unauthenticated DCE bind rides the existing SMB session token directly.
+///   With `LocalAccountTokenFilterPolicy=1` set on the target, that token is
+///   non-filtered and SamrConnect2 succeeds.
+///
+/// Falls back to NTLMSSP PKT_PRIVACY when the anonymous bind is rejected
+/// (e.g. some Samba configurations that enforce pipe-level auth).
+pub async fn bind_samr_over_smb(
+    session: Arc<Mutex<Smb2Session>>,
+    ipc_tree_id: u32,
+    cred: &SmbCredential,
+) -> Result<RpcChannel, String> {
+    use netraze_dcerpc::interfaces::samr;
+
+    async fn open_samr_pipe(
+        session: &Arc<Mutex<Smb2Session>>,
+        ipc_tree_id: u32,
+    ) -> Result<Arc<dyn RpcTransport>, String> {
+        let s = Arc::clone(session);
+        let pipe = tokio::task::spawn_blocking(move || {
+            SmbPipeTransport::open(s, ipc_tree_id, "samr")
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking(samr pipe_open): {e}"))??;
+        Ok(Arc::new(pipe))
+    }
+
+    let interface = samr::uuid();
+    let version = (1u16, 0u16);
+
+    // Guest and null sessions: unauthenticated bind only.
+    let guest_shape = !cred.username.is_empty()
+        && cred.nt_hash.is_none()
+        && cred.password.is_empty();
+    if cred.username.is_empty() || guest_shape {
+        let transport = open_samr_pipe(&session, ipc_tree_id).await?;
+        return RpcChannel::bind(transport, interface, version)
+            .await
+            .map_err(|e| format!("samr unauthenticated bind: {e}"));
+    }
+
+    // Real credentials: unauthenticated DCE bind first (Impacket order).
+    // The BindAck always succeeds at the bind level; access is checked per-call.
+    let transport = open_samr_pipe(&session, ipc_tree_id).await?;
+    match RpcChannel::bind(transport, interface, version).await {
+        Ok(channel) => Ok(channel),
+        Err(_) => {
+            // Unauthenticated bind rejected — fall back to NTLMSSP PKT_PRIVACY.
+            let transport = open_samr_pipe(&session, ipc_tree_id).await?;
+            let binder = build_binder(cred, 0);
+            RpcChannel::bind_authenticated(transport, interface, version, binder)
+                .await
+                .map_err(|e| format!("samr authenticated bind fallback: {e}"))
+        }
+    }
+}
+
 /// Bind the SRVSVC v3.0 interface over `\PIPE\srvsvc` — see
 /// [`bind_interface_over_smb`] for the auth dance.
 pub async fn bind_srvsvc_over_smb(
@@ -343,25 +409,58 @@ pub async fn bind_srvsvc_over_smb(
     .await
 }
 
-/// Bind the SCMR v2.0 interface over `\PIPE\svcctl` — the service-control
-/// channel smbexec (create/start/stop/delete nonce service) and enum_av
-/// (per-product service probes) drive. Real Windows SCM accepts NTLMSSP
-/// binds; the anonymous fallback stays in place for the odd hardened host
-/// where the SCM still services calls authorized by the SMB session.
+/// Bind the SCMR v2.0 interface over `\PIPE\svcctl`.
+///
+/// Uses the same unauthenticated DCE bind first strategy as SAMR: Windows 11
+/// authorizes `ROpenSCManagerW` via the SMB session's security context.
+/// NTLMSSP PKT_PRIVACY re-auth at the DCE level triggers `0x6E4
+/// (RPC_S_CANNOT_SUPPORT)` on hardened Windows 11 hosts because the
+/// re-authenticated token is filtered even when the SMB session token is not.
+/// Unauthenticated bind rides the SMB session directly and avoids this.
+/// Falls back to NTLMSSP for Samba and other hosts that require pipe-level auth.
 pub async fn bind_svcctl_over_smb(
     session: Arc<Mutex<Smb2Session>>,
     ipc_tree_id: u32,
     cred: &SmbCredential,
 ) -> Result<RpcChannel, String> {
-    bind_interface_over_smb(
-        session,
-        ipc_tree_id,
-        "svcctl",
-        scmr::uuid(),
-        (scmr::VERSION_MAJOR, scmr::VERSION_MINOR),
-        cred,
-    )
-    .await
+    async fn open_svcctl_pipe(
+        session: &Arc<Mutex<Smb2Session>>,
+        ipc_tree_id: u32,
+    ) -> Result<Arc<dyn RpcTransport>, String> {
+        let s = Arc::clone(session);
+        let pipe = tokio::task::spawn_blocking(move || {
+            SmbPipeTransport::open(s, ipc_tree_id, "svcctl")
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking(svcctl pipe_open): {e}"))??;
+        Ok(Arc::new(pipe))
+    }
+
+    let interface = scmr::uuid();
+    let version = (scmr::VERSION_MAJOR, scmr::VERSION_MINOR);
+
+    let guest_shape = !cred.username.is_empty()
+        && cred.nt_hash.is_none()
+        && cred.password.is_empty();
+    if cred.username.is_empty() || guest_shape {
+        let transport = open_svcctl_pipe(&session, ipc_tree_id).await?;
+        return RpcChannel::bind(transport, interface, version)
+            .await
+            .map_err(|e| format!("svcctl unauthenticated bind: {e}"));
+    }
+
+    // Unauthenticated DCE bind first — rides the SMB session identity.
+    let transport = open_svcctl_pipe(&session, ipc_tree_id).await?;
+    match RpcChannel::bind(transport, interface, version).await {
+        Ok(channel) => Ok(channel),
+        Err(_) => {
+            let transport = open_svcctl_pipe(&session, ipc_tree_id).await?;
+            let binder = build_binder(cred, 0);
+            RpcChannel::bind_authenticated(transport, interface, version, binder)
+                .await
+                .map_err(|e| format!("svcctl authenticated bind fallback: {e}"))
+        }
+    }
 }
 
 /// Strip the `:port` (or `[ipv6]:port`) suffix off `target` so the result

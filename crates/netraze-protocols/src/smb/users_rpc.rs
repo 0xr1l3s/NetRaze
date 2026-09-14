@@ -21,7 +21,7 @@ use netraze_dcerpc::channel::RpcChannel;
 use netraze_dcerpc::interfaces::samr;
 
 use super::connection::SmbCredential;
-use super::rpc::{bind_interface_over_smb, connect_session};
+use super::rpc::{bind_samr_over_smb, connect_session};
 
 /// Re-export so `mod.rs` can re-export it as `users::UserInfo`.
 #[derive(Debug, Clone)]
@@ -35,6 +35,24 @@ pub struct UserInfo {
 
 /// NTSTATUS `STATUS_MORE_ENTRIES` — resume handle is valid, call again.
 const STATUS_MORE_ENTRIES: u32 = 0x0000_0105;
+
+/// ACCESS_DENIED (0x5) explanation returned to the caller.
+///
+/// Windows 11 (and Win10 1607+) blocks SAMR for two reasons:
+/// - `RestrictRemoteSam` policy: only Builtin\Administrators with a non-filtered token can call SamrConnect2.
+/// - UAC remote token filtering: local accounts in the Administrators group (non-RID-500) receive a
+///   *filtered* (standard-user) token for network logons, so even "admin" local accounts are denied.
+///
+/// Fix on the target machine:
+///   reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f
+/// (Exempts local admin accounts from UAC token filtering for network auth. Reboot not required.)
+fn uac_deny_msg() -> String {
+    "ACCESS_DENIED (0x5): UAC remote token filtering active — \
+local admin accounts (non-RID-500) get a filtered token over network. \
+Fix on target: reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\" \
+/v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f"
+        .to_owned()
+}
 
 /// Enumerate local/domain users via SAMR.
 ///
@@ -51,33 +69,22 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
         .tree_connect(target, "IPC$")
         .map_err(|e| format!("tree_connect IPC$: {e}"))?;
 
-    // Same bind dance as shares/info: unauthenticated for guest/null
-    // sessions (Impacket parity), NTLMSSP PKT_PRIVACY otherwise.
-    let mut ch = bind_interface_over_smb(
-        session.clone(),
-        ipc,
-        "samr",
-        samr::uuid(),
-        (1, 0),
-        cred,
-    )
-    .await
-    .map_err(|e| format!("SAMR bind: {e}"))?;
+    // Unauthenticated DCE bind first (Impacket parity for SAMR): Windows uses
+    // the SMB session's security context for SamrConnect2 access checks.
+    let mut ch = bind_samr_over_smb(session.clone(), ipc, cred)
+        .await
+        .map_err(|e| format!("SAMR bind: {e}"))?;
 
     // 2. SamrConnect2
     // Windows SAMR expects a NULL server name; passing an IP or hostname
     // yields RPC_X_BAD_STUB_DATA on most targets.
-    //
-    // Windows 11 (and Win10 1607+) enables RestrictRemoteSam by default,
-    // which returns RPC fault 0x5 (access denied) for non-admin callers.
-    // Treat it as an empty result — same silent handling as enum_av_rpc.
     let stub_conn = samr::encode_samr_connect2_request(None, samr::MAXIMUM_ALLOWED);
     let resp_conn = match ch.call(samr::Opnum::SamrConnect2 as u16, &stub_conn).await {
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("0x00000005") || msg.contains("0x5") {
-                return Ok(Vec::new());
+                return Err(uac_deny_msg());
             }
             return Err(format!("SamrConnect2: {e}"));
         }
@@ -85,9 +92,9 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
     let (server_handle, status) =
         samr::decode_samr_connect2_response(&resp_conn).map_err(|e| e.to_string())?;
     if status != 0 {
-        // STATUS_ACCESS_DENIED (0x5) — RestrictRemoteSam, not a real failure.
         if status == 0x0000_0005 {
-            return Ok(Vec::new());
+            // RestrictRemoteSam policy or UAC remote token filtering.
+            return Err(uac_deny_msg());
         }
         return Err(format!("SamrConnect2 failed with status 0x{status:08x}"));
     }
