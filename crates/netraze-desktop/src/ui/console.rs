@@ -1,14 +1,5 @@
-use egui::Color32;
-
 use crate::state::CredentialRecord;
-
-const PANEL_BG: Color32 = Color32::from_rgb(27, 34, 44);
-const SEPARATOR: Color32 = Color32::from_rgb(40, 46, 58);
-const TEXT_DIM: Color32 = Color32::from_rgb(160, 165, 175);
-const ACCENT: Color32 = Color32::from_rgb(102, 27, 28);
-const PROMPT_COLOR: Color32 = Color32::from_rgb(80, 200, 120);
-const ERROR_COLOR: Color32 = Color32::from_rgb(210, 60, 60);
-const OUTPUT_COLOR: Color32 = Color32::from_rgb(210, 215, 225);
+use crate::theme;
 
 /// One entry in the console scrollback.
 #[derive(Debug, Clone)]
@@ -52,11 +43,7 @@ impl ConsoleState {
     }
 
     pub fn push_result(&mut self, command: String, output: String, error: Option<String>) {
-        self.history.push(ConsoleEntry {
-            command,
-            output,
-            error,
-        });
+        self.history.push(ConsoleEntry { command, output, error });
         self.pending = false;
         self.request_focus = true;
     }
@@ -91,19 +78,26 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
         .resizable(true)
         .collapsible(true)
         .frame(egui::Frame {
-            fill: PANEL_BG,
+            fill: theme::BG,
             inner_margin: egui::Margin::same(8),
-            stroke: egui::Stroke::new(1.0_f32, SEPARATOR),
-            corner_radius: egui::CornerRadius::same(6),
+            stroke: egui::Stroke::new(1.0_f32, theme::LINE),
+            corner_radius: egui::CornerRadius::same(theme::R_MODAL),
             ..Default::default()
         })
         .show(ctx, |ui| {
+            // ── Header bar ───────────────────────────────────────────────────
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("as").size(11.0).color(TEXT_DIM));
+                ui.label(
+                    egui::RichText::new("●")
+                        .size(9.0)
+                        .color(theme::ACC),
+                );
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("as").size(11.0).color(theme::MUTED));
                 ui.label(
                     egui::RichText::new(&console.cred_label)
                         .size(11.0)
-                        .color(Color32::WHITE)
+                        .color(theme::FG)
                         .monospace(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -111,7 +105,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                         ui.label(
                             egui::RichText::new("running…")
                                 .size(11.0)
-                                .color(ACCENT)
+                                .color(theme::ACC)
                                 .strong(),
                         );
                     }
@@ -119,7 +113,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
             });
             ui.separator();
 
-            // Scrollback
+            // ── Scrollback ───────────────────────────────────────────────────
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
@@ -130,7 +124,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                         ui.label(
                             egui::RichText::new(format!("> {}", entry.command))
                                 .size(12.0)
-                                .color(PROMPT_COLOR)
+                                .color(theme::ACC)
                                 .strong()
                                 .monospace(),
                         );
@@ -138,7 +132,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                             ui.label(
                                 egui::RichText::new(err)
                                     .size(12.0)
-                                    .color(ERROR_COLOR)
+                                    .color(theme::ERROR)
                                     .monospace(),
                             );
                         }
@@ -146,7 +140,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                             ui.label(
                                 egui::RichText::new(&entry.output)
                                     .size(12.0)
-                                    .color(OUTPUT_COLOR)
+                                    .color(theme::FG_2)
                                     .monospace(),
                             );
                         }
@@ -156,12 +150,12 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
 
             ui.separator();
 
-            // Input line — compute width explicitly so the window does not stretch.
+            // ── Input line ───────────────────────────────────────────────────
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(">")
                         .size(13.0)
-                        .color(PROMPT_COLOR)
+                        .color(theme::SUCCESS)
                         .strong()
                         .monospace(),
                 );
@@ -172,7 +166,8 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                     !console.pending,
                     egui::TextEdit::singleline(&mut console.input)
                         .desired_width(edit_width)
-                        .font(egui::TextStyle::Monospace),
+                        .font(egui::TextStyle::Monospace)
+                        .text_color(theme::FG),
                 );
                 if console.request_focus && !console.pending {
                     resp.request_focus();
@@ -183,7 +178,15 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                 let run_clicked = ui
                     .add_enabled(
                         !console.pending && !console.input.trim().is_empty(),
-                        egui::Button::new(egui::RichText::new("Run").size(12.0)),
+                        egui::Button::new(
+                            egui::RichText::new("Run").size(12.0).color(theme::FG),
+                        )
+                        .fill(if !console.pending && !console.input.trim().is_empty() {
+                            theme::ACC_DIM
+                        } else {
+                            theme::ELEV_1
+                        })
+                        .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
                     )
                     .clicked();
 
