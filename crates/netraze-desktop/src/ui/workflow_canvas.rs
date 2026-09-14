@@ -11,6 +11,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .style(style)
         .show(&mut state.workflow.snarl, &mut viewer, ui);
 
+    // Node click → select in config panel; background click → deselect.
+    if let Some(raw_id) = viewer.selected_node_id.take() {
+        state.selected_workflow_node = Some(raw_id);
+    } else if response.clicked() {
+        state.selected_workflow_node = None;
+    }
+
     // Collect login requests from the viewer into pending_logins
     for (ip, cred) in viewer.login_requests.drain(..) {
         state.pending_logins.push((ip, cred));

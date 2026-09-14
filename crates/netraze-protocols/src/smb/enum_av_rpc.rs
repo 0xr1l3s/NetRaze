@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use netraze_dcerpc::channel::RpcChannel;
 use netraze_dcerpc::interfaces::scmr;
+use netraze_dcerpc::DceRpcError;
 
 use super::connection::SmbCredential;
 use super::rpc::{bind_svcctl_over_smb, connect_session, host_only};
@@ -183,10 +184,21 @@ async fn query_services_on_channel(
         Some("ServicesActive\0"),
         scmr::SC_MANAGER_CONNECT,
     );
-    let resp = ch
-        .call(scmr::Opnum::ROpenSCManagerW as u16, &stub)
-        .await
-        .map_err(|e| format!("ROpenSCManagerW: {e}"))?;
+    let resp = match ch.call(scmr::Opnum::ROpenSCManagerW as u16, &stub).await {
+        Ok(r) => r,
+        // 0x6E4 = RPC_S_CANNOT_SUPPORT — server policy (UAC token-filtering or GPO)
+        // blocks remote SCM access.  0x5 / nca_s_fault_access_denied are the same
+        // restriction surfaced at different layers.  All three mean "no SCM phase
+        // available" — skip silently; the pipe phase still runs.
+        Err(DceRpcError::Fault { status })
+            if status == 0x0000_06E4
+                || status == 0x0000_0005
+                || status == 0x1C01_0002 =>
+        {
+            return Ok(vec![]);
+        }
+        Err(e) => return Err(format!("ROpenSCManagerW: {e}")),
+    };
     let (scm, status) = scmr::decode_ropen_sc_manager_w_response(&resp)
         .map_err(|e| format!("decode ROpenSCManagerW: {e}"))?;
     if status != 0 {

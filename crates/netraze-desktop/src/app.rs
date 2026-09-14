@@ -1,5 +1,4 @@
 use eframe::CreationContext;
-use egui::Color32;
 
 use crate::runtime::{LogLevel, RuntimeServices};
 use crate::state::AppState;
@@ -13,7 +12,7 @@ pub struct NetRazeDesktopApp {
 
 impl NetRazeDesktopApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        setup_cobalt_theme(&cc.egui_ctx);
+        crate::theme::apply(&cc.egui_ctx);
 
         let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = RuntimeServices::new(log_tx);
@@ -26,57 +25,6 @@ impl NetRazeDesktopApp {
     }
 }
 
-fn setup_cobalt_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-
-    let bg_dark = Color32::from_rgb(18, 21, 28); // #12151c
-    let bg_panel = Color32::from_rgb(27, 34, 44); // #1b222c
-    let bg_widget = Color32::from_rgb(25, 29, 38); // #191d26
-    let bg_hover = Color32::from_rgb(35, 40, 52); // slightly lighter widget
-    let accent = Color32::from_rgb(102, 27, 28); // #661b1c
-    let accent_dark = Color32::from_rgb(83, 21, 22); // #531516
-    let text_primary = Color32::WHITE;
-    let text_dim = Color32::from_rgb(160, 165, 175);
-    let border = Color32::from_rgb(40, 46, 58);
-
-    visuals.panel_fill = bg_panel;
-    visuals.window_fill = bg_panel;
-    visuals.extreme_bg_color = bg_dark;
-    visuals.faint_bg_color = bg_widget;
-
-    visuals.widgets.noninteractive.bg_fill = bg_widget;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text_dim);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5_f32, border);
-    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(2);
-
-    visuals.widgets.inactive.bg_fill = bg_widget;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5_f32, border);
-    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(2);
-
-    visuals.widgets.hovered.bg_fill = bg_hover;
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
-    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(2);
-
-    visuals.widgets.active.bg_fill = accent_dark;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, accent);
-    visuals.widgets.active.corner_radius = egui::CornerRadius::same(2);
-
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(102, 27, 28, 80);
-    visuals.selection.stroke = egui::Stroke::new(1.0_f32, accent);
-
-    visuals.window_shadow = egui::Shadow::NONE;
-    visuals.popup_shadow = egui::Shadow::NONE;
-
-    ctx.set_visuals(visuals);
-
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::Vec2::new(6.0, 4.0);
-    style.spacing.button_padding = egui::Vec2::new(8.0, 3.0);
-    ctx.set_style(style);
-}
 
 impl eframe::App for NetRazeDesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

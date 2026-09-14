@@ -195,6 +195,8 @@ pub struct AppState {
     pub cm_state: CredentialManagerState,
     pub networks: Vec<NetworkSubnet>,
     pub selected_host: Option<String>,
+    /// Raw NodeId.0 of the node currently selected in the config panel.
+    pub selected_workflow_node: Option<usize>,
     pub target_config: TargetConfig,
     pub credential_config: CredentialConfig,
     pub status_text: String,
@@ -244,6 +246,7 @@ impl AppState {
             cm_state: CredentialManagerState::default(),
             networks: Vec::new(),
             selected_host: None,
+            selected_workflow_node: None,
             target_config: TargetConfig {
                 target: String::new(),
                 protocol: "SMB".to_owned(),
