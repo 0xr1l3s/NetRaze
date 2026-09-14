@@ -1,6 +1,7 @@
 mod app;
 mod runtime;
 mod state;
+mod theme;
 mod ui;
 mod workflow;
 mod workspace;

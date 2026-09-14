@@ -1,18 +1,19 @@
 use crate::state::{AppState, HostStatus};
+use crate::theme;
 use crate::workflow::WorkflowNode;
 use egui::{Color32, Pos2, Rect, Ui};
 
-const TEXT_DIM: Color32 = Color32::from_rgb(160, 165, 175);
-const ROW_ALT: Color32 = Color32::from_rgba_premultiplied(14, 18, 25, 180);
-const ROW_HOVER: Color32 = Color32::from_rgba_premultiplied(35, 42, 54, 200);
-const SEPARATOR: Color32 = Color32::from_rgb(40, 46, 58);
-const GREEN: Color32 = Color32::from_rgb(80, 200, 120);
-const BLUE: Color32 = Color32::from_rgb(80, 170, 255);
-const YELLOW: Color32 = Color32::from_rgb(220, 200, 60);
-const DOT_COLOR: Color32 = Color32::from_rgb(40, 46, 58);
-const DOT_SPACING: f32 = 20.0;
-const DOT_RADIUS: f32 = 0.8;
-const ROW_H: f32 = 30.0;
+const TEXT_DIM:  Color32 = theme::MUTED;
+const ROW_ALT:   Color32 = Color32::from_rgb(27, 26, 25);   // #1B1A19 faint stripe
+const ROW_HOVER: Color32 = Color32::from_rgb(47, 45, 42);   // #2F2D2A
+const SEPARATOR: Color32 = theme::LINE;
+const GREEN:     Color32 = theme::SUCCESS;
+const BLUE:      Color32 = theme::INFO;
+const YELLOW:    Color32 = theme::WARNING;
+const DOT_COLOR:   Color32 = theme::DOT_COLOR;
+const DOT_SPACING: f32 = theme::DOT_SPACING;
+const DOT_RADIUS:  f32 = theme::DOT_RADIUS;
+const ROW_H: f32 = 26.0;  // design: interact_size.y = 24
 
 struct FlatHost {
     ip: String,
@@ -30,8 +31,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
     // ── Draw dot-grid background (same as workspace canvas) ──
     let full_rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
-    // Fill with the same dark base color used by the workspace snarl canvas
-    painter.rect_filled(full_rect, 0.0, Color32::from_rgb(18, 21, 28));
+    painter.rect_filled(full_rect, 0.0, theme::CANVAS);
     let min_x = (full_rect.min.x / DOT_SPACING).floor() as i32;
     let max_x = (full_rect.max.x / DOT_SPACING).ceil() as i32;
     let min_y = (full_rect.min.y / DOT_SPACING).floor() as i32;

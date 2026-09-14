@@ -1,27 +1,29 @@
 use egui::{Color32, Pos2, Rect, Stroke, Style, Ui};
-use egui_snarl::ui::{BackgroundPattern, SnarlStyle, SnarlViewer};
+use egui_snarl::ui::{BackgroundPattern, NodeLayout, SnarlStyle, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl, ui::PinInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::state::CredentialRecord;
 
-const DOT_COLOR: Color32 = Color32::from_rgb(40, 46, 58);
-const DOT_SPACING: f32 = 20.0;
-const DOT_RADIUS: f32 = 0.8;
+use crate::theme;
 
-// HostNode card palette — hoisted to module scope so they're shared
-// between `render_host_card` (used by `show_body`) and `show_on_hover_popup`.
-const HOST_PRIMARY: Color32 = Color32::from_rgb(235, 240, 250);
-const HOST_MUTED: Color32 = Color32::from_rgb(150, 155, 165);
-const HOST_OK: Color32 = Color32::from_rgb(80, 200, 120);
-const HOST_WARN: Color32 = Color32::from_rgb(220, 170, 60);
-const HOST_BAD: Color32 = Color32::from_rgb(210, 60, 60);
-const HOST_ADMIN_PURPLE: Color32 = Color32::from_rgb(170, 110, 210);
-const HOST_CHIP_NEUTRAL: Color32 = Color32::from_rgb(120, 150, 180);
+const DOT_COLOR:   Color32 = theme::DOT_COLOR;
+const DOT_SPACING: f32     = theme::DOT_SPACING;
+const DOT_RADIUS:  f32     = theme::DOT_RADIUS;
 
-/// Fixed width for the HostNode body card. Must be narrow enough that the
-/// frame never exceeds the header width on screen.
-const HOST_BODY_W: f32 = 240.0;
+// HostNode card palette — Vantage semantic tokens.
+const HOST_PRIMARY:      Color32 = theme::FG;        // #F5F4F2
+const HOST_OK:           Color32 = theme::SUCCESS;   // #55B77F
+const HOST_WARN:         Color32 = theme::WARNING;   // #E2A44C
+const HOST_BAD:          Color32 = theme::ERROR;     // #E8604C
+const HOST_ADMIN_PURPLE: Color32 = theme::INFO;      // #5F9DE8 (admin = blue info)
+
+/// Circle geometry for HostNode (radius, label height, gap between circle and label).
+const HOST_R:         f32 = 28.0;
+const HOST_LABEL_H:   f32 = 13.0;
+const HOST_LABEL_GAP: f32 = 5.0;
+/// Total body height allocated in show_body: circle diameter + gap + label.
+const HOST_BODY_H: f32 = HOST_R * 2.0 + HOST_LABEL_GAP + HOST_LABEL_H;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowNode {
@@ -133,94 +135,6 @@ fn host_status_color(node: &WorkflowNode) -> Option<Color32> {
     }
 }
 
-/// Draw a small rounded status/counter chip.
-fn host_chip(ui: &mut Ui, text: &str, fg: Color32) {
-    let bg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 36);
-    egui::Frame::new()
-        .fill(bg)
-        .stroke(Stroke::new(1.0_f32, fg.gamma_multiply(0.55)))
-        .corner_radius(egui::CornerRadius::same(3))
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).small().strong().color(fg));
-        });
-}
-
-/// Render the compact HostNode card body (OS line + domain line + chips
-/// row + optional credential line). Called from `show_body`. Width is
-/// expected to be pre-constrained by the caller to `HOST_BODY_W`.
-#[allow(clippy::too_many_arguments)]
-fn render_host_card(
-    ui: &mut Ui,
-    os_info: &str,
-    domain: &str,
-    signing: Option<bool>,
-    smbv1: Option<bool>,
-    shares: &[String],
-    admin: bool,
-    users: &[String],
-    logged_in_cred: Option<&str>,
-) {
-    // Bloc 1 — OS + domain (pas de duplication de l'identité affichée dans le header).
-    if !os_info.is_empty() {
-        ui.label(
-            egui::RichText::new(shorten_os(os_info))
-                .color(HOST_PRIMARY)
-                .family(egui::FontFamily::Monospace),
-        );
-    }
-    if !domain.is_empty() {
-        ui.label(
-            egui::RichText::new(domain)
-                .small()
-                .color(HOST_MUTED)
-                .family(egui::FontFamily::Monospace),
-        );
-    }
-
-    // Bloc 2 — chips status + compteurs sur une seule rangée wrappée.
-    let show_signing = matches!(signing, Some(true));
-    let show_smbv1 = matches!(smbv1, Some(true));
-    let any_chip = admin || show_signing || show_smbv1 || !shares.is_empty() || !users.is_empty();
-    if any_chip {
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-            if admin {
-                host_chip(ui, "ADMIN", HOST_ADMIN_PURPLE);
-            }
-            if show_signing {
-                host_chip(ui, "signing", HOST_OK);
-            }
-            if show_smbv1 {
-                host_chip(ui, "SMBv1", HOST_BAD);
-            }
-            if !shares.is_empty() {
-                host_chip(ui, &format!("📂 {}", shares.len()), HOST_CHIP_NEUTRAL);
-            }
-            if !users.is_empty() {
-                host_chip(ui, &format!("👥 {}", users.len()), HOST_CHIP_NEUTRAL);
-            }
-        });
-    }
-
-    // Bloc 3 — credential pwné (conditionnel).
-    if let Some(cred) = logged_in_cred {
-        ui.add_space(4.0);
-        let (text, color) = if admin {
-            (format!("🔐 {cred} — Pwn3d!"), HOST_OK)
-        } else {
-            (cred.to_string(), HOST_WARN)
-        };
-        ui.label(
-            egui::RichText::new(text)
-                .small()
-                .strong()
-                .color(color)
-                .family(egui::FontFamily::Monospace),
-        );
-    }
-}
 
 impl WorkflowNode {
     pub fn label(&self) -> String {
@@ -231,13 +145,7 @@ impl WorkflowNode {
             WorkflowNode::ActionNode { action } => format!("Action: {action}"),
             WorkflowNode::OutputNode { .. } => "Output Node".to_owned(),
             WorkflowNode::GenericModule { name } => format!("Module: {name}"),
-            WorkflowNode::HostNode { ip, hostname, .. } => {
-                if hostname.is_empty() || hostname == ip {
-                    format!("🖥 {ip}")
-                } else {
-                    format!("🖥 {ip} ({hostname})")
-                }
-            }
+            WorkflowNode::HostNode { .. } => String::new(),
             WorkflowNode::SharesNode {
                 host_ip, hostname, ..
             } => {
@@ -352,9 +260,7 @@ impl WorkflowDocument {
         let row = (count / 4.0).floor();
         let pos = Pos2::new(40.0 + col * 280.0, 40.0 + row * 200.0);
 
-        // Collapsed by default so the workspace stays readable when many
-        // hosts land at once — users expand what they want to inspect.
-        self.snarl.insert_node_collapsed(
+        self.snarl.insert_node(
             pos,
             WorkflowNode::HostNode {
                 ip,
@@ -381,6 +287,9 @@ impl WorkflowDocument {
         // Re-rasterize glyphs at the zoomed size instead of bilinear-scaling
         // the original texture — keeps node labels sharp when zooming in.
         style.crisp_magnified_text = Some(true);
+        // Disable the collapse triangle — HostNodes are circles and collapsing
+        // breaks their appearance; no node kind benefits from collapsing here.
+        style.collapsible = Some(false);
         style
     }
 }
@@ -408,6 +317,8 @@ pub struct WorkflowViewer {
     pub fingerprint_requests: Vec<String>,
     /// (host_ip, hostname, credential) — open a console window for a pwned host
     pub console_requests: Vec<(String, String, CredentialRecord)>,
+    /// Raw NodeId.0 of the node clicked — drained into state.selected_workflow_node.
+    pub selected_node_id: Option<usize>,
 }
 
 impl WorkflowViewer {
@@ -423,6 +334,7 @@ impl WorkflowViewer {
             enumav_requests: Vec::new(),
             fingerprint_requests: Vec::new(),
             console_requests: Vec::new(),
+            selected_node_id: None,
         }
     }
 
@@ -510,259 +422,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. } => {
                 ui.label("-");
             }
-            WorkflowNode::SharesNode {
-                host_ip: _,
-                hostname: _,
-                shares,
-                ..
-            } => {
-                ui.set_min_width(200.0);
-                ui.set_max_width(280.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    if shares.is_empty() {
-                        ui.label(
-                            egui::RichText::new("⚠ No shares found")
-                                .small()
-                                .color(Color32::from_rgb(220, 170, 60)),
-                        );
-                    } else {
-                        for share_str in shares.iter() {
-                            let (name, stype, access) = parse_share_string(share_str);
-
-                            let access_color = match access {
-                                "RW" => Color32::from_rgb(80, 200, 120),
-                                "R" => Color32::from_rgb(80, 170, 255),
-                                _ => Color32::from_rgb(180, 60, 60),
-                            };
-
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new("📁").small());
-                                ui.label(
-                                    egui::RichText::new(name)
-                                        .small()
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                );
-                                ui.label(
-                                    egui::RichText::new(format!("[{stype}]"))
-                                        .small()
-                                        .color(Color32::from_rgb(100, 105, 115)),
-                                );
-                                let badge = egui::Button::new(
-                                    egui::RichText::new(access)
-                                        .small()
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                )
-                                .fill(access_color)
-                                .corner_radius(egui::CornerRadius::same(3))
-                                .stroke(egui::Stroke::NONE)
-                                .sense(egui::Sense::hover());
-                                ui.add(badge);
-                            });
-                        }
-                    }
-                });
-            }
-            WorkflowNode::UsersNode {
-                host_ip: _,
-                hostname: _,
-                users,
-            } => {
-                ui.set_min_width(180.0);
-                ui.set_max_width(250.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    if users.is_empty() {
-                        ui.label(
-                            egui::RichText::new("⚠ No users found")
-                                .small()
-                                .color(Color32::from_rgb(220, 170, 60)),
-                        );
-                    } else {
-                        for user in users.iter() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new("👤").small());
-
-                                let name_color = if user.disabled {
-                                    Color32::from_rgb(120, 120, 130)
-                                } else {
-                                    Color32::WHITE
-                                };
-                                ui.label(
-                                    egui::RichText::new(&user.name)
-                                        .small()
-                                        .strong()
-                                        .color(name_color),
-                                );
-
-                                // Privilege badge
-                                let (priv_label, priv_color) = match user.privilege_level {
-                                    2 => ("ADMIN", Color32::from_rgb(220, 60, 60)),
-                                    1 => ("USER", Color32::from_rgb(80, 170, 255)),
-                                    _ => ("GUEST", Color32::from_rgb(120, 120, 130)),
-                                };
-                                let badge = egui::Button::new(
-                                    egui::RichText::new(priv_label)
-                                        .small()
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                )
-                                .fill(priv_color)
-                                .corner_radius(egui::CornerRadius::same(3))
-                                .stroke(egui::Stroke::NONE)
-                                .sense(egui::Sense::hover());
-                                ui.add(badge);
-
-                                if user.disabled {
-                                    ui.label(
-                                        egui::RichText::new("DISABLED")
-                                            .small()
-                                            .color(Color32::from_rgb(160, 100, 60)),
-                                    );
-                                }
-                                if user.locked {
-                                    ui.label(egui::RichText::new("🔒").small());
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-            WorkflowNode::DumpNode {
-                host_ip: _,
-                hostname: _,
-                dump_type,
-                entries,
-                error,
-            } => {
-                ui.set_min_width(280.0);
-                ui.set_max_width(400.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    if let Some(err) = error {
-                        ui.label(
-                            egui::RichText::new(format!("⚠ {err}"))
-                                .small()
-                                .color(Color32::from_rgb(220, 170, 60)),
-                        );
-                    }
-                    if entries.is_empty() && error.is_none() {
-                        ui.label(
-                            egui::RichText::new("⏳ Dumping...")
-                                .small()
-                                .color(Color32::from_rgb(160, 165, 175)),
-                        );
-                    }
-                    let is_sam = dump_type == "SAM";
-                    for entry in entries.iter() {
-                        if is_sam {
-                            // SAM format: username:rid:lm:nt:::
-                            let parts: Vec<&str> = entry.splitn(7, ':').collect();
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                if parts.len() >= 4 {
-                                    ui.label(
-                                        egui::RichText::new(parts[0])
-                                            .small()
-                                            .strong()
-                                            .color(Color32::WHITE)
-                                            .family(egui::FontFamily::Monospace),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(":{}", parts[1]))
-                                            .small()
-                                            .color(Color32::from_rgb(160, 165, 175))
-                                            .family(egui::FontFamily::Monospace),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            ":{}:{}:::",
-                                            parts[2], parts[3]
-                                        ))
-                                        .small()
-                                        .color(Color32::from_rgb(80, 200, 120))
-                                        .family(egui::FontFamily::Monospace),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new(entry)
-                                            .small()
-                                            .color(Color32::WHITE)
-                                            .family(egui::FontFamily::Monospace),
-                                    );
-                                }
-                            });
-                        } else {
-                            // LSA format: key: value or just name
-                            ui.label(
-                                egui::RichText::new(entry)
-                                    .small()
-                                    .color(Color32::from_rgb(200, 160, 255))
-                                    .family(egui::FontFamily::Monospace),
-                            );
-                        }
-                    }
-                });
-            }
-            WorkflowNode::EnumAvNode {
-                products,
-                error,
-                done,
-                ..
-            } => {
-                ui.set_min_width(260.0);
-                ui.set_max_width(380.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    if let Some(err) = error {
-                        ui.label(
-                            egui::RichText::new(format!("⚠ {err}"))
-                                .small()
-                                .color(Color32::from_rgb(220, 170, 60)),
-                        );
-                    }
-                    if !done {
-                        ui.label(
-                            egui::RichText::new("⏳ Scanning...")
-                                .small()
-                                .color(Color32::from_rgb(160, 165, 175)),
-                        );
-                    }
-                    for product_line in products.iter() {
-                        // Format: "ProductName|status"
-                        let (name, status) =
-                            product_line.split_once('|').unwrap_or((product_line, ""));
-                        let (icon, color) = match status {
-                            "INSTALLED and RUNNING" => ("🟢", Color32::from_rgb(80, 200, 120)),
-                            "RUNNING" => ("🔵", Color32::from_rgb(80, 170, 255)),
-                            "INSTALLED" => ("🟡", Color32::from_rgb(220, 200, 60)),
-                            _ => ("⚪", Color32::from_rgb(160, 165, 175)),
-                        };
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new(icon).small());
-                            ui.label(
-                                egui::RichText::new(name)
-                                    .small()
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
-                            ui.label(egui::RichText::new(status).small().color(color));
-                        });
-                    }
-                    if *done && products.is_empty() {
-                        ui.label(
-                            egui::RichText::new("No AV/EDR detected")
-                                .small()
-                                .italics()
-                                .color(Color32::from_rgb(160, 165, 175)),
-                        );
-                    }
-                });
+            WorkflowNode::SharesNode { .. }
+            | WorkflowNode::UsersNode { .. }
+            | WorkflowNode::DumpNode { .. }
+            | WorkflowNode::EnumAvNode { .. } => {
+                // Circular nodes — content is in the config panel, not the pin row.
             }
         };
         let is_output_node = matches!(
@@ -813,13 +477,9 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 PinInfo::triangle().with_fill(Color32::from_rgb(200, 120, 220))
             }
             WorkflowNode::HostNode { .. } => {
-                // All visual content is rendered in `show_body` via
-                // `render_host_card` (hostname/IP already shown by the
-                // snarl header, so the body stays focused on status).
-                // The coloured status border is painted by snarl on the
-                // real frame/header stroke — see `node_frame` /
-                // `header_frame` overrides.
-                PinInfo::triangle().with_fill(Color32::from_rgb(80, 220, 120))
+                PinInfo::circle()
+                    .with_fill(Color32::TRANSPARENT)
+                    .with_stroke(Stroke::NONE)
             }
             WorkflowNode::SharesNode { .. } => {
                 ui.label("-");
@@ -848,20 +508,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
     }
 
     // ------------------------------------------------------------------
-    // HostNode body + hover popup — proper snarl architecture.
-    // The body lives between the input and output pin columns (snarl's
-    // `left_to_right(Align::Min)` body_ui), which places the card
-    // naturally in the middle of the frame regardless of header width.
-    // The hover popup reveals the details that don't fit in the compact
-    // card (OS complet, signing/SMBv1 status explicites, listes
-    // shares/users).
+    // HostNode rendered as a circle: hide the header, transparent frame,
+    // paint a filled circle + icon + hostname label in show_body.
     // ------------------------------------------------------------------
 
-    fn has_body(&mut self, node: &WorkflowNode) -> bool {
-        matches!(node, WorkflowNode::HostNode { .. })
-    }
-
-    fn show_body(
+    fn show_header(
         &mut self,
         node: NodeId,
         _inputs: &[InPin],
@@ -869,33 +520,150 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         ui: &mut Ui,
         snarl: &mut Snarl<WorkflowNode>,
     ) {
-        if let WorkflowNode::HostNode {
-            os_info,
-            domain,
-            signing,
-            smbv1,
-            shares,
-            admin,
-            users,
-            logged_in_cred,
-            ..
-        } = &snarl[node]
-        {
-            ui.vertical(|ui| {
-                ui.set_min_width(HOST_BODY_W);
-                ui.set_max_width(HOST_BODY_W);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                render_host_card(
-                    ui,
-                    os_info,
-                    domain,
-                    *signing,
-                    *smbv1,
-                    shares,
-                    *admin,
-                    users,
-                    logged_in_cred.as_deref(),
-                );
+        let is_circular = matches!(
+            &snarl[node],
+            WorkflowNode::HostNode { .. }
+                | WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
+        );
+        if !is_circular {
+            ui.label(self.title(&snarl[node]));
+        }
+    }
+
+    fn node_layout(
+        &mut self,
+        default: NodeLayout,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        snarl: &Snarl<WorkflowNode>,
+    ) -> NodeLayout {
+        let is_circular = matches!(
+            &snarl[node],
+            WorkflowNode::HostNode { .. }
+                | WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
+        );
+        if is_circular {
+            NodeLayout {
+                min_pin_row_height: HOST_BODY_H,
+                ..default
+            }
+        } else {
+            default
+        }
+    }
+
+    fn has_body(&mut self, node: &WorkflowNode) -> bool {
+        matches!(
+            node,
+            WorkflowNode::HostNode { .. }
+                | WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
+        )
+    }
+
+    fn show_body(
+        &mut self,
+        node: NodeId,
+        inputs: &[InPin],
+        outputs: &[OutPin],
+        ui: &mut Ui,
+        snarl: &mut Snarl<WorkflowNode>,
+    ) {
+        // Collect all draw parameters as owned values to avoid borrow conflicts
+        // with the context_menu closure that needs &mut snarl.
+        let draw_params: Option<(&'static str, String, Color32)> = match &snarl[node] {
+            WorkflowNode::HostNode { ip, hostname, admin, .. } => {
+                let is_admin = *admin;
+                let label = if hostname.is_empty() || hostname == ip.as_str() {
+                    ip.clone()
+                } else {
+                    hostname.clone()
+                };
+                let border = host_status_color(&snarl[node]).unwrap_or(theme::LINE_2);
+                let icon: &'static str = if is_admin { "⚡" } else { "🖥" };
+                Some((icon, label, border))
+            }
+            WorkflowNode::SharesNode { host_ip, hostname, shares, .. } => {
+                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+                let border = if shares.is_empty() { theme::MUTED } else { theme::INFO };
+                Some(("📂", label, border))
+            }
+            WorkflowNode::UsersNode { host_ip, hostname, users } => {
+                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+                let border = if users.is_empty() { theme::MUTED } else { theme::INFO };
+                Some(("👥", label, border))
+            }
+            WorkflowNode::DumpNode { host_ip, hostname, dump_type, entries, error, .. } => {
+                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+                let icon: &'static str = if dump_type == "SAM" { "🔑" } else { "🔓" };
+                let border = if error.is_some() {
+                    theme::ERROR
+                } else if !entries.is_empty() {
+                    theme::SUCCESS
+                } else {
+                    theme::WARNING
+                };
+                Some((icon, label, border))
+            }
+            WorkflowNode::EnumAvNode { host_ip, hostname, products, done, .. } => {
+                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+                let border = if !products.is_empty() {
+                    theme::WARNING
+                } else if *done {
+                    theme::SUCCESS
+                } else {
+                    theme::MUTED
+                };
+                Some(("🛡", label, border))
+            }
+            _ => None,
+        };
+
+        if let Some((icon, label, border)) = draw_params {
+            // Extra left padding prevents the circle stroke from being clipped
+            // at the body-UI clip rect's left edge (clip rect min.x == rect.left()).
+            const PAD_L: f32 = 3.0;
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(PAD_L + HOST_R * 2.0, HOST_BODY_H),
+                egui::Sense::click(),
+            );
+            let center  = egui::pos2(rect.left() + PAD_L + HOST_R, rect.top() + HOST_R);
+            let painter = ui.painter();
+
+            painter.circle_filled(center, HOST_R, theme::ELEV_1);
+            painter.circle_stroke(center, HOST_R - 1.0, egui::Stroke::new(2.0, border));
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                icon,
+                egui::FontId::new(20.0, egui::FontFamily::Proportional),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                egui::pos2(center.x, rect.bottom() - HOST_LABEL_H / 2.0),
+                egui::Align2::CENTER_CENTER,
+                &label,
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                theme::MUTED,
+            );
+
+            if response.clicked() {
+                self.selected_node_id = Some(node.0);
+            }
+            // The body allocation is registered AFTER snarl's node-frame interact, so it
+            // wins Flags::CLICKED in the hit test. snarl's own r.context_menu() on the
+            // node frame never fires (r doesn't get CLICKED). Attach the menu here instead.
+            response.context_menu(|menu_ui| {
+                self.show_node_menu(node, inputs, outputs, menu_ui, snarl);
             });
         }
     }
@@ -1005,11 +773,9 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         }
     }
 
-    /// Customize the node's frame stroke with its status colour so the
-    /// *real* cadre (painted by snarl itself) is coloured — no overlay.
-    ///
-    /// For HostNodes we replace the default stroke with a thicker,
-    /// status-coloured one. All other node kinds keep the default.
+    /// Circular nodes (HostNode, SharesNode, etc.) get a fully transparent
+    /// frame so the painted circle is the only visible chrome. All other
+    /// node kinds keep the default snarl frame.
     fn node_frame(
         &mut self,
         default: egui::Frame,
@@ -1018,17 +784,28 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         _outputs: &[OutPin],
         snarl: &Snarl<WorkflowNode>,
     ) -> egui::Frame {
-        if let Some(color) = host_status_color(&snarl[node]) {
-            // Keep the default stroke *width* (matches the plain gray cadre
-            // of non-host nodes) — only swap the colour.
-            default.stroke(Stroke::new(default.stroke.width, color))
+        let is_circular = matches!(
+            &snarl[node],
+            WorkflowNode::HostNode { .. }
+                | WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
+        );
+        if is_circular {
+            egui::Frame {
+                fill: egui::Color32::TRANSPARENT,
+                stroke: Stroke::NONE,
+                corner_radius: egui::CornerRadius::ZERO,
+                inner_margin: egui::Margin::ZERO,
+                outer_margin: egui::Margin::ZERO,
+                ..default
+            }
         } else {
             default
         }
     }
 
-    /// Mirror the same treatment on the header frame so the top half of the
-    /// cadre matches (otherwise only the body strip gets the colour).
     fn header_frame(
         &mut self,
         default: egui::Frame,
@@ -1037,8 +814,23 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         _outputs: &[OutPin],
         snarl: &Snarl<WorkflowNode>,
     ) -> egui::Frame {
-        if let Some(color) = host_status_color(&snarl[node]) {
-            default.stroke(Stroke::new(default.stroke.width, color))
+        let is_circular = matches!(
+            &snarl[node],
+            WorkflowNode::HostNode { .. }
+                | WorkflowNode::SharesNode { .. }
+                | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DumpNode { .. }
+                | WorkflowNode::EnumAvNode { .. }
+        );
+        if is_circular {
+            egui::Frame {
+                fill: egui::Color32::TRANSPARENT,
+                stroke: Stroke::NONE,
+                corner_radius: egui::CornerRadius::ZERO,
+                inner_margin: egui::Margin::ZERO,
+                outer_margin: egui::Margin::ZERO,
+                ..default
+            }
         } else {
             default
         }
@@ -1160,6 +952,11 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         }
 
         if is_host {
+            if ui.button("📋 Sélectionner").clicked() {
+                self.selected_node_id = Some(node.0);
+                ui.close();
+            }
+            ui.separator();
             // "Fingerprint" — re-run SMB fingerprint (no auth needed)
             if ui.button("🔍 Fingerprint").clicked() {
                 if let WorkflowNode::HostNode { ip, .. } = &snarl[node] {
@@ -1446,21 +1243,6 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
     }
 }
 
-/// Abbreviate a verbose OS string to fit a compact node card.
-/// "Windows Server 2019 Build 19041" → "WinSrv 2019 (19041)"
-/// "Windows 10 Pro Build 19044" → "Win10 Pro (19044)"
-fn shorten_os(s: &str) -> String {
-    let mut out = s
-        .replace("Microsoft ", "")
-        .replace("Windows Server", "WinSrv")
-        .replace("Windows ", "Win");
-    if let Some(idx) = out.find(" Build ") {
-        let (head, tail) = out.split_at(idx);
-        let build = tail.trim_start_matches(" Build ").trim();
-        out = format!("{head} ({build})");
-    }
-    out
-}
 
 /// Parse share string "NAME [TYPE] (ACCESS)" into (name, type, access).
 fn parse_share_string(s: &str) -> (&str, &str, &str) {
