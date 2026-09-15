@@ -5,7 +5,7 @@
 //! (names, signatures, `Result<_, String>`) is preserved so callers in
 //! `sam.rs`, `ntlm.rs`, `dump.rs`, `hive.rs` don't need to change.
 
-use aes::Aes128;
+use aes::{Aes128, Aes256};
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 use cipher::{BlockDecrypt, KeyInit};
 use des::Des;
@@ -16,6 +16,7 @@ use md5::Md5;
 use sha2::Sha256;
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
+type Aes256CbcDec = cbc::Decryptor<Aes256>;
 type HmacMd5 = Hmac<Md5>;
 type HmacSha256 = Hmac<Sha256>;
 
@@ -87,6 +88,49 @@ pub fn aes_128_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<V
         .decrypt_padded_mut::<NoPadding>(&mut buf)
         .map_err(|e| format!("AES decrypt: {e}"))?;
     Ok(pt.to_vec())
+}
+
+/// AES-256-CBC decrypt, no padding. `iv` is 16 bytes, `key` is 32 bytes,
+/// `ciphertext` length must be a multiple of 16.
+pub fn aes_256_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != 32 || iv.len() != 16 {
+        return Err("AES-256 key must be 32 bytes, IV must be 16 bytes".into());
+    }
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+        return Err(format!(
+            "AES-256-CBC requires block-aligned input, got {} bytes",
+            ciphertext.len()
+        ));
+    }
+    let dec =
+        Aes256CbcDec::new_from_slices(key, iv).map_err(|e| format!("AES-256 init: {e}"))?;
+    let mut buf = ciphertext.to_vec();
+    let pt = dec
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|e| format!("AES-256 decrypt: {e}"))?;
+    Ok(pt.to_vec())
+}
+
+/// AES-256 LSA decrypt (Impacket-compatible). Each 16-byte block is decrypted
+/// independently with a zero IV — equivalent to AES-ECB. Windows Vista+ stores
+/// LSA secrets with this scheme; standard CBC chaining is NOT used.
+pub fn aes_256_lsa_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != 32 {
+        return Err("aes_256_lsa_decrypt: key must be 32 bytes".into());
+    }
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+        return Err(format!(
+            "aes_256_lsa_decrypt: input must be block-aligned, got {} bytes",
+            ciphertext.len()
+        ));
+    }
+    let cipher = Aes256::new_from_slice(key).map_err(|e| format!("AES-256 init: {e}"))?;
+    let mut out = ciphertext.to_vec();
+    for chunk in out.chunks_mut(16) {
+        let block = aes::cipher::generic_array::GenericArray::from_mut_slice(chunk);
+        cipher.decrypt_block(block);
+    }
+    Ok(out)
 }
 
 /// RC4 encrypt/decrypt (stream cipher — the two ops are identical).

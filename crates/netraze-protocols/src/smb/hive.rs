@@ -123,6 +123,9 @@ impl Hive {
     }
 
     /// Read a named value's raw data bytes.
+    ///
+    /// Pass `""` to read the default (unnamed) registry value — that is the VK
+    /// with a zero-length name, which is how Windows stores it in a saved hive.
     pub fn value(&self, key: HiveKey, name: &str) -> Result<Vec<u8>, String> {
         let f = key.0;
         let count = self.nk_value_count(f);
