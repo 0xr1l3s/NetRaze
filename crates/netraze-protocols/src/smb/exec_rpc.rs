@@ -155,7 +155,6 @@ pub async fn execute_command_live(
         ($($arg:tt)*) => {{
             let line = format!($($arg)*);
             live_log(&line);
-            eprintln!("[smb::exec] {line}");
             trace.push(line);
         }};
     }
