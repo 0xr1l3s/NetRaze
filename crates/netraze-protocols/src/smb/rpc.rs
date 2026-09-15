@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use netraze_dcerpc::auth::{AuthLevel, NtlmAuthenticator, NtlmBinder};
-use netraze_dcerpc::interfaces::{scmr, srvsvc};
+use netraze_dcerpc::interfaces::{scmr, srvsvc, winreg};
 use netraze_dcerpc::uuid::Uuid;
 use netraze_dcerpc::{DceRpcError, Result as RpcResult, RpcChannel, RpcTransport};
 
@@ -459,6 +459,57 @@ pub async fn bind_svcctl_over_smb(
             RpcChannel::bind_authenticated(transport, interface, version, binder)
                 .await
                 .map_err(|e| format!("svcctl authenticated bind fallback: {e}"))
+        }
+    }
+}
+
+/// Bind the WINREG v1.0 interface over `\PIPE\winreg`.
+///
+/// Same unauthenticated DCE bind first strategy as SAMR and SVCCTL.
+/// Windows 11 authorizes `OpenLocalMachine`/`BaseRegSaveKey` via the SMB
+/// session's security context; NTLMSSP re-auth creates a filtered token that
+/// is rejected even with `LocalAccountTokenFilterPolicy=1` in some scenarios.
+pub async fn bind_winreg_over_smb(
+    session: Arc<Mutex<Smb2Session>>,
+    ipc_tree_id: u32,
+    cred: &SmbCredential,
+) -> Result<RpcChannel, String> {
+    async fn open_winreg_pipe(
+        session: &Arc<Mutex<Smb2Session>>,
+        ipc_tree_id: u32,
+    ) -> Result<Arc<dyn RpcTransport>, String> {
+        let s = Arc::clone(session);
+        let pipe = tokio::task::spawn_blocking(move || {
+            SmbPipeTransport::open(s, ipc_tree_id, "winreg")
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking(winreg pipe_open): {e}"))??;
+        Ok(Arc::new(pipe))
+    }
+
+    let interface = winreg::uuid();
+    let version = (1u16, 0u16);
+
+    let guest_shape = !cred.username.is_empty()
+        && cred.nt_hash.is_none()
+        && cred.password.is_empty();
+    if cred.username.is_empty() || guest_shape {
+        let transport = open_winreg_pipe(&session, ipc_tree_id).await?;
+        return RpcChannel::bind(transport, interface, version)
+            .await
+            .map_err(|e| format!("winreg unauthenticated bind: {e}"));
+    }
+
+    // Unauthenticated DCE bind first — rides the SMB session identity.
+    let transport = open_winreg_pipe(&session, ipc_tree_id).await?;
+    match RpcChannel::bind(transport, interface, version).await {
+        Ok(channel) => Ok(channel),
+        Err(_) => {
+            let transport = open_winreg_pipe(&session, ipc_tree_id).await?;
+            let binder = build_binder(cred, 0);
+            RpcChannel::bind_authenticated(transport, interface, version, binder)
+                .await
+                .map_err(|e| format!("winreg authenticated bind fallback: {e}"))
         }
     }
 }

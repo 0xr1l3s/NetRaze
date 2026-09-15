@@ -22,6 +22,10 @@ pub const PIPE: &str = "\\\\PIPE\\\\winreg";
 
 /// `KEY_ALL_ACCESS` — standard mask for registry operations. `0x000F003F`.
 pub const KEY_ALL_ACCESS: u32 = 0x000F_003F;
+/// `MAXIMUM_ALLOWED` — used as `samDesired` in `BaseRegOpenKey` before `BaseRegSaveKey`.
+pub const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+/// `REG_OPTION_NON_VOLATILE` — default `dwOptions` for `BaseRegOpenKey`.
+pub const REG_OPTION_NON_VOLATILE: u32 = 0x0000_0001;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +89,10 @@ pub fn decode_base_reg_close_key_response(stub: &[u8]) -> Result<(RegHandle, u32
 // ---------------------------------------------------------------------------
 
 /// Encode request.
+///
+/// `lpSubKey` is `RRP_UNICODE_STRING` (inline struct, NUL-inclusive) matching
+/// Impacket's `checkNullString` wire format. Use `MAXIMUM_ALLOWED` /
+/// `REG_OPTION_NON_VOLATILE` for the default open before `BaseRegSaveKey`.
 pub fn encode_base_reg_open_key_request(
     hkey: &RegHandle,
     sub_key: &str,
@@ -93,7 +101,7 @@ pub fn encode_base_reg_open_key_request(
 ) -> Vec<u8> {
     let mut w = NdrWriter::new();
     w.write_context_handle(hkey);
-    w.write_rpc_unicode_string(sub_key);
+    w.write_rrp_unicode_string(sub_key);
     w.write_u32(dw_options);
     w.write_u32(sam_desired);
     w.finish()
@@ -119,9 +127,22 @@ pub struct QueryInfoKeyResponse {
 }
 
 /// Encode request.
+///
+/// Impacket sets `lpClassIn.MaximumLength = 1024` and `MaximumCount = 512`
+/// (1024 / 2 WCHARs) — a pre-allocated output buffer the server fills with
+/// the class name string.
 pub fn encode_base_reg_query_info_key_request(hkey: &RegHandle) -> Vec<u8> {
     let mut w = NdrWriter::new();
     w.write_context_handle(hkey);
+    // lpClassIn: RRP_UNICODE_STRING with 1024-byte output buffer
+    w.write_u16(0);    // Length = 0 (no input content)
+    w.write_u16(1024); // MaximumLength = 1024 bytes
+    w.write_unique_ptr(true, |w| {
+        w.write_u32(512); // MaximumCount = 512 WCHARs
+        w.write_u32(0);   // Offset
+        w.write_u32(0);   // ActualCount = 0 (no input data)
+        // No WCHAR data — ActualCount is 0
+    });
     w.finish()
 }
 
@@ -164,10 +185,19 @@ pub fn decode_base_reg_query_info_key_response(stub: &[u8]) -> Result<QueryInfoK
 // ---------------------------------------------------------------------------
 
 /// Encode request.
+///
+/// Impacket wire format (what Windows actually accepts):
+/// - `lpFile` is `RRP_UNICODE_STRING` **inline** (not a pointer), matching Impacket's
+///   `BaseRegSaveKey.structure` which uses `RRP_UNICODE_STRING`, not `PRRP_UNICODE_STRING`.
+/// - `Length = MaximumLength = (chars + 1) * 2` — both include the NUL char, matching
+///   Impacket's `checkNullString` + `RPC_UNICODE_STRING.__setitem__` behaviour.
+/// - The Buffer WCHAR array includes the NUL terminator and its conformant-varying counts
+///   include the NUL character (required for `[string] WCHAR*` fields).
 pub fn encode_base_reg_save_key_request(hkey: &RegHandle, file_path: &str) -> Vec<u8> {
     let mut w = NdrWriter::new();
     w.write_context_handle(hkey);
-    w.write_rpc_unicode_string(file_path);
+    // lpFile: RRP_UNICODE_STRING (inline struct, NUL-inclusive — Impacket wire format)
+    w.write_rrp_unicode_string(file_path);
     // [unique] PRPC_SECURITY_ATTRIBUTES -- NULL
     w.write_null_referent();
     w.finish()
@@ -237,6 +267,33 @@ mod tests {
 
     #[test]
     fn base_reg_save_key_request_basic() {
+        // "AB" = 2 chars, count_with_nul = 3, len_with_nul = 6
+        // handle(20) + Length(2) + MaxLen(2) + buf_referent(4)       = offset 28
+        //   + MaxCount(4) + Offset(4) + ActualCount(4) + A(2) + B(2) + NUL(2) = 18
+        //   = offset 46; write_u32 for pSA aligns to 4 → pad(2) + null_sa(4)
+        // Total = 20 + 8 + 18 + 2 + 4 = 52
+        let stub = encode_base_reg_save_key_request(&[0u8; 20], "AB");
+        assert_eq!(stub.len(), 52);
+
+        // Length = MaximumLength = 6 (2 chars + NUL, each 2 bytes)
+        assert_eq!(u16::from_le_bytes([stub[20], stub[21]]), 6); // Length
+        assert_eq!(u16::from_le_bytes([stub[22], stub[23]]), 6); // MaximumLength
+
+        // WSTR body is inline immediately after the struct header
+        let count = u32::from_le_bytes([stub[28], stub[29], stub[30], stub[31]]);
+        assert_eq!(count, 3); // MaximumCount = 2 chars + NUL
+
+        // NUL terminator WCHAR is at offset 44 (A@40, B@42, NUL@44)
+        let nul = u16::from_le_bytes([stub[44], stub[45]]);
+        assert_eq!(nul, 0);
+
+        // pSecurityAttributes NULL referent at offset 48 (2-byte pad + 4 bytes)
+        let sa_ref = u32::from_le_bytes([stub[48], stub[49], stub[50], stub[51]]);
+        assert_eq!(sa_ref, 0);
+    }
+
+    #[test]
+    fn base_reg_save_key_request_longer() {
         let stub = encode_base_reg_save_key_request(&[0u8; 20], "Windows\\Temp\\sam_test.save");
         assert!(!stub.is_empty());
     }

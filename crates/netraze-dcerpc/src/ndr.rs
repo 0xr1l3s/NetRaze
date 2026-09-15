@@ -281,6 +281,44 @@ impl NdrWriter {
             w.write_conformant_varying_wstring(&owned);
         });
     }
+
+    /// Emit an inline `RRP_UNICODE_STRING` (used by MS-RRP `BaseRegOpenKey`,
+    /// `BaseRegSaveKey`, etc.) with NUL terminator included in all counts —
+    /// matching Impacket's `checkNullString` + `RPC_UNICODE_STRING.__setitem__`
+    /// wire format.
+    ///
+    /// Layout (all inline — matches Impacket's per-field deferred writing):
+    /// ```text
+    ///   Length        (u16, LE) = (chars + 1) * 2  — NUL included
+    ///   MaximumLength (u16, LE) = same
+    ///   Buffer referent (u32, LE) — non-null unique pointer
+    ///   MaximumCount  (u32, LE) = chars + 1
+    ///   Offset        (u32, LE) = 0
+    ///   ActualCount   (u32, LE) = chars + 1
+    ///   [WCHAR; chars]
+    ///   NUL WCHAR (u16 = 0)
+    /// ```
+    ///
+    /// Impacket's `NDRCALL.getData()` writes each field's deferred pointer data
+    /// IMMEDIATELY after that field's inline portion (per-field), not at end.
+    /// Writing the WSTR body inline here matches that behaviour so subsequent
+    /// call parameters (e.g. `pSecurityAttributes`) land in the correct position.
+    pub fn write_rrp_unicode_string(&mut self, s: &str) {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let count_with_nul = (units.len() + 1) as u32;
+        let len_with_nul = (count_with_nul * 2) as u16;
+        self.write_u16(len_with_nul);
+        self.write_u16(len_with_nul);
+        self.write_referent(); // non-zero referent ID, inline
+        // Write conformant-varying WCHAR array inline (no deferral)
+        self.write_u32(count_with_nul); // MaximumCount
+        self.write_u32(0);              // Offset
+        self.write_u32(count_with_nul); // ActualCount
+        for u in &units {
+            self.write_u16(*u);
+        }
+        self.write_u16(0); // NUL terminator
+    }
 }
 
 // ---------------------------------------------------------------------------

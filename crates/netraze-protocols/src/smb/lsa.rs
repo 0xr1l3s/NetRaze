@@ -4,7 +4,7 @@
 //! Needs the boot key (extracted from SYSTEM) to decrypt the LSA key, then
 //! NL$KM, then individual secrets and cached hashes.
 
-use super::crypto::{aes_128_cbc_decrypt, des_ecb_decrypt, rc4_transform};
+use super::crypto::{aes_256_lsa_decrypt, des_ecb_decrypt, rc4_transform};
 use super::hive::Hive;
 use sha2::{Digest, Sha256};
 
@@ -118,10 +118,22 @@ fn parse_lsa_secret(data: &[u8]) -> Result<LsaSecret, String> {
 
 fn parse_lsa_secret_blob(data: &[u8]) -> Result<LsaSecretBlob, String> {
     if data.len() < 16 {
-        return Err("LSA_SECRET_BLOB too short".into());
+        return Err(format!("LSA_SECRET_BLOB too short: {} bytes", data.len()));
     }
     let length = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    let secret = data[16..16 + length as usize].to_vec();
+    let end = 16usize.saturating_add(length as usize);
+    if end > data.len() {
+        return Err(format!(
+            "LSA_SECRET_BLOB: length field {} extends past data ({} bytes); first 16 bytes: {}",
+            length,
+            data.len(),
+            data[..data.len().min(16)]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+    }
+    let secret = data[16..end].to_vec();
     Ok(LsaSecretBlob {
         _length: length,
         secret,
@@ -244,7 +256,7 @@ fn decrypt_lsa_secret_aes(lsa_key: &[u8], data: &[u8]) -> Result<Vec<u8>, String
         return Err("EncryptedData too short for LSA secret".into());
     }
     let tmp_key = sha256_1000(lsa_key, &record.encrypted_data[..32]);
-    let plaintext = aes_128_cbc_decrypt(&record.encrypted_data[32..], &tmp_key, &[0u8; 16])?;
+    let plaintext = aes_256_lsa_decrypt(&record.encrypted_data[32..], &tmp_key)?;
     let blob = parse_lsa_secret_blob(&plaintext)?;
     Ok(blob.secret)
 }
@@ -259,21 +271,51 @@ fn get_lsa_key_vista(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<u8>, S
             security_hive
                 .path("Policy\\PolEKList")
                 .map_err(|e| e.to_string())?,
-            "default",
+            "",
         )
         .map_err(|e| e.to_string())?;
+
     let record = parse_lsa_secret(&pol_eklist)?;
     if record.encrypted_data.len() < 32 {
         return Err("PolEKList EncryptedData too short".into());
     }
     let tmp_key = sha256_1000(boot_key, &record.encrypted_data[..32]);
-    let plaintext = aes_128_cbc_decrypt(&record.encrypted_data[32..], &tmp_key, &[0u8; 16])?;
+    let plaintext = aes_256_lsa_decrypt(&record.encrypted_data[32..], &tmp_key)?;
     let blob = parse_lsa_secret_blob(&plaintext)?;
-    // LSA key is at offset 52, 32 bytes long
-    if blob.secret.len() < 84 {
-        return Err("LSA secret blob too short for LSA key".into());
+
+    // Read NL$KM\CurrVal to validate which 32-byte window in the blob secret is the real LSA key.
+    // Windows 11 24H2 (Build 26100) uses a different offset than the classic [52..84].
+    let nlkm_data_opt: Option<Vec<u8>> = security_hive
+        .path("Policy\\Secrets\\NL$KM\\CurrVal")
+        .and_then(|k| security_hive.value(k, ""))
+        .ok();
+
+    if let Some(ref nlkm_data) = nlkm_data_opt {
+        if let Ok(nlkm_record) = parse_lsa_secret(nlkm_data) {
+            if nlkm_record.encrypted_data.len() >= 32 {
+                let mut off = 0usize;
+                while off + 32 <= blob.secret.len() {
+                    let candidate = &blob.secret[off..off + 32];
+                    let cand_tmp = sha256_1000(candidate, &nlkm_record.encrypted_data[..32]);
+                    if let Ok(pt) = aes_256_lsa_decrypt(&nlkm_record.encrypted_data[32..], &cand_tmp) {
+                        if let Ok(nlkm_blob) = parse_lsa_secret_blob(&pt) {
+                            if nlkm_blob.secret.len() > 0 && nlkm_blob.secret.len() <= 256 {
+                                return Ok(candidate.to_vec());
+                            }
+                        }
+                    }
+                    off += 4;
+                }
+            }
+        }
     }
-    Ok(blob.secret[52..84].to_vec())
+
+    // Fallback: classic Impacket offset, works on Vista through Windows 10.
+    if blob.secret.len() >= 84 {
+        Ok(blob.secret[52..84].to_vec())
+    } else {
+        Err("LSA secret blob too short for LSA key".into())
+    }
 }
 
 fn get_lsa_key_xp(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<u8>, String> {
@@ -282,7 +324,7 @@ fn get_lsa_key_xp(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<u8>, Stri
             security_hive
                 .path("Policy\\PolSecretEncryptionKey")
                 .map_err(|e| e.to_string())?,
-            "default",
+            "", // unnamed default value
         )
         .map_err(|e| e.to_string())?;
     if pol_secret.len() < 76 {
@@ -299,15 +341,21 @@ fn get_lsa_key_xp(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<u8>, Stri
 }
 
 fn get_lsa_key(boot_key: &[u8], security_hive: &Hive) -> Result<(Vec<u8>, bool), String> {
-    // Try Vista+ first
+    // Try Vista+ (PolEKList) first.
     match get_lsa_key_vista(boot_key, security_hive) {
-        Ok(key) => Ok((key, true)),
-        Err(_) => {
-            // Fallback to XP/2003
-            let key = get_lsa_key_xp(boot_key, security_hive)?;
-            Ok((key, false))
+        Ok(key) => return Ok((key, true)),
+        Err(vista_err) => {
+            // Only fall back to XP/2003 (PolSecretEncryptionKey) if PolEKList is absent.
+            // If PolEKList was found but decryption failed, propagate that error.
+            if !vista_err.contains("not found") && !vista_err.contains("no values") {
+                return Err(format!("LSA key (Vista+): {vista_err}"));
+            }
         }
     }
+    // Fallback: XP/2003 PolSecretEncryptionKey
+    let key = get_lsa_key_xp(boot_key, security_hive)
+        .map_err(|e| format!("LSA key (XP fallback): {e}"))?;
+    Ok((key, false))
 }
 
 fn get_nlkm(lsa_key: &[u8], vista: bool, security_hive: &Hive) -> Result<Vec<u8>, String> {
@@ -316,7 +364,7 @@ fn get_nlkm(lsa_key: &[u8], vista: bool, security_hive: &Hive) -> Result<Vec<u8>
             security_hive
                 .path("Policy\\Secrets\\NL$KM\\CurrVal")
                 .map_err(|e| e.to_string())?,
-            "default",
+            "", // unnamed default value
         )
         .map_err(|e| e.to_string())?;
     if vista {
@@ -369,12 +417,12 @@ fn dump_secrets(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<String>, St
             continue;
         }
 
-        // Try CurrVal
+        // Try CurrVal — contains the unnamed default value
         let curr_val = security_hive.value(
             security_hive
                 .subkey(key, "CurrVal")
                 .map_err(|e| e.to_string())?,
-            "default",
+            "", // unnamed default value
         );
         let secret_bytes = match curr_val {
             Ok(data) => {
@@ -425,7 +473,7 @@ fn dump_secrets(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<String>, St
 
     // DPAPI keys extraction
     let dpapi_system = match security_hive.path("Policy\\Secrets\\DPAPI_SYSTEM\\CurrVal") {
-        Ok(k) => security_hive.value(k, "default").ok(),
+        Ok(k) => security_hive.value(k, "").ok(),
         Err(_) => None,
     };
     if let Some(dpapi_data) = dpapi_system {

