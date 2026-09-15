@@ -57,6 +57,11 @@ pub mod enum_av;
 #[path = "exec_rpc.rs"]
 pub mod exec;
 
+// NanoDump — remote LSASS minidump via SMB upload + smbexec + SMB download.
+// Uses direct syscalls (no NTAPI) to stay under EDR radar.
+#[path = "nanodump_rpc.rs"]
+pub mod nanodump;
+
 pub use browser::{
     RemoteEntry, create_directory, delete_remote_directory, delete_remote_file, download_file,
     format_size, list_directory, upload_file,
@@ -68,6 +73,7 @@ pub use dump::{
 };
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
 pub use exec::{execute_command, execute_command_live, execute_command_traced};
+pub use nanodump::{LsassDumpResult as NanoDumpResult, remote_lsass_dump};
 pub use fingerprint::{SmbFingerprint, fingerprint as smb_fingerprint};
 pub use info::ServerInfo;
 pub use lsa::LsaDumpResult;
