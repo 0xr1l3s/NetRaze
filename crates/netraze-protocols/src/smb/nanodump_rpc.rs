@@ -57,9 +57,7 @@ pub async fn remote_lsass_dump(
 
     macro_rules! log {
         ($($arg:tt)*) => {{
-            let msg = format!($($arg)*);
-            live_log(&msg);
-            eprintln!("[nanodump] {msg}");
+            live_log(&format!($($arg)*));
         }};
     }
 
