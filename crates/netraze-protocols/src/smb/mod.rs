@@ -69,7 +69,7 @@ pub use browser::{
 pub use connection::SmbCredential;
 pub use dump::{
     RemoteRegistryHandle, SamDumpResult, dump_lsa, dump_sam, remote_dump_lsa, remote_dump_sam,
-    secrets_dump,
+    secrets_dump, secrets_dump_nanodump,
 };
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
 pub use exec::{execute_command, execute_command_live, execute_command_traced};
