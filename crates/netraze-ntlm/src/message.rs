@@ -22,6 +22,7 @@ pub const NEGOTIATE_FLAGS: u32 = NTLMSSP_NEGOTIATE_56
     | NTLMSSP_NEGOTIATE_KEY_EXCH
     | NTLMSSP_NEGOTIATE_128
     | NTLMSSP_NEGOTIATE_TARGET_INFO
+    | NTLMSSP_NEGOTIATE_VERSION
     | NTLMSSP_NEGOTIATE_EXTENDED_SS
     | NTLMSSP_NEGOTIATE_ALWAYS_SIGN
     | NTLMSSP_NEGOTIATE_NTLM
@@ -106,11 +107,12 @@ pub struct NtlmV2Auth {
 
 #[must_use]
 pub fn build_negotiate() -> Vec<u8> {
-    let mut message = Vec::with_capacity(32);
+    let mut message = Vec::with_capacity(40);
     message.extend_from_slice(b"NTLMSSP\0");
     message.extend_from_slice(&1_u32.to_le_bytes());
     message.extend_from_slice(&NEGOTIATE_FLAGS.to_le_bytes());
     message.extend_from_slice(&[0; 16]);
+    message.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 15]);
     message
 }
 
@@ -186,12 +188,13 @@ pub(crate) fn compute_ntlmv2_with_inputs(
         .flat_map(u16::to_le_bytes)
         .collect();
     let response_key = hmac_md5(nt_hash, &identity).map_err(NtlmError::Crypto)?;
-    let mut blob = Vec::with_capacity(32 + challenge.target_info.len());
+    let target_info = target_info_with_mic_flag(&challenge.target_info)?;
+    let mut blob = Vec::with_capacity(32 + target_info.len());
     blob.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0]);
     blob.extend_from_slice(&timestamp);
     blob.extend_from_slice(&client_challenge);
     blob.extend_from_slice(&[0; 4]);
-    blob.extend_from_slice(&challenge.target_info);
+    blob.extend_from_slice(&target_info);
     blob.extend_from_slice(&[0; 4]);
 
     let mut proof_input = challenge.server_challenge.to_vec();
@@ -243,7 +246,10 @@ pub(crate) fn build_authenticate_with_key(
     let user_utf16 = utf16le(username);
     let encrypted_session_key = rc4_oneshot(&exported_session_key, &auth.session_base_key);
     let include_mic = transcript.is_some();
-    let payload_offset = if include_mic { 88 } else { 72 };
+    let include_version = negotiated_flags & NTLMSSP_NEGOTIATE_VERSION != 0;
+    let mic_offset = 64 + usize::from(include_version) * 8;
+    let payload_offset =
+        u32::try_from(mic_offset + usize::from(include_mic) * 16).expect("NTLM header fits in u32");
     let fields: [&[u8]; 6] = [
         &auth.lm_response,
         &auth.nt_response,
@@ -266,7 +272,9 @@ pub(crate) fn build_authenticate_with_key(
         write_security_buffer(&mut message, field.len(), offset);
     }
     message.extend_from_slice(&negotiated_flags.to_le_bytes());
-    message.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 15]);
+    if include_version {
+        message.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 15]);
+    }
     if include_mic {
         message.extend_from_slice(&[0; 16]);
     }
@@ -280,7 +288,7 @@ pub(crate) fn build_authenticate_with_key(
         mic_input.extend_from_slice(&message);
         let mic =
             hmac_md5(&exported_session_key, &mic_input).expect("HMAC-MD5 accepts a 16-byte key");
-        message[72..88].copy_from_slice(&mic);
+        message[mic_offset..mic_offset + 16].copy_from_slice(&mic);
     }
     message
 }
@@ -289,6 +297,7 @@ pub(crate) fn build_authenticate_with_key(
 pub fn build_anonymous_authenticate() -> Vec<u8> {
     const FLAGS: u32 = NTLMSSP_NEGOTIATE_EXTENDED_SS
         | NTLMSSP_NEGOTIATE_NTLM
+        | NTLMSSP_NEGOTIATE_VERSION
         | NTLMSSP_REQUEST_TARGET
         | NTLMSSP_NEGOTIATE_UNICODE;
     let mut message = Vec::with_capacity(72);
@@ -300,6 +309,62 @@ pub fn build_anonymous_authenticate() -> Vec<u8> {
     message.extend_from_slice(&FLAGS.to_le_bytes());
     message.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 15]);
     message
+}
+
+fn target_info_with_mic_flag(info: &[u8]) -> Result<Vec<u8>, NtlmError> {
+    const MSV_AV_EOL: u16 = 0;
+    const MSV_AV_FLAGS: u16 = 6;
+    const MIC_PRESENT: u32 = 2;
+
+    let mut output = Vec::with_capacity(info.len() + 8);
+    let mut offset = 0_usize;
+    let mut found_flags = false;
+    let mut found_eol = false;
+    while offset < info.len() {
+        let header = info
+            .get(offset..offset + 4)
+            .ok_or(NtlmError::InvalidSecurityBuffer)?;
+        let id = u16::from_le_bytes([header[0], header[1]]);
+        let length = u16::from_le_bytes([header[2], header[3]]) as usize;
+        offset += 4;
+        let end = offset
+            .checked_add(length)
+            .ok_or(NtlmError::InvalidSecurityBuffer)?;
+        let value = info
+            .get(offset..end)
+            .ok_or(NtlmError::InvalidSecurityBuffer)?;
+        if id == MSV_AV_EOL {
+            if length != 0 {
+                return Err(NtlmError::InvalidSecurityBuffer);
+            }
+            found_eol = true;
+            break;
+        }
+        output.extend_from_slice(&id.to_le_bytes());
+        output.extend_from_slice(&(length as u16).to_le_bytes());
+        if id == MSV_AV_FLAGS {
+            if length != 4 {
+                return Err(NtlmError::InvalidSecurityBuffer);
+            }
+            let flags = u32::from_le_bytes(value.try_into().expect("length checked")) | MIC_PRESENT;
+            output.extend_from_slice(&flags.to_le_bytes());
+            found_flags = true;
+        } else {
+            output.extend_from_slice(value);
+        }
+        offset = end;
+    }
+    if !found_eol && offset != info.len() {
+        return Err(NtlmError::InvalidSecurityBuffer);
+    }
+    if !found_flags {
+        output.extend_from_slice(&MSV_AV_FLAGS.to_le_bytes());
+        output.extend_from_slice(&4_u16.to_le_bytes());
+        output.extend_from_slice(&MIC_PRESENT.to_le_bytes());
+    }
+    output.extend_from_slice(&MSV_AV_EOL.to_le_bytes());
+    output.extend_from_slice(&0_u16.to_le_bytes());
+    Ok(output)
 }
 
 pub fn extract_av_pair(info: &[u8], target_id: u16) -> Option<&[u8]> {
@@ -409,5 +474,55 @@ mod tests {
         let mut input = b"negotiatechallenge".to_vec();
         input.extend_from_slice(&message);
         assert_eq!(actual, hmac_md5(&key, &input).unwrap());
+    }
+
+    #[test]
+    fn ntlmv2_blob_marks_the_type_three_mic_as_present() {
+        let challenge = ChallengeMessage {
+            server_challenge: [0x11; 8],
+            negotiate_flags: NEGOTIATE_FLAGS,
+            target_info: vec![0; 4],
+            timestamp: Some([0x22; 8]),
+            version: None,
+        };
+        let response = compute_ntlmv2_with_inputs(
+            &[0x33; 16],
+            "alice",
+            "EXAMPLE",
+            &challenge,
+            [0x22; 8],
+            [0x44; 8],
+        )
+        .unwrap();
+        assert_eq!(&response.nt_response[44..48], &[6, 0, 4, 0]);
+        assert_eq!(&response.nt_response[48..52], &2_u32.to_le_bytes());
+    }
+
+    /// MS-NLMP §4.2.4 NTLMv2 LM challenge-response known-answer vector.
+    #[test]
+    fn ntlmv2_lm_response_matches_ms_nlmp_vector() {
+        let challenge = ChallengeMessage {
+            server_challenge: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+            negotiate_flags: NEGOTIATE_FLAGS,
+            target_info: vec![0; 4],
+            timestamp: Some([0; 8]),
+            version: None,
+        };
+        let response = compute_ntlmv2_with_inputs(
+            &crate::crypto::nt_hash_from_password("Password"),
+            "User",
+            "Domain",
+            &challenge,
+            [0; 8],
+            [0xaa; 8],
+        )
+        .unwrap();
+        assert_eq!(
+            response.lm_response,
+            [
+                0x86, 0xc3, 0x50, 0x97, 0xac, 0x9c, 0xec, 0x10, 0x25, 0x54, 0x76, 0x4a, 0x57, 0xcc,
+                0xcc, 0x19, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+            ]
+        );
     }
 }
