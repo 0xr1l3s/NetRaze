@@ -60,6 +60,24 @@ pub struct ExecutionOutcome {
     pub module: Option<String>,
 }
 
+/// Backend that produced a user-enumeration record.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UserEnumerationSource {
+    Ldap,
+    Samr,
+}
+
+/// Protocol-neutral user record shared by LDAP, SAMR, and presentation layers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInfo {
+    pub name: String,
+    pub privilege_level: u32,
+    pub flags: u32,
+    pub disabled: bool,
+    pub locked: bool,
+    pub source: UserEnumerationSource,
+}
+
 pub trait ProtocolFactory: Send + Sync {
     fn metadata(&self) -> ProtocolMetadata;
 }
