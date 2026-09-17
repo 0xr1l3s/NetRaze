@@ -6,6 +6,7 @@ mod rdp;
 pub mod smb;
 mod ssh;
 pub mod targets;
+pub mod users;
 mod vnc;
 mod winrm;
 mod wmi;

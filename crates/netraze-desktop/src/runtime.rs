@@ -611,7 +611,7 @@ impl RuntimeServices {
             // Keep an explicitly typed port (e.g. a container harness on
             // :1445); default to 445 only for bare hosts.
             let target = netraze_protocols::targets::with_default_port(&ip_clone, 445);
-            let result = netraze_protocols::smb::users::enum_users(&target, &smb_cred).await;
+            let result = netraze_protocols::users::enum_users(&target, &smb_cred).await;
 
             let users = match result {
                 Ok(user_list) => {
