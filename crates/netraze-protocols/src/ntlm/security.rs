@@ -157,10 +157,16 @@ impl NtlmSecurityContext {
         Ok(signature)
     }
 
-    /// Sign a SPNEGO mechanism list without consuming application RC4 state.
-    pub fn sign_mech_list_mic(&self, message: &[u8]) -> Result<Vec<u8>, NtlmError> {
+    /// Sign a SPNEGO mechanism list while preserving the application RC4 handle.
+    ///
+    /// MS-SPNG requires the first application message to reuse the RC4 state
+    /// used for `mechListMIC`. The connection-oriented NTLM sequence number is
+    /// independent and still advances.
+    pub fn sign_mech_list_mic(&mut self, message: &[u8]) -> Result<Vec<u8>, NtlmError> {
         let mut snapshot = self.clone();
-        snapshot.sign(message)
+        let signature = snapshot.sign(message)?;
+        self.send_sequence = snapshot.send_sequence;
+        Ok(signature)
     }
 
     pub fn verify(&mut self, message: &[u8], signature: &[u8]) -> Result<(), NtlmError> {
@@ -183,10 +189,16 @@ impl NtlmSecurityContext {
         Ok(())
     }
 
-    /// Verify a SPNEGO mechanism-list MIC without consuming application state.
-    pub fn verify_mech_list_mic(&self, message: &[u8], signature: &[u8]) -> Result<(), NtlmError> {
+    /// Verify a SPNEGO mechanism-list MIC while preserving application RC4 state.
+    pub fn verify_mech_list_mic(
+        &mut self,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), NtlmError> {
         let mut snapshot = self.clone();
-        snapshot.verify(message, signature)
+        snapshot.verify(message, signature)?;
+        self.receive_sequence = snapshot.receive_sequence;
+        Ok(())
     }
 
     #[must_use]
@@ -255,12 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn mech_list_mic_does_not_advance_application_state() {
-        let context = NtlmSecurityContext::new([0x55; 16]);
-        let _ = context.sign_mech_list_mic(b"mechTypes").unwrap();
-        assert_eq!(context.send_sequence(), 0);
-        let mut after_mic = context;
+    fn mech_list_mic_advances_sequence_but_restores_rc4_state() {
+        let mut after_mic = NtlmSecurityContext::new([0x55; 16]);
+        let _ = after_mic.sign_mech_list_mic(b"mechTypes").unwrap();
+        assert_eq!(after_mic.send_sequence(), 1);
+
         let mut fresh = NtlmSecurityContext::new([0x55; 16]);
+        fresh.send_sequence = 1;
         assert_eq!(
             after_mic.wrap(b"first").unwrap(),
             fresh.wrap(b"first").unwrap()

@@ -1,0 +1,32 @@
+# Isolated Samba Active Directory integration harness for NetRaze LDAP/NTLM.
+#
+# This service is deliberately separate from tests/samba: the standalone
+# server's guest/null-session behavior is load-bearing for the SMB suites.
+# All published ports bind to loopback and all credentials are test-only.
+
+services:
+  samba-ad:
+    image: quay.io/samba.org/samba-ad-server@sha256:c7df8af6aff5477a26cfae8bd06bb323ddce01ed55474db29b4ab631ac84de87
+    container_name: netraze-samba-ad
+    hostname: dc1
+    privileged: true
+    ports:
+      - "127.0.0.1:1389:389"
+      - "127.0.0.1:2445:445"
+    environment:
+      SAMBACC_CONFIG: /config/domain.json
+      SAMBA_CONTAINER_ID: netraze-ad
+    volumes:
+      - ./domain.json:/config/domain.json:ro
+      - samba-ad-state:/var/lib/samba
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - samba-tool user list -H ldap://127.0.0.1 -U'Administrator%[REMOVED_TEST_PASSWORD]' >/dev/null 2>&1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  samba-ad-state:
