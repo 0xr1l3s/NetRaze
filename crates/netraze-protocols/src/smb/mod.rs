@@ -243,10 +243,10 @@ impl SmbClient {
         info::get_server_info(&self.target, &self.cred_or_anonymous()).await
     }
 
-    /// Enumerate users (requires an admin credential — anonymous/guest
-    /// callers get the server's refusal as a readable error).
+    /// Enumerate users through LDAP first for password/hash credentials,
+    /// with automatic SAMR fallback. Anonymous and guest sessions use SAMR.
     pub async fn enum_users(&self) -> Result<Vec<UserInfo>, String> {
-        users::enum_users(&self.target, &self.cred_or_anonymous()).await
+        crate::users::enum_users(&self.target, &self.cred_or_anonymous()).await
     }
 
     /// Check if current credentials grant admin access.

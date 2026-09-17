@@ -17,21 +17,13 @@
 
 use std::sync::{Arc, Mutex};
 
+use netraze_core::UserEnumerationSource;
+pub use netraze_core::UserInfo;
 use netraze_dcerpc::channel::RpcChannel;
 use netraze_dcerpc::interfaces::samr;
 
 use super::connection::SmbCredential;
 use super::rpc::{bind_samr_over_smb, connect_session};
-
-/// Re-export so `mod.rs` can re-export it as `users::UserInfo`.
-#[derive(Debug, Clone)]
-pub struct UserInfo {
-    pub name: String,
-    pub privilege_level: u32,
-    pub flags: u32,
-    pub disabled: bool,
-    pub locked: bool,
-}
 
 /// NTSTATUS `STATUS_MORE_ENTRIES` — resume handle is valid, call again.
 const STATUS_MORE_ENTRIES: u32 = 0x0000_0105;
@@ -191,6 +183,7 @@ pub async fn enum_users(target: &str, cred: &SmbCredential) -> Result<Vec<UserIn
                 flags: 0,
                 disabled: false,
                 locked: false,
+                source: UserEnumerationSource::Samr,
             };
 
             // Enrich with real account flags via SamrOpenUser + SamrQueryInformationUser
