@@ -1,6 +1,7 @@
 //! Bounded asynchronous LDAP transport and NTLM SASL bind.
 
 use std::collections::{BTreeMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use crate::ntlm::{
@@ -174,7 +175,7 @@ impl LdapClient {
             return Err(result_error(second.result_code, &second.diagnostic_message));
         }
 
-        let context = authenticate.security_context;
+        let mut context = authenticate.security_context;
         if let Some(server_credentials) = second.server_sasl_creds {
             let response = parse_neg_token_resp(&server_credentials)
                 .map_err(|error| LdapError::Ntlm(error.to_string()))?;
@@ -248,7 +249,7 @@ impl LdapClient {
             .collect::<Vec<_>>();
         let mut outcome = SearchOutcome::default();
         let mut cookie = Vec::new();
-        let mut seen_cookies = HashSet::new();
+        let mut seen_pages = HashSet::new();
 
         for page in 0..MAX_PAGE_LOOPS {
             let request = SearchRequest::new(
@@ -270,12 +271,15 @@ impl LdapClient {
                 ]);
             }
             let (entries, referrals, next_cookie) = self.search_page(message_id, message).await?;
+            let complete = !paged || next_cookie.is_empty();
+            if !complete {
+                record_paging_progress(&mut seen_pages, &next_cookie, &entries, &referrals)?;
+            }
             outcome.entries.extend(entries);
             outcome.referrals.extend(referrals);
-            if !paged || next_cookie.is_empty() {
+            if complete {
                 return Ok(outcome);
             }
-            record_paging_cookie(&mut seen_cookies, &next_cookie)?;
             cookie = next_cookie;
             if page + 1 == MAX_PAGE_LOOPS {
                 break;
@@ -427,6 +431,33 @@ impl LdapClient {
 
     pub(crate) async fn receive_message(&mut self) -> Result<LdapMessage, LdapError> {
         let encoded = if self.security_context.is_some() {
+            self.receive_protected_ber_frame().await?
+        } else {
+            self.receive_ber_frame().await?
+        };
+        match rasn::ber::decode(&encoded) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                self.usable = false;
+                Err(LdapError::Ber(error.to_string()))
+            }
+        }
+    }
+
+    async fn receive_protected_ber_frame(&mut self) -> Result<Vec<u8>, LdapError> {
+        loop {
+            let frame_length = match ber_frame_length(&self.read_buffer, self.config.max_pdu_size) {
+                Ok(frame_length) => frame_length,
+                Err(error) => {
+                    self.usable = false;
+                    return Err(error);
+                }
+            };
+            if let Some(length) = frame_length {
+                let remainder = self.read_buffer.split_off(length);
+                return Ok(std::mem::replace(&mut self.read_buffer, remainder));
+            }
+
             let mut length_bytes = [0; 4];
             self.read_exact(&mut length_bytes).await?;
             let length = u32::from_be_bytes(length_bytes) as usize;
@@ -439,27 +470,32 @@ impl LdapClient {
             }
             let mut protected = vec![0; length];
             self.read_exact(&mut protected).await?;
-            match self
+            let plaintext = match self
                 .security_context
                 .as_mut()
-                .expect("checked above")
+                .expect("checked by receive_message")
                 .unwrap(&protected)
             {
-                Ok(encoded) => encoded,
+                Ok(plaintext) => plaintext,
                 Err(error) => {
                     self.usable = false;
                     return Err(LdapError::Ntlm(error.to_string()));
                 }
-            }
-        } else {
-            self.receive_ber_frame().await?
-        };
-        match rasn::ber::decode(&encoded) {
-            Ok(message) => Ok(message),
-            Err(error) => {
+            };
+            let buffered_length = self.read_buffer.len().checked_add(plaintext.len()).ok_or(
+                LdapError::OversizedPdu {
+                    length: usize::MAX,
+                    maximum: self.config.max_pdu_size,
+                },
+            )?;
+            if buffered_length > self.config.max_pdu_size {
                 self.usable = false;
-                Err(LdapError::Ber(error.to_string()))
+                return Err(LdapError::OversizedPdu {
+                    length: buffered_length,
+                    maximum: self.config.max_pdu_size,
+                });
             }
+            self.read_buffer.extend_from_slice(&plaintext);
         }
     }
 
@@ -626,10 +662,21 @@ fn paging_cookie(controls: Option<&[super::message::Control]>) -> Result<Vec<u8>
     controls::decode_paged_cookie(value).map_err(LdapError::Ber)
 }
 
-fn record_paging_cookie(seen: &mut HashSet<Vec<u8>>, cookie: &[u8]) -> Result<(), LdapError> {
-    if !seen.insert(cookie.to_vec()) {
+fn record_paging_progress(
+    seen: &mut HashSet<(Vec<u8>, u64)>,
+    cookie: &[u8],
+    entries: &[LdapEntry],
+    referrals: &[String],
+) -> Result<(), LdapError> {
+    let mut page = DefaultHasher::new();
+    entries.len().hash(&mut page);
+    for entry in entries {
+        entry.dn.hash(&mut page);
+    }
+    referrals.hash(&mut page);
+    if !seen.insert((cookie.to_vec(), page.finish())) {
         return Err(LdapError::State(
-            "server repeated an LDAP paging cookie".into(),
+            "server repeated an LDAP page without making progress".into(),
         ));
     }
     Ok(())
@@ -782,10 +829,20 @@ mod tests {
     }
 
     #[test]
-    fn paging_rejects_a_repeated_cookie() {
+    fn paging_allows_static_cookies_but_rejects_repeated_pages() {
         let mut seen = HashSet::new();
-        record_paging_cookie(&mut seen, b"same").unwrap();
-        assert!(record_paging_cookie(&mut seen, b"same").is_err());
+        let first = LdapEntry {
+            dn: "CN=Alice,DC=example,DC=test".into(),
+            attributes: BTreeMap::new(),
+        };
+        let second = LdapEntry {
+            dn: "CN=Bob,DC=example,DC=test".into(),
+            attributes: BTreeMap::new(),
+        };
+
+        record_paging_progress(&mut seen, b"same", std::slice::from_ref(&first), &[]).unwrap();
+        record_paging_progress(&mut seen, b"same", &[second], &[]).unwrap();
+        assert!(record_paging_progress(&mut seen, b"same", &[first], &[]).is_err());
     }
 
     #[tokio::test]
@@ -887,24 +944,17 @@ mod tests {
                         SetOf::from_vec(vec![OctetString::from(username.as_bytes().to_vec())]),
                     )],
                 );
-                write_test_protected(
-                    &mut socket,
-                    &mut protection,
-                    LdapMessage::new(expected_id, ProtocolOp::SearchResEntry(entry)),
-                )
-                .await;
+                let mut responses = vec![LdapMessage::new(
+                    expected_id,
+                    ProtocolOp::SearchResEntry(entry),
+                )];
                 if expected_id == 1 {
-                    write_test_protected(
-                        &mut socket,
-                        &mut protection,
-                        LdapMessage::new(
-                            expected_id,
-                            ProtocolOp::SearchResRef(SearchResultReference(vec![
-                                LdapString::from("ldap://other.example.test/DC=example,DC=test"),
-                            ])),
-                        ),
-                    )
-                    .await;
+                    responses.push(LdapMessage::new(
+                        expected_id,
+                        ProtocolOp::SearchResRef(SearchResultReference(vec![LdapString::from(
+                            "ldap://other.example.test/DC=example,DC=test",
+                        )])),
+                    ));
                 }
                 let done = SearchResultDone(LdapResult::new(
                     ResultCode::Success,
@@ -915,7 +965,8 @@ mod tests {
                 response.controls = Some(vec![
                     controls::paged_results_control(1000, &next_cookie).unwrap(),
                 ]);
-                write_test_protected(&mut socket, &mut protection, response).await;
+                responses.push(response);
+                write_test_protected_messages(&mut socket, &mut protection, &responses).await;
             }
         });
 
@@ -1000,12 +1051,15 @@ mod tests {
         context.unwrap(&protected).unwrap()
     }
 
-    async fn write_test_protected(
+    async fn write_test_protected_messages(
         stream: &mut TcpStream,
         context: &mut NtlmSecurityContext,
-        message: LdapMessage,
+        messages: &[LdapMessage],
     ) {
-        let encoded = rasn::ber::encode(&message).unwrap();
+        let mut encoded = Vec::new();
+        for message in messages {
+            encoded.extend_from_slice(&rasn::ber::encode(message).unwrap());
+        }
         let protected = context.wrap(&encoded).unwrap();
         stream
             .write_all(&(protected.len() as u32).to_be_bytes())

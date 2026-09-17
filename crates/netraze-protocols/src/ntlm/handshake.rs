@@ -83,7 +83,7 @@ impl NtlmClient {
             exported_session_key,
             Some((&negotiate, &challenge_bytes)),
         );
-        let security_context = NtlmSecurityContext::new(exported_session_key);
+        let mut security_context = NtlmSecurityContext::new(exported_session_key);
         let mech_list_mic = security_context.sign_mech_list_mic(&ntlm_mech_types_der())?;
         Ok(NtlmAuthenticateResult {
             spnego_token: wrap_spnego_resp_with_mic(&type_three, Some(&mech_list_mic)),
