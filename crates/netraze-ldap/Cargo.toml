@@ -1,0 +1,18 @@
+[package]
+name = "netraze-ldap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+rasn = "0.28"
+rasn-ldap = { workspace = true }
+netraze-core = { path = "../netraze-core" }
+netraze-ntlm = { path = "../netraze-ntlm" }
+tokio = { workspace = true, features = ["net", "io-util"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

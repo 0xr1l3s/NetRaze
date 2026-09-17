@@ -7,6 +7,8 @@ members = [
     "crates/netraze-config",
     "crates/netraze-core",
     "crates/netraze-dcerpc",
+    "crates/netraze-ldap",
+    "crates/netraze-ntlm",
     "crates/netraze-modules",
     "crates/netraze-output",
     "crates/netraze-protocols",
@@ -71,6 +73,8 @@ hmac = "0.12"
 md-5 = "0.10"
 md4 = "0.10"
 petgraph = "0.8"
+rasn = "0.28"
+rasn-ldap = "=0.28.14"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
