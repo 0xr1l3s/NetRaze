@@ -3,8 +3,8 @@
 //! The public API deliberately hides the `rasn-ldap` wire model.
 
 pub mod client;
+mod controls;
 mod message;
 mod search;
 
 pub use client::{LdapClient, LdapClientConfig, LdapEntry, LdapError, SearchOutcome};
-pub use search::parse_filter;
