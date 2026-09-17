@@ -2,7 +2,7 @@
 
 This file documents two parallel tracks:
 
-1. **Structural roadmap** — workspace shape, crate splits, plugin API,
+1. **Structural roadmap** — workspace shape, deep protocol modules, plugin API,
    storage, exports. The "what does the project look like" axis.
 2. **Cross-platform portage plan** — moving the SMB post-exploitation
    modules off Windows-native APIs (SCM / WNet / NetAPI / Registry) onto
@@ -25,13 +25,13 @@ what those phases mean.
 - Formalise config, targets, output, runtime.
 - Keep the CLI thin and testable.
 
-## Phase 2 — Per-protocol crates and real storage
+## Phase 2 — Deep protocol modules and real storage
 
-- Split `netraze-protocols` into per-protocol crates:
-  - `netraze-protocol-smb`
-  - `netraze-protocol-ldap`
-  - `netraze-protocol-winrm`
-  - `netraze-protocol-ssh`
+- Keep wire implementations under focused modules in `netraze-protocols`:
+  - `netraze_protocols::smb`
+  - `netraze_protocols::ldap`
+  - `netraze_protocols::winrm`
+  - `netraze_protocols::ssh`
 - Wire a real SQLite backend into `netraze-storage`.
 
 ## Phase 3 — Plugin API, exports, module parity
@@ -49,7 +49,7 @@ what those phases mean.
 ## Evolution rules
 
 - Shared logic ratchets up to `netraze-core` or a transversal crate.
-- Protocol-specific dependencies stay isolated inside the protocol crate.
+- Protocol-specific dependencies stay isolated inside `netraze-protocols`.
 - Campaign / workflow features stay above the core, never inside it.
 
 ---

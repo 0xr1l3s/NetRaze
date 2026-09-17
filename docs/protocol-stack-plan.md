@@ -45,10 +45,10 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 |---|---|---|---|
 | TCP transport (timeout, IPv4/IPv6) | `std::net` | ✅ | Pas besoin de wrapper — `std::net::TcpStream` suffit |
 | TLS (rustls) | `rustls` | ⚪ | Requis pour LDAPS, RPC over HTTPS, WinRM. Out v1 |
-| ASN.1 / DER / BER | TBD | 🔜 | Choix : crate maison `netraze-asn1` partagé entre LDAP + Kerberos vs `rasn`/`asn1` externe. Décision à prendre au démarrage de `netraze-ldap` |
-| NTLMSSP (NEGOTIATE/CHALLENGE/AUTHENTICATE + seal/sign) | `netraze-dcerpc::auth` | ✅ | Réutilisable cross-protocol (SMB, RPC, LDAP, MSSQL). Vendoring depuis `protocols::smb::ntlm` à factoriser dans un `netraze-ntlm` dédié quand on aura un 3e consommateur |
-| SPNEGO wrapping | `protocols::smb::ntlm::wrap_spnego_*` | 🟡 | Marche pour SMB. Vérifier compat LDAP SASL/GSS-SPNEGO quand on attaquera `netraze-ldap` |
-| Kerberos AS-REQ/REP, TGS-REQ/REP | `netraze-kerberos` (à créer) | 🔜 | Requis pour AS-REProast, Kerberoast, S4U |
+| ASN.1 / DER / BER | `rasn` + `rasn-ldap` dans `netraze-protocols::ldap` | ✅ | Modèle RFC 4511 maintenu par `rasn-ldap`; façade interne étroite |
+| NTLMSSP (NEGOTIATE/CHALLENGE/AUTHENTICATE + seal/sign) | `netraze-protocols::ntlm` | ✅ | Implémentation LDAP SASL partagée dans le crate protocoles; SMB et DCE/RPC restent inchangés jusqu'à migration validée |
+| SPNEGO wrapping | `netraze-protocols::ntlm::spnego` | ✅ | Parsing borné et `mechListMIC` validés pour LDAP SASL/GSS-SPNEGO |
+| Kerberos AS-REQ/REP, TGS-REQ/REP | `netraze-protocols::kerberos` (à créer) | 🔜 | Requis pour AS-REProast, Kerberoast, S4U |
 
 ---
 
@@ -73,7 +73,7 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 | Create Directory (FILE_DIRECTORY_FILE) | ✅ | Phase D — live Samba (browser) |
 | **SMB signing (HMAC-SHA256)** | ✅ | Dialectes 2.0.2/2.1 — HMAC-SHA256(ExportedSessionKey) sur le message entier ; appliqué dans `send_packet` quand le Negotiate serveur exige la signature (DC). Vérifié live contre un DC |
 | SMB3 encryption (AES-CCM/GCM) | ⚪ | Out v1 — la plupart des cibles acceptent SMB2 unencrypted |
-| Kerberos session setup (AP-REQ in SPNEGO) | 🔜 | Couplé avec `netraze-kerberos` |
+| Kerberos session setup (AP-REQ in SPNEGO) | 🔜 | Couplé avec `netraze-protocols::kerberos` |
 
 ### `netraze-dcerpc` (DCE/RPC v5 + NDR + auth + interfaces)
 
@@ -104,49 +104,48 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 
 ## LDAP stack
 
-### `netraze-ldap` (à créer)
+### `netraze-protocols::ldap`
 
 C'est la priorité #1 immédiate — débloquer `enum_users` AD stable et
 préparer le terrain pour Kerberoasting.
 
 | Module | Statut | Notes |
 |---|---|---|
-| `ber` (BER/DER encoder/decoder) | 🔜 | Décision : crate maison ou `rasn`. Si `rasn`, accepter +1 dep workspace |
-| `message` (LDAPMessage envelope) | 🔜 | RFC 4511 §4.1.1 |
-| `bind::simple` (cleartext credentials) | 🔜 | Quick win, mais peu utilisé en prod |
-| `bind::sasl_gss_spnego` (NTLMSSP wrapped) | 🔜 | **C'est le bind qui fait marcher** GetADUsers.py-equivalent. Réutilise `dcerpc::auth::NtlmBinder` |
-| `search::request` + `search::result_entry` | 🔜 | RFC 4511 §4.5 |
-| `controls::paged_results` (1.2.840.113556.1.4.319) | 🔜 | Obligatoire — sans ça, search retourne max 1000 entrées |
+| `message` (BER via `rasn-ldap`) | ✅ | RFC 4511 §4.1.1, fixtures Impacket |
+| `bind::simple` (cleartext credentials) | ❌ | Non exposé par l'interface par défaut |
+| `bind::sasl_gss_spnego` (NTLMSSP wrapped) | ✅ | NTLMv2 mot de passe/hash, MIC, sign-and-seal |
+| `search::request` + `search::result_entry` | ✅ | RFC 4511 §4.5, framing borné |
+| `controls::paged_results` (1.2.840.113556.1.4.319) | ✅ | Cookies itérés avec détection des répétitions |
 | `controls::sd_flags` (security descriptor) | ⚪ | Pour ACL enum (BloodHound-equivalent) |
-| `client::LdapClient` (TCP + bind + search loop) | 🔜 | Async, tokio |
+| `client::LdapClient` (TCP + bind + search loop) | ✅ | Async, tokio, timeouts et plafond 16 Mio |
 
-### Modules NetRaze qui consommeront `netraze-ldap`
+### Modules NetRaze qui consommeront `netraze-protocols::ldap`
 
 | Use case | Statut | Notes |
 |---|---|---|
-| `enum_users_ldap` (≈ `GetADUsers.py`) | 🔜 | Filtre `(&(sAMAccountType=805306368))`, attrs `sAMAccountName, userAccountControl, lastLogon, memberOf, adminCount` |
+| `enum_users_ldap` (≈ `GetADUsers.py`) | ✅ | Filtre `(sAMAccountType=805306368)`, attrs `sAMAccountName, userAccountControl, adminCount` |
 | `enum_computers_ldap` (≈ `GetMachineAccounts.py`) | 🔜 | Filtre `(&(sAMAccountType=805306369))` |
 | `enum_groups_ldap` | 🔜 | Filtre `(objectClass=group)` |
-| `find_kerberoastable` | 🔜 | Filtre `(&(samAccountType=805306368)(servicePrincipalName=*))` — feeds `netraze-kerberos::kerberoast` |
-| `find_asreproastable` | 🔜 | Filtre `(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304))` — feeds `netraze-kerberos::asreproast` |
+| `find_kerberoastable` | 🔜 | Filtre `(&(samAccountType=805306368)(servicePrincipalName=*))` — alimente `netraze-protocols::kerberos::kerberoast` |
+| `find_asreproastable` | 🔜 | Filtre `(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304))` — alimente `netraze-protocols::kerberos::asreproast` |
 | `find_unconstrained_delegation` | 🔜 | UAC bit `TRUSTED_FOR_DELEGATION` |
-| RootDSE fetch (defaultNamingContext) | 🔜 | Préliminaire à toute search |
+| RootDSE fetch (defaultNamingContext) | ✅ | Préliminaire à toute search |
 
 ### Smart `enum_users` orchestration
 
 ```
 enum_users(target, cred):
-  if tcp_open(target, 389) and target_looks_like_dc(target):
-    try LDAP path → return on success
+  if cred contient un mot de passe ou hash NT:
+    try LDAP path → return on success, même avec zéro résultat
     log warn "LDAP failed, falling back to SAMR"
-  fallback to SAMR path
+  fallback to SAMR path pour guest/anonyme ou échec LDAP
 ```
 
 ---
 
 ## Kerberos stack
 
-### `netraze-kerberos` (à créer après LDAP)
+### `netraze-protocols::kerberos` (à créer après LDAP)
 
 | Op | Statut | Use case |
 |---|---|---|
@@ -164,10 +163,10 @@ enum_users(target, cred):
 
 ## DCOM / WMI stack
 
-| Crate | Statut | Use case |
+| Module | Statut | Use case |
 |---|---|---|
-| `netraze-dcom` (à créer) | ⚪ | wmiexec, dcomexec — alternative à smbexec quand SCM est watched |
-| `netraze-wmi` (consumer de dcom) | ⚪ | Win32_Process.Create pour exec, Win32_Service.Start pour mvt latéral |
+| `netraze-protocols::dcom` (à créer) | ⚪ | wmiexec, dcomexec — alternative à smbexec quand SCM est watched |
+| `netraze-protocols::wmi` (consumer de dcom) | ⚪ | Win32_Process.Create pour exec, Win32_Service.Start pour mvt latéral |
 
 **Hors scope v1** mais essentiel à terme. Estimation ~3 semaines de port (DCOM est lourd : OXID resolver, IRemUnknown, IDispatch).
 
@@ -194,8 +193,8 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 | Module NetExec | Crate consumer | Statut | Bloqué par |
 |---|---|---|---|
 | `enum_av` | `protocols::smb::enum_av` | 🟡 portable (SCMR probes + IPC$ pipe listing) | validation live contre cible Windows en attente |
-| `enum_dns` | — | 🔜 | netraze-ldap (DNS records dans `MicrosoftDNS` partition) |
-| `enum_ca` | — | ⚪ | netraze-ldap + netraze-dcerpc::interfaces::icpr (cert enrollment) |
+| `enum_dns` | — | 🔜 | `netraze-protocols::ldap` (DNS records dans `MicrosoftDNS` partition) |
+| `enum_ca` | — | ⚪ | `netraze-protocols::ldap` + `netraze-dcerpc::interfaces::icpr` (cert enrollment) |
 | `gpp_password` | `modules::reconnaissance::gpp_password` | ✅ (factory only — logic à porter) | smb file ops + Crypto AES (déjà là) |
 | `enum_logged_in` | — | 🔜 | wkssvc.NetrWkstaUserEnum |
 | `enum_shares_v_admin` | — | ✅ | déjà fait via shares_rpc |
@@ -205,12 +204,12 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 
 | Module | Statut | Bloqué par |
 |---|---|---|
-| `add_computer` | ✅ factory | netraze-ldap (LDAP add operation) |
-| `adcs` (cert template enum) | ✅ factory | netraze-ldap (CN=Configuration partition) |
+| `add_computer` | ✅ factory | `netraze-protocols::ldap` (LDAP add operation) |
+| `adcs` (cert template enum) | ✅ factory | `netraze-protocols::ldap` (CN=Configuration partition) |
 | `coerce_plus` (PetitPotam, PrinterBug, ShadowCoerce) | ✅ factory | dcerpc.efsrpc + dcerpc.rprn |
 | `dcsync` | 🔜 | dcerpc.drsuapi |
-| `kerberoast` | 🔜 | netraze-ldap + netraze-kerberos |
-| `asreproast` | 🔜 | netraze-ldap + netraze-kerberos |
+| `kerberoast` | 🔜 | `netraze-protocols::{ldap, kerberos}` |
+| `asreproast` | 🔜 | `netraze-protocols::{ldap, kerberos}` |
 
 ### Credentials
 
@@ -228,7 +227,7 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 |---|---|---|
 | smbexec (SCMR) | 🟡 | portable via `smb::exec` (exec_rpc) — wire-smoke Samba OK, validation live cible Windows (admin) en attente |
 | atexec | ⚪ | dcerpc.atsvc |
-| wmiexec | ⚪ | netraze-dcom + netraze-wmi |
+| wmiexec | ⚪ | `netraze-protocols::{dcom, wmi}` |
 | psexec | ⚪ | smbexec variant — fait en même temps |
 
 ---
@@ -245,12 +244,12 @@ signing). Reste, chaque ligne débloquant les suivantes :
 | ~~1~~ | ~~**Phase D.1** — SMB2 file ops~~ | ✅ fait | write/delete/query_directory/create_directory — live Samba (browser_ops) |
 | ~~2~~ | ~~**Phase D.3** — `exec_rpc` via SCMR~~ | ✅ fait | smbexec complet (create/start/stop/delete) — wire-smoke Samba OK |
 | ~~3~~ | ~~**Phase D.4** — `browser_rpc`~~ | ✅ fait | browser cross-platform + suites browser_ops |
-| 4 | **Crate `netraze-ldap`** — BER + LDAPMessage + bind SASL/NTLMSSP + search + paged_results | 5j | enum_users AD stable, enum_computers, enum_groups, find_kerberoastable |
-| 5 | **Crate `netraze-kerberos`** — ASN.1 Kerberos + AS-REQ/REP + TGS-REQ/REP + RC4/AES decrypt | 8j | AS-REProast + Kerberoast |
+| 4 | **Module `netraze-protocols::ldap`** — BER + LDAPMessage + bind SASL/NTLMSSP + search + paged_results | 5j | enum_users AD stable, enum_computers, enum_groups, find_kerberoastable |
+| 5 | **Module `netraze-protocols::kerberos`** — ASN.1 Kerberos + AS-REQ/REP + TGS-REQ/REP + RC4/AES decrypt | 8j | AS-REProast + Kerberoast |
 | 6 | `dcerpc.lsarpc` — OpenPolicy2 + LookupSids/Names | 3j | Account naming dans LSA dump |
 | 7 | `dcerpc.drsuapi` — DRSBind + DRSGetNCChanges | 10j | **DCSync** = NTDS.dit complet sans toucher disque |
 | ~~8~~ | ~~SMB signing HMAC-SHA256~~ | ✅ fait | dialectes 2.0.2/2.1 — vérifié live contre un DC "require signing" |
-| 9 | `netraze-dcom` + `netraze-wmi` | 15j | wmiexec, dcomexec |
+| 9 | `netraze-protocols::{dcom, wmi}` | 15j | wmiexec, dcomexec |
 | 10 | Coerced auth modules (PetitPotam/PrinterBug) | 5j | Relay attacks → ADCS abuse |
 
 **Total ~46j restants** pour un NetRaze qui couvre les use

@@ -1,4 +1,4 @@
-use netraze_ntlm::{NtlmCredential, NtlmSecurityContext, nt_hash_from_password};
+use netraze_protocols::ntlm::{NtlmCredential, NtlmSecurityContext, nt_hash_from_password};
 
 #[test]
 fn password_credentials_derive_the_known_nt_hash() {

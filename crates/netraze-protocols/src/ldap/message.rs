@@ -1,4 +1,4 @@
-//! Narrow internal facade over the RFC 4511 model from `rasn-ldap`.
+//! Narrow LDAP-module facade over the RFC 4511 model from `rasn-ldap`.
 
 pub(crate) use rasn_ldap::{
     AttributeValueAssertion, AuthenticationChoice, BindRequest, BindResponse, Control, Filter,

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-use netraze_ntlm::{
+use crate::ntlm::{
     NegState, NtlmClient, NtlmCredential, NtlmSecurityContext, ntlm_mech_types_der,
     parse_neg_token_resp,
 };
@@ -13,12 +13,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::message::{
+use super::message::{
     AuthenticationChoice, BindRequest, BindResponse, LdapMessage, LdapString, ProtocolOp,
     ResultCode, SaslCredentials, SearchRequest, SearchRequestDerefAliases, SearchRequestScope,
     SearchResultEntry, UnbindRequest,
 };
-use crate::{controls, search::parse_filter};
+use super::{controls, search::parse_filter};
 
 const DEFAULT_LDAP_PORT: u16 = 389;
 const READ_CHUNK_SIZE: usize = 8 * 1024;
@@ -575,7 +575,7 @@ fn convert_entry(entry: SearchResultEntry) -> LdapEntry {
     }
 }
 
-fn paging_cookie(controls: Option<&[crate::message::Control]>) -> Result<Vec<u8>, LdapError> {
+fn paging_cookie(controls: Option<&[super::message::Control]>) -> Result<Vec<u8>, LdapError> {
     let Some(controls) = controls else {
         return Ok(Vec::new());
     };
@@ -770,9 +770,7 @@ mod tests {
                 LdapString::from(""),
                 LdapString::from(""),
                 None,
-                Some(OctetString::from(netraze_ntlm::wrap_spnego_resp(
-                    &challenge,
-                ))),
+                Some(OctetString::from(crate::ntlm::wrap_spnego_resp(&challenge))),
             );
             write_test_message(
                 &mut socket,
@@ -906,7 +904,7 @@ mod tests {
         challenge.extend_from_slice(b"NTLMSSP\0");
         challenge.extend_from_slice(&2_u32.to_le_bytes());
         challenge.extend_from_slice(&[0; 8]);
-        challenge.extend_from_slice(&netraze_ntlm::NEGOTIATE_FLAGS.to_le_bytes());
+        challenge.extend_from_slice(&crate::ntlm::NEGOTIATE_FLAGS.to_le_bytes());
         challenge.extend_from_slice(&[0x11; 8]);
         challenge.extend_from_slice(&[0; 8]);
         challenge.extend_from_slice(&(target_info.len() as u16).to_le_bytes());

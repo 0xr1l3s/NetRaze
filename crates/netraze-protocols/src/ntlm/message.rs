@@ -1,6 +1,6 @@
 //! NTLMv2 handshake messages used by LDAP SASL/GSS-SPNEGO.
 
-use crate::crypto::hmac_md5;
+use super::crypto::hmac_md5;
 use rand::RngCore;
 use thiserror::Error;
 
@@ -83,7 +83,7 @@ impl core::fmt::Debug for NtlmCredential {
 impl NtlmCredential {
     pub fn nt_hash(&self) -> Result<[u8; 16], NtlmError> {
         Ok(match self {
-            Self::Password(password) => crate::crypto::nt_hash_from_password(password),
+            Self::Password(password) => super::crypto::nt_hash_from_password(password),
             Self::NtHash(hash) => *hash,
         })
     }
@@ -428,7 +428,7 @@ fn current_filetime() -> [u8; 8] {
 }
 
 fn rc4_oneshot(data: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut rc4 = crate::security::Rc4::new(key);
+    let mut rc4 = super::security::Rc4::new(key);
     let mut output = data.to_vec();
     rc4.transform(&mut output);
     output
@@ -509,7 +509,7 @@ mod tests {
             version: None,
         };
         let response = compute_ntlmv2_with_inputs(
-            &crate::crypto::nt_hash_from_password("Password"),
+            &crate::ntlm::crypto::nt_hash_from_password("Password"),
             "User",
             "Domain",
             &challenge,

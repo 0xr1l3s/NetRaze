@@ -3,7 +3,7 @@
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
 
-use crate::message::NtlmError;
+use super::message::NtlmError;
 
 type HmacMd5 = Hmac<Md5>;
 

@@ -4,7 +4,7 @@
 //! (`1.2.840.113556.1.4.319`, MS-ADTS §4.1.11.2) — mandatory for any
 //! production LDAP search because AD caps results at 1000 entries without it.
 
-use crate::message::{Control, PagedResultsValue};
+use super::message::{Control, PagedResultsValue};
 use rasn::types::OctetString;
 
 // ── Paged results ──────────────────────────────────────────────────────────

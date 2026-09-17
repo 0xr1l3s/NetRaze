@@ -106,7 +106,8 @@ enumeration work in both modes.
 
 | Protocol | State |
 |---|---|
-| LDAP, WinRM, MSSQL, SSH, RDP, FTP, NFS, VNC, WMI | Scaffold only — factory registered, no wire code yet |
+| LDAP | NTLMv2 SASL sign-and-seal, RootDSE discovery, paged AD user enumeration, SAMR fallback |
+| WinRM, MSSQL, SSH, RDP, FTP, NFS, VNC, WMI | Scaffold only — factory registered, no wire code yet |
 
 ### DCE/RPC stack (`netraze-dcerpc`)
 
@@ -122,8 +123,8 @@ enumeration work in both modes.
 - Kerberos / AES-based authentication (only NTLMv2 today).
 - SMB3 encryption (AES-CCM/GCM) — most targets still accept unencrypted
   SMB2.
-- LDAP stack (`netraze-ldap`) — AD user/group enumeration,
-  Kerberoast/AS-REP-roast discovery.
+- LDAP expansion (`netraze-protocols::ldap`) — AD group/computer enumeration
+  and Kerberoast/AS-REP-roast discovery.
 - Relay attacks, coercion (PetitPotam, PrinterBug), ADCS abuse, DCSync
   (see `docs/protocol-stack-plan.md`).
 
@@ -139,7 +140,7 @@ logic**. Everything else flows from those two constraints.
 | `netraze-app` | Composition root. `NetRazeApp::bootstrap()` wires registries and services. |
 | `netraze-cli` | Thin CLI binary (`clap`). Maps arguments to use-cases. |
 | `netraze-desktop` | `egui`/`eframe` GUI with `egui-snarl` workflow graph and `egui_graphs` network view. |
-| `netraze-protocols` | Wire-level protocol handlers (SMB is the only one significantly implemented). |
+| `netraze-protocols` | Wire-level protocol handlers, including the implemented SMB and LDAP modules. |
 | `netraze-dcerpc` | MS-RPCE stack: NDR, PDU, NTLMSSP auth; SRVSVC, SAMR, WINREG, SCMR interfaces. |
 | `netraze-modules` | Post-exploitation modules organised by category (`active_directory`, `credentials`, `reconnaissance`). |
 | `netraze-auth` | Credential types and authentication methods. |
@@ -324,7 +325,7 @@ integration suite locally.
 | Phase 0 | Workspace hygiene, wgpu backend, CI matrix | Done |
 | Phase 1 | DCE/RPC primitives, NTLMSSP, SMB2 auth, SRVSVC, Samba harness | Done |
 | Phase 2 | SMB2 IOCTL / FSCTL_PIPE_TRANSCEIVE, SMB signing, SAM RemoteOperations, SQLite workspace, CLI execution path | Mostly done — pipe transport, signing and SAM remote ops landed; SQLite workspace and the CLI execution path remain |
-| Phase 3 | Split `netraze-protocols` per protocol, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
+| Phase 3 | Deep per-protocol modules inside `netraze-protocols`, stable plugin API, JSON/CSV export, priority module parity with NetExec | Planned |
 | Phase 4 | Integration test corpus, network fixtures, TUI or machine-friendly API, Kerberos | Planned |
 
 Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
@@ -333,12 +334,11 @@ Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
 
 This is an early-stage port. The highest-leverage contributions right now:
 
-- **The LDAP stack** (`netraze-ldap`) — unlocks stable AD user/group
-  enumeration and Kerberoast/AS-REP-roast discovery; see
-  `docs/protocol-stack-plan.md` for the planned crate layout.
-- **Kerberos** (`netraze-kerberos`) — AS/TGS exchange, RC4/AES key
+- **The LDAP module** (`netraze-protocols::ldap`) — extend the existing AD
+  user enumeration with groups, computers, and roastable-account discovery.
+- **Kerberos** (`netraze-protocols::kerberos`) — AS/TGS exchange, RC4/AES key
   handling; the next big authentication milestone after NTLMv2.
-- **Per-protocol crates** as NetRaze grows beyond SMB.
+- **Deep per-protocol modules** inside `netraze-protocols` as coverage grows.
 - **Impacket-pinned fixtures** for each new DCE/RPC interface added
   (see `crates/netraze-dcerpc/tests/gen_*.py` for the pattern).
 
