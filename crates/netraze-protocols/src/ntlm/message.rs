@@ -134,6 +134,10 @@ pub fn parse_challenge(data: &[u8]) -> Result<ChallengeMessage, NtlmError> {
     if negotiate_flags & REQUIRED_PROTECTION_FLAGS != REQUIRED_PROTECTION_FLAGS {
         return Err(NtlmError::MissingProtectionFlags(negotiate_flags));
     }
+    let has_version = negotiate_flags & NTLMSSP_NEGOTIATE_VERSION != 0;
+    if has_version && data.len() < 56 {
+        return Err(NtlmError::TooShort(data.len()));
+    }
     let mut server_challenge = [0; 8];
     server_challenge.copy_from_slice(&data[24..32]);
     let target_info = if data.len() >= 48 {
@@ -143,7 +147,7 @@ pub fn parse_challenge(data: &[u8]) -> Result<ChallengeMessage, NtlmError> {
     };
     let timestamp =
         extract_av_pair(&target_info, 7).and_then(|value| <[u8; 8]>::try_from(value).ok());
-    let version = if negotiate_flags & NTLMSSP_NEGOTIATE_VERSION != 0 && data.len() >= 56 {
+    let version = if has_version {
         Some((data[48], data[49], u16::from_le_bytes([data[50], data[51]])))
     } else {
         None
@@ -334,7 +338,7 @@ fn target_info_with_mic_flag(info: &[u8]) -> Result<Vec<u8>, NtlmError> {
             .get(offset..end)
             .ok_or(NtlmError::InvalidSecurityBuffer)?;
         if id == MSV_AV_EOL {
-            if length != 0 {
+            if length != 0 || end != info.len() {
                 return Err(NtlmError::InvalidSecurityBuffer);
             }
             found_eol = true;
@@ -343,7 +347,7 @@ fn target_info_with_mic_flag(info: &[u8]) -> Result<Vec<u8>, NtlmError> {
         output.extend_from_slice(&id.to_le_bytes());
         output.extend_from_slice(&(length as u16).to_le_bytes());
         if id == MSV_AV_FLAGS {
-            if length != 4 {
+            if found_flags || length != 4 {
                 return Err(NtlmError::InvalidSecurityBuffer);
             }
             let flags = u32::from_le_bytes(value.try_into().expect("length checked")) | MIC_PRESENT;
@@ -354,7 +358,7 @@ fn target_info_with_mic_flag(info: &[u8]) -> Result<Vec<u8>, NtlmError> {
         }
         offset = end;
     }
-    if !found_eol && offset != info.len() {
+    if !found_eol {
         return Err(NtlmError::InvalidSecurityBuffer);
     }
     if !found_flags {
@@ -440,7 +444,7 @@ mod tests {
 
     #[test]
     fn challenge_rejects_out_of_bounds_target_info() {
-        let mut challenge = vec![0; 48];
+        let mut challenge = vec![0; 56];
         challenge[..8].copy_from_slice(b"NTLMSSP\0");
         challenge[8..12].copy_from_slice(&2_u32.to_le_bytes());
         challenge[20..24].copy_from_slice(&NEGOTIATE_FLAGS.to_le_bytes());
@@ -450,6 +454,22 @@ mod tests {
         assert_eq!(
             parse_challenge(&challenge),
             Err(NtlmError::InvalidSecurityBuffer)
+        );
+    }
+
+    #[test]
+    fn challenge_rejects_a_truncated_negotiated_version() {
+        let mut challenge = vec![0; 52];
+        challenge[..8].copy_from_slice(b"NTLMSSP\0");
+        challenge[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        challenge[20..24].copy_from_slice(&NEGOTIATE_FLAGS.to_le_bytes());
+        challenge[40..42].copy_from_slice(&4_u16.to_le_bytes());
+        challenge[42..44].copy_from_slice(&4_u16.to_le_bytes());
+        challenge[44..48].copy_from_slice(&48_u32.to_le_bytes());
+
+        assert_eq!(
+            parse_challenge(&challenge),
+            Err(NtlmError::TooShort(challenge.len()))
         );
     }
 
@@ -524,5 +544,16 @@ mod tests {
                 0xcc, 0x19, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
             ]
         );
+    }
+
+    #[test]
+    fn target_info_requires_one_terminal_eol_pair() {
+        let missing_eol = [1, 0, 0, 0];
+        let trailing_after_eol = [0, 0, 0, 0, 1, 0, 0, 0];
+        let duplicate_flags = [6, 0, 4, 0, 0, 0, 0, 0, 6, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+        assert!(target_info_with_mic_flag(&missing_eol).is_err());
+        assert!(target_info_with_mic_flag(&trailing_after_eol).is_err());
+        assert!(target_info_with_mic_flag(&duplicate_flags).is_err());
     }
 }

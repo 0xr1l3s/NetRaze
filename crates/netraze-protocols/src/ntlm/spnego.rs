@@ -89,8 +89,8 @@ pub fn parse_neg_token_resp(input: &[u8]) -> Result<NegTokenResp, NtlmError> {
             }
             0xa1 => {
                 let (oid_tag, _, inner_rest) = parse_tlv(value)?;
-                if oid_tag != 0x06 || !inner_rest.is_empty() {
-                    return Err(spnego("invalid supportedMech"));
+                if oid_tag != 0x06 || !inner_rest.is_empty() || value != NTLMSSP_OID {
+                    return Err(spnego("server selected an unsupported mechanism"));
                 }
             }
             0xa2 => response.response_token = Some(parse_octet_string(value)?.to_vec()),
@@ -213,5 +213,17 @@ mod tests {
     #[test]
     fn parser_rejects_truncated_long_length() {
         assert!(parse_neg_token_resp(&[0xa1, 0x82, 0x01]).is_err());
+    }
+
+    #[test]
+    fn parser_rejects_a_non_ntlm_supported_mechanism() {
+        let kerberos_oid = [
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+        ];
+        let mut fields = tlv(0xa1, &kerberos_oid);
+        fields.extend_from_slice(&tlv(0xa2, &tlv(0x04, b"NTLMSSP\0challenge")));
+        let token = tlv(0xa1, &tlv(0x30, &fields));
+
+        assert!(parse_neg_token_resp(&token).is_err());
     }
 }

@@ -155,6 +155,9 @@ fn comparison(attribute: LdapString, raw: &[u8], kind: Comparison) -> Result<Fil
             if let Some(last) = parts.last().filter(|value| !value.is_empty()) {
                 substrings.push(SubstringChoice::Final(OctetString::from(last.clone())));
             }
+            if substrings.is_empty() {
+                return Err("substring filter requires a non-empty component".into());
+            }
             return Ok(Filter::Substrings(SubstringFilter::new(
                 attribute, substrings,
             )));
@@ -228,6 +231,8 @@ fn split_substrings(raw: &[u8]) -> Result<(Vec<Vec<u8>>, usize), String> {
             let byte = decode_escape(raw, index)?;
             parts.last_mut().expect("initialized").push(byte);
             index += 3;
+        } else if matches!(raw[index], 0 | b'(' | b')') {
+            return Err("reserved assertion byte must be escaped".into());
         } else {
             parts.last_mut().expect("initialized").push(raw[index]);
             index += 1;
@@ -243,6 +248,8 @@ fn decode_value(raw: &[u8]) -> Result<Vec<u8>, String> {
         if raw[index] == b'\\' {
             decoded.push(decode_escape(raw, index)?);
             index += 3;
+        } else if matches!(raw[index], 0 | b'(' | b')' | b'*') {
+            return Err("reserved assertion byte must be escaped".into());
         } else {
             decoded.push(raw[index]);
             index += 1;
@@ -333,5 +340,12 @@ mod tests {
         }
         let deeply_nested = format!("{}(cn=a){}", "(!".repeat(65), ")".repeat(65));
         assert!(parse_filter(&deeply_nested).is_err());
+    }
+
+    #[test]
+    fn rejects_unescaped_reserved_bytes_and_empty_substrings() {
+        for filter in ["(cn=a(b)", "(cn=raw\0nul)", "(cn=**)"] {
+            assert!(parse_filter(filter).is_err(), "{filter:?}");
+        }
     }
 }

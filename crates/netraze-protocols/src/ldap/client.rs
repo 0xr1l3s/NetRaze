@@ -322,6 +322,7 @@ impl LdapClient {
                         return Ok((entries, referrals, cookie));
                     }
                     operation => {
+                        self.usable = false;
                         return Err(LdapError::UnexpectedOperation(format!("{operation:?}")));
                     }
                 }
@@ -342,9 +343,13 @@ impl LdapClient {
         let message_id = self.allocate_message_id();
         let message = LdapMessage::new(message_id, ProtocolOp::UnbindRequest(UnbindRequest));
         let operation_timeout = self.config.operation_timeout;
-        let result = timeout(operation_timeout, self.send_message(&message))
-            .await
-            .map_err(|_| LdapError::Timeout)?;
+        let result = match timeout(operation_timeout, self.send_message(&message)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.usable = false;
+                return Err(LdapError::Timeout);
+            }
+        };
         if result.is_ok() {
             self.stream.shutdown().await?;
         }
@@ -376,7 +381,10 @@ impl LdapClient {
         self.validate_message_id(message_id, response.message_id)?;
         match response.protocol_op {
             ProtocolOp::BindResponse(response) => Ok(response),
-            operation => Err(LdapError::UnexpectedOperation(format!("{operation:?}"))),
+            operation => {
+                self.usable = false;
+                Err(LdapError::UnexpectedOperation(format!("{operation:?}")))
+            }
         }
     }
 
@@ -431,20 +439,40 @@ impl LdapClient {
             }
             let mut protected = vec![0; length];
             self.read_exact(&mut protected).await?;
-            self.security_context
+            match self
+                .security_context
                 .as_mut()
                 .expect("checked above")
                 .unwrap(&protected)
-                .map_err(|error| LdapError::Ntlm(error.to_string()))?
+            {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    self.usable = false;
+                    return Err(LdapError::Ntlm(error.to_string()));
+                }
+            }
         } else {
             self.receive_ber_frame().await?
         };
-        rasn::ber::decode(&encoded).map_err(|error| LdapError::Ber(error.to_string()))
+        match rasn::ber::decode(&encoded) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                self.usable = false;
+                Err(LdapError::Ber(error.to_string()))
+            }
+        }
     }
 
     async fn receive_ber_frame(&mut self) -> Result<Vec<u8>, LdapError> {
         loop {
-            match ber_frame_length(&self.read_buffer, self.config.max_pdu_size)? {
+            let frame_length = match ber_frame_length(&self.read_buffer, self.config.max_pdu_size) {
+                Ok(frame_length) => frame_length,
+                Err(error) => {
+                    self.usable = false;
+                    return Err(error);
+                }
+            };
+            match frame_length {
                 Some(length) => {
                     let remainder = self.read_buffer.split_off(length);
                     return Ok(std::mem::replace(&mut self.read_buffer, remainder));
@@ -483,11 +511,17 @@ impl LdapClient {
         current
     }
 
-    pub(crate) fn validate_message_id(&self, expected: u32, actual: u32) -> Result<(), LdapError> {
+    pub(crate) fn validate_message_id(
+        &mut self,
+        expected: u32,
+        actual: u32,
+    ) -> Result<(), LdapError> {
         if actual == 0 {
+            self.usable = false;
             return Err(LdapError::UnsolicitedNotification);
         }
         if actual != expected {
+            self.usable = false;
             return Err(LdapError::MessageIdMismatch { expected, actual });
         }
         Ok(())
@@ -755,6 +789,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_id_violations_poison_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let mut client = LdapClient::connect(LdapClientConfig::new(address.to_string()))
+            .await
+            .unwrap();
+        let _peer = accept.await.unwrap();
+
+        assert!(client.validate_message_id(7, 8).is_err());
+        assert!(!client.usable);
+    }
+
+    #[tokio::test]
     async fn ntlm_bind_advances_and_correlates_message_ids() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -900,7 +948,7 @@ mod tests {
 
     fn test_challenge() -> Vec<u8> {
         let target_info = [0_u8; 4];
-        let mut challenge = Vec::with_capacity(52);
+        let mut challenge = Vec::with_capacity(60);
         challenge.extend_from_slice(b"NTLMSSP\0");
         challenge.extend_from_slice(&2_u32.to_le_bytes());
         challenge.extend_from_slice(&[0; 8]);
@@ -909,7 +957,8 @@ mod tests {
         challenge.extend_from_slice(&[0; 8]);
         challenge.extend_from_slice(&(target_info.len() as u16).to_le_bytes());
         challenge.extend_from_slice(&(target_info.len() as u16).to_le_bytes());
-        challenge.extend_from_slice(&48_u32.to_le_bytes());
+        challenge.extend_from_slice(&56_u32.to_le_bytes());
+        challenge.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 15]);
         challenge.extend_from_slice(&target_info);
         challenge
     }
