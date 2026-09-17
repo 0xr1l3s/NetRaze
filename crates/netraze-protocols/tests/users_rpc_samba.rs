@@ -84,3 +84,27 @@ async fn users_rpc_lists_samba_users() {
     assert!(!alice.disabled);
     assert!(!alice.locked);
 }
+
+#[tokio::test]
+#[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
+async fn ldap_dispatcher_falls_back_to_samr() {
+    if !samba_reachable() {
+        panic!(
+            "Samba container not running at {}. Start it with:\n  \
+             docker compose -f tests/samba/docker-compose.yml up -d --wait\n\
+             See tests/samba/README.md.",
+            samba_addr()
+        );
+    }
+
+    let credential = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let users = netraze_protocols::users::enum_users(&samba_addr(), &credential)
+        .await
+        .expect("LDAP failure should fall back to live SAMR enumeration");
+
+    let alice = users
+        .iter()
+        .find(|user| user.name.eq_ignore_ascii_case("alice"))
+        .expect("expected alice in the fallback result");
+    assert_eq!(alice.source, netraze_core::UserEnumerationSource::Samr);
+}

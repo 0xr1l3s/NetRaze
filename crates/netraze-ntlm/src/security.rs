@@ -44,6 +44,7 @@ impl Rc4 {
 }
 
 /// One NTLM connection's independent client-to-server and server-to-client state.
+#[derive(Clone)]
 pub struct NtlmSecurityContext {
     send_signing_key: [u8; 16],
     receive_signing_key: [u8; 16],
@@ -156,6 +157,12 @@ impl NtlmSecurityContext {
         Ok(signature)
     }
 
+    /// Sign a SPNEGO mechanism list without consuming application RC4 state.
+    pub fn sign_mech_list_mic(&self, message: &[u8]) -> Result<Vec<u8>, NtlmError> {
+        let mut snapshot = self.clone();
+        snapshot.sign(message)
+    }
+
     pub fn verify(&mut self, message: &[u8], signature: &[u8]) -> Result<(), NtlmError> {
         if signature.len() != 16 || signature[..4] != 1_u32.to_le_bytes() {
             return Err(NtlmError::BadSignature);
@@ -174,6 +181,12 @@ impl NtlmSecurityContext {
         self.receive_sealing = trial;
         self.receive_sequence = self.receive_sequence.wrapping_add(1);
         Ok(())
+    }
+
+    /// Verify a SPNEGO mechanism-list MIC without consuming application state.
+    pub fn verify_mech_list_mic(&self, message: &[u8], signature: &[u8]) -> Result<(), NtlmError> {
+        let mut snapshot = self.clone();
+        snapshot.verify(message, signature)
     }
 
     #[must_use]
@@ -238,6 +251,19 @@ mod tests {
                 0x54, 0xe5, 0x01, 0x65, 0xbf, 0x19, 0x36, 0xdc, 0x99, 0x60, 0x20, 0xc1, 0x81, 0x1b,
                 0x0f, 0x06, 0xfb, 0x5f
             ]
+        );
+    }
+
+    #[test]
+    fn mech_list_mic_does_not_advance_application_state() {
+        let context = NtlmSecurityContext::new([0x55; 16]);
+        let _ = context.sign_mech_list_mic(b"mechTypes").unwrap();
+        assert_eq!(context.send_sequence(), 0);
+        let mut after_mic = context;
+        let mut fresh = NtlmSecurityContext::new([0x55; 16]);
+        assert_eq!(
+            after_mic.wrap(b"first").unwrap(),
+            fresh.wrap(b"first").unwrap()
         );
     }
 }
