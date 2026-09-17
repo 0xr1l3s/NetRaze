@@ -1,6 +1,6 @@
 //! Bounded asynchronous LDAP transport and NTLM SASL bind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use netraze_ntlm::{
@@ -15,11 +15,14 @@ use tokio::time::timeout;
 
 use crate::message::{
     AuthenticationChoice, BindRequest, BindResponse, LdapMessage, LdapString, ProtocolOp,
-    ResultCode, SaslCredentials, UnbindRequest,
+    ResultCode, SaslCredentials, SearchRequest, SearchRequestDerefAliases, SearchRequestScope,
+    SearchResultEntry, UnbindRequest,
 };
+use crate::{controls, search::parse_filter};
 
 const DEFAULT_LDAP_PORT: u16 = 389;
 const READ_CHUNK_SIZE: usize = 8 * 1024;
+const MAX_PAGE_LOOPS: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LdapClientConfig {
@@ -191,20 +194,144 @@ impl LdapClient {
     }
 
     pub async fn root_dse(&mut self) -> Result<LdapEntry, LdapError> {
-        Err(LdapError::State(
-            "RootDSE search is initialized in the search phase".into(),
-        ))
+        let mut outcome = self
+            .search_with_scope(
+                "",
+                "(objectClass=*)",
+                &["defaultNamingContext"],
+                SearchRequestScope::BaseObject,
+                false,
+            )
+            .await?;
+        if outcome.entries.len() != 1 {
+            return Err(LdapError::UnexpectedOperation(format!(
+                "RootDSE returned {} entries",
+                outcome.entries.len()
+            )));
+        }
+        Ok(outcome.entries.remove(0))
     }
 
     pub async fn search(
         &mut self,
-        _base_dn: &str,
-        _filter: &str,
-        _attributes: &[&str],
+        base_dn: &str,
+        filter: &str,
+        attributes: &[&str],
     ) -> Result<SearchOutcome, LdapError> {
+        self.search_with_scope(
+            base_dn,
+            filter,
+            attributes,
+            SearchRequestScope::WholeSubtree,
+            true,
+        )
+        .await
+    }
+
+    async fn search_with_scope(
+        &mut self,
+        base_dn: &str,
+        filter: &str,
+        attributes: &[&str],
+        scope: SearchRequestScope,
+        paged: bool,
+    ) -> Result<SearchOutcome, LdapError> {
+        if self.security_context.is_none() {
+            return Err(LdapError::State(
+                "search requires an authenticated sign-and-seal context".into(),
+            ));
+        }
+        let filter = parse_filter(filter).map_err(LdapError::Ber)?;
+        let attributes = attributes
+            .iter()
+            .map(|attribute| LdapString::from(*attribute))
+            .collect::<Vec<_>>();
+        let mut outcome = SearchOutcome::default();
+        let mut cookie = Vec::new();
+        let mut seen_cookies = HashSet::new();
+
+        for page in 0..MAX_PAGE_LOOPS {
+            let request = SearchRequest::new(
+                LdapString::from(base_dn),
+                scope,
+                SearchRequestDerefAliases::NeverDerefAliases,
+                0,
+                0,
+                false,
+                filter.clone(),
+                attributes.clone(),
+            );
+            let message_id = self.allocate_message_id();
+            let mut message = LdapMessage::new(message_id, ProtocolOp::SearchRequest(request));
+            if paged {
+                message.controls = Some(vec![
+                    controls::paged_results_control(self.config.page_size, &cookie)
+                        .map_err(LdapError::Ber)?,
+                ]);
+            }
+            let (entries, referrals, next_cookie) = self.search_page(message_id, message).await?;
+            outcome.entries.extend(entries);
+            outcome.referrals.extend(referrals);
+            if !paged || next_cookie.is_empty() {
+                return Ok(outcome);
+            }
+            record_paging_cookie(&mut seen_cookies, &next_cookie)?;
+            cookie = next_cookie;
+            if page + 1 == MAX_PAGE_LOOPS {
+                break;
+            }
+        }
         Err(LdapError::State(
-            "LDAP search is initialized in the search phase".into(),
+            "LDAP paging exceeded the 10000-page safety limit".into(),
         ))
+    }
+
+    async fn search_page(
+        &mut self,
+        message_id: u32,
+        message: LdapMessage,
+    ) -> Result<(Vec<LdapEntry>, Vec<String>, Vec<u8>), LdapError> {
+        let operation_timeout = self.config.operation_timeout;
+        timeout(operation_timeout, async {
+            self.send_message(&message).await?;
+            let mut entries = Vec::new();
+            let mut referrals = Vec::new();
+            loop {
+                let response = self.receive_message().await?;
+                self.validate_message_id(message_id, response.message_id)?;
+                match response.protocol_op {
+                    ProtocolOp::SearchResEntry(entry) => entries.push(convert_entry(entry)),
+                    ProtocolOp::SearchResRef(reference) => {
+                        referrals.extend(reference.0.into_iter().map(|uri| uri.0));
+                    }
+                    ProtocolOp::SearchResDone(done) => {
+                        let result = done.0;
+                        if let Some(result_referrals) = &result.referral {
+                            referrals.extend(result_referrals.iter().map(|uri| uri.0.clone()));
+                        }
+                        if !matches!(
+                            result.result_code,
+                            ResultCode::Success | ResultCode::Referral
+                        ) {
+                            return Err(result_error(
+                                result.result_code,
+                                &result.diagnostic_message,
+                            ));
+                        }
+                        let cookie = paging_cookie(response.controls.as_deref())?;
+                        return Ok((entries, referrals, cookie));
+                    }
+                    operation => {
+                        return Err(LdapError::UnexpectedOperation(format!("{operation:?}")));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            self.usable = false;
+            LdapError::Timeout
+        })?
     }
 
     /// Send RFC 4511 Unbind and close the stream. Unbind intentionally has no response.
@@ -426,6 +553,54 @@ fn result_error(code: ResultCode, diagnostic: &LdapString) -> LdapError {
     }
 }
 
+fn convert_entry(entry: SearchResultEntry) -> LdapEntry {
+    let attributes = entry
+        .attributes
+        .into_iter()
+        .map(|attribute| {
+            (
+                attribute.r#type.0,
+                attribute
+                    .vals
+                    .to_vec()
+                    .into_iter()
+                    .map(|value| value.to_vec())
+                    .collect(),
+            )
+        })
+        .collect();
+    LdapEntry {
+        dn: entry.object_name.0,
+        attributes,
+    }
+}
+
+fn paging_cookie(controls: Option<&[crate::message::Control]>) -> Result<Vec<u8>, LdapError> {
+    let Some(controls) = controls else {
+        return Ok(Vec::new());
+    };
+    let Some(control) = controls
+        .iter()
+        .find(|control| control.control_type.as_ref() == controls::OID_PAGED_RESULTS.as_bytes())
+    else {
+        return Ok(Vec::new());
+    };
+    let value = control
+        .control_value
+        .as_deref()
+        .ok_or_else(|| LdapError::Ber("paged-results response omitted controlValue".into()))?;
+    controls::decode_paged_cookie(value).map_err(LdapError::Ber)
+}
+
+fn record_paging_cookie(seen: &mut HashSet<Vec<u8>>, cookie: &[u8]) -> Result<(), LdapError> {
+    if !seen.insert(cookie.to_vec()) {
+        return Err(LdapError::State(
+            "server repeated an LDAP paging cookie".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn with_default_port(endpoint: &str, port: u16) -> String {
     if endpoint.starts_with('[') {
         if let Some(end) = endpoint.find(']') {
@@ -446,6 +621,8 @@ fn with_default_port(endpoint: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rasn::types::SetOf;
+    use rasn_ldap::{LdapResult, PartialAttribute, SearchResultDone, SearchResultReference};
     use tokio::net::TcpListener;
 
     #[test]
@@ -489,6 +666,13 @@ mod tests {
         assert_eq!(with_default_port("dc.example:1389", 389), "dc.example:1389");
         assert_eq!(with_default_port("::1", 389), "[::1]:389");
         assert_eq!(with_default_port("[::1]", 389), "[::1]:389");
+    }
+
+    #[test]
+    fn paging_rejects_a_repeated_cookie() {
+        let mut seen = HashSet::new();
+        record_paging_cookie(&mut seen, b"same").unwrap();
+        assert!(record_paging_cookie(&mut seen, b"same").is_err());
     }
 
     #[tokio::test]
@@ -550,6 +734,93 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn protected_search_iterates_pages_and_returns_referrals() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = [0x33; 16];
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut protection = NtlmSecurityContext::new_server(key);
+
+            for (expected_id, expected_cookie, next_cookie, username) in [
+                (1, Vec::new(), b"next".to_vec(), "alice"),
+                (2, b"next".to_vec(), Vec::new(), "bob"),
+            ] {
+                let request = read_test_protected(&mut socket, &mut protection).await;
+                let request: LdapMessage = rasn::ber::decode(&request).unwrap();
+                assert_eq!(request.message_id, expected_id);
+                assert_eq!(
+                    paging_cookie(request.controls.as_deref()).unwrap(),
+                    expected_cookie
+                );
+
+                let entry = SearchResultEntry::new(
+                    LdapString::from(format!("CN={username},DC=example,DC=test")),
+                    vec![PartialAttribute::new(
+                        LdapString::from("sAMAccountName"),
+                        SetOf::from_vec(vec![OctetString::from(username.as_bytes().to_vec())]),
+                    )],
+                );
+                write_test_protected(
+                    &mut socket,
+                    &mut protection,
+                    LdapMessage::new(expected_id, ProtocolOp::SearchResEntry(entry)),
+                )
+                .await;
+                if expected_id == 1 {
+                    write_test_protected(
+                        &mut socket,
+                        &mut protection,
+                        LdapMessage::new(
+                            expected_id,
+                            ProtocolOp::SearchResRef(SearchResultReference(vec![
+                                LdapString::from("ldap://other.example.test/DC=example,DC=test"),
+                            ])),
+                        ),
+                    )
+                    .await;
+                }
+                let done = SearchResultDone(LdapResult::new(
+                    ResultCode::Success,
+                    LdapString::from(""),
+                    LdapString::from(""),
+                ));
+                let mut response = LdapMessage::new(expected_id, ProtocolOp::SearchResDone(done));
+                response.controls = Some(vec![
+                    controls::paged_results_control(1000, &next_cookie).unwrap(),
+                ]);
+                write_test_protected(&mut socket, &mut protection, response).await;
+            }
+        });
+
+        let mut client = LdapClient::connect(LdapClientConfig::new(address.to_string()))
+            .await
+            .unwrap();
+        client.security_context = Some(NtlmSecurityContext::new(key));
+        let outcome = client
+            .search(
+                "DC=example,DC=test",
+                "(sAMAccountType=805306368)",
+                &["sAMAccountName"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome
+                .entries
+                .iter()
+                .filter_map(|entry| entry.first_utf8("samaccountname"))
+                .collect::<Vec<_>>(),
+            ["alice", "bob"]
+        );
+        assert_eq!(
+            outcome.referrals,
+            ["ldap://other.example.test/DC=example,DC=test"]
+        );
+        server.await.unwrap();
+    }
+
     fn test_challenge() -> Vec<u8> {
         let target_info = [0_u8; 4];
         let mut challenge = Vec::with_capacity(52);
@@ -590,5 +861,30 @@ mod tests {
     async fn write_test_message(stream: &mut TcpStream, message: LdapMessage) {
         let encoded = rasn::ber::encode(&message).unwrap();
         stream.write_all(&encoded).await.unwrap();
+    }
+
+    async fn read_test_protected(
+        stream: &mut TcpStream,
+        context: &mut NtlmSecurityContext,
+    ) -> Vec<u8> {
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut protected = vec![0; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut protected).await.unwrap();
+        context.unwrap(&protected).unwrap()
+    }
+
+    async fn write_test_protected(
+        stream: &mut TcpStream,
+        context: &mut NtlmSecurityContext,
+        message: LdapMessage,
+    ) {
+        let encoded = rasn::ber::encode(&message).unwrap();
+        let protected = context.wrap(&encoded).unwrap();
+        stream
+            .write_all(&(protected.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&protected).await.unwrap();
     }
 }
