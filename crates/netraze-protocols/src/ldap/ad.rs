@@ -2,7 +2,7 @@
 
 use netraze_core::{UserEnumerationSource, UserInfo};
 
-use crate::{LdapClient, LdapEntry, LdapError};
+use super::{LdapClient, LdapEntry, LdapError};
 
 const NORMAL_ACCOUNT_FILTER: &str = "(sAMAccountType=805306368)";
 const ACCOUNT_DISABLED: u32 = 0x0000_0002;

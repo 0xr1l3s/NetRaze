@@ -1,6 +1,6 @@
 //! Strict, length-checked SPNEGO encoding and decoding (RFC 4178).
 
-use crate::message::NtlmError;
+use super::message::NtlmError;
 
 const SPNEGO_OID: &[u8] = &[0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
 const NTLMSSP_OID: &[u8] = &[

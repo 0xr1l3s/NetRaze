@@ -1,9 +1,8 @@
 //! MD4 + HMAC-MD5 primitives for NTLMv2.
 //!
 //! These are the only crypto operations the NTLM handshake needs; the
-//! full AES/DES/RC4 toolkit lives in `netraze-protocols::smb::crypto`
-//! and is not duplicated here because `netraze-ntlm` doesn't touch
-//! LSA/SAM decryption.
+//! full AES/DES/RC4 toolkit lives in `crate::smb::crypto` and is not
+//! duplicated here because this module doesn't touch LSA/SAM decryption.
 
 use hmac::{Hmac, Mac};
 use md4::Md4;

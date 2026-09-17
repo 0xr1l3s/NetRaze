@@ -2,7 +2,7 @@
 
 use rasn::types::{OctetString, SetOf};
 
-use crate::message::{
+use super::message::{
     AttributeValueAssertion, Filter, LdapString, MatchingRuleAssertion, SubstringChoice,
     SubstringFilter,
 };

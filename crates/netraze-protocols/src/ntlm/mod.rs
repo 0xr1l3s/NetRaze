@@ -1,9 +1,7 @@
-//! Shared NTLMSSP + SPNEGO helpers.
+//! Shared NTLMSSP + SPNEGO helpers for protocol implementations.
 //!
-//! Extracted from `netraze-protocols::smb::ntlm` and `netraze-dcerpc::auth`
-//! so that `netraze-ldap` and any future consumer (MSSQL, Kerberos) can
-//! reuse the same handshake without a circular dependency on
-//! `netraze-protocols`.
+//! LDAP uses this module directly. The established SMB and DCE/RPC NTLM
+//! implementations remain separate until their migration is validated.
 //!
 //! MS-NLMP is the reference for every byte layout in this module.
 

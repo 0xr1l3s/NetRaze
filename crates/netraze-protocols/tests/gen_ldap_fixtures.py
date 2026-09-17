@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the LDAP BER fixtures pinned by the Rust unit tests.
+"""Generate the LDAP BER fixtures pinned by the protocol-crate unit tests.
 
 Run with Impacket 0.13.0 on PYTHONPATH. The output is deliberately Rust byte
 arrays so refreshing a fixture remains an explicit, reviewable operation.

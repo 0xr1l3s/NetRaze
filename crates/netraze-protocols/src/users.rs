@@ -2,11 +2,10 @@
 
 use core::future::Future;
 
-use netraze_core::UserInfo;
-use netraze_ldap::{LdapClient, LdapClientConfig};
-use netraze_ntlm::NtlmCredential;
-
+use crate::ldap::{LdapClient, LdapClientConfig};
+use crate::ntlm::NtlmCredential;
 use crate::smb::connection::SmbCredential;
+use netraze_core::UserInfo;
 
 /// Enumerate users through LDAP when secret-bearing credentials are available,
 /// falling back to the existing SAMR implementation on LDAP failure.

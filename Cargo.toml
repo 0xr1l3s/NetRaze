@@ -7,8 +7,6 @@ members = [
     "crates/netraze-config",
     "crates/netraze-core",
     "crates/netraze-dcerpc",
-    "crates/netraze-ldap",
-    "crates/netraze-ntlm",
     "crates/netraze-modules",
     "crates/netraze-output",
     "crates/netraze-protocols",

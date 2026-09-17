@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use netraze_ldap::LdapClientConfig;
+use netraze_protocols::ldap::LdapClientConfig;
 
 #[test]
 fn client_defaults_are_bounded() {

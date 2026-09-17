@@ -1,7 +1,8 @@
 mod ftp;
-mod ldap;
+pub mod ldap;
 mod mssql;
 mod nfs;
+pub mod ntlm;
 mod rdp;
 pub mod smb;
 mod ssh;

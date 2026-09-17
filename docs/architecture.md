@@ -25,7 +25,7 @@ Contrats du domaine. Tout crate dépendant du coeur parle les mêmes types et le
 
 ## Evolution prévue
 
-- Split futur de `netraze-protocols` en crates dédiées par protocole (`netraze-protocol-smb`, `netraze-protocol-ldap`, etc.).
+- Approfondissement de modules dédiés dans `netraze-protocols` (`smb`, `ldap`, `kerberos`, etc.) sans créer un crate par protocole.
 - Introduction d'une API de plugins stable pour modules externes.
 - Support éventuel d'agents distants et de files de jobs.
 - Ajout d'une API machine-friendly ou d'un TUI sans casser le coeur.

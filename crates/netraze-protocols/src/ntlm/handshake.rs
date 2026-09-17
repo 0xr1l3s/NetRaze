@@ -2,12 +2,12 @@
 
 use rand::RngCore;
 
-use crate::message::{
+use super::message::{
     NtlmCredential, NtlmError, build_authenticate_with_key, build_negotiate, compute_ntlmv2,
     parse_challenge,
 };
-use crate::security::NtlmSecurityContext;
-use crate::spnego::{
+use super::security::NtlmSecurityContext;
+use super::spnego::{
     NegState, ntlm_mech_types_der, parse_neg_token_resp, wrap_spnego_init,
     wrap_spnego_resp_with_mic,
 };
