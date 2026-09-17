@@ -1,0 +1,14 @@
+[package]
+name = "netraze-ntlm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+hmac = { workspace = true }
+md4 = { workspace = true }
+md-5 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
