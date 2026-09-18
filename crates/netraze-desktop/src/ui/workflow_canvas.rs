@@ -32,9 +32,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Collect user enum requests — dispatched to runtime in app.rs
     for (host_node_id, host_ip, hostname, cred) in viewer.users_requests.drain(..) {
-        state
-            .pending_user_enums
-            .push((host_node_id.0, host_ip, hostname, cred));
+        state.queue_user_enum(host_node_id.0, host_ip, hostname, cred);
     }
 
     // Collect dump requests — dispatched to runtime in app.rs

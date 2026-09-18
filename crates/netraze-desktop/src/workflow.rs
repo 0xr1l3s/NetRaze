@@ -78,6 +78,18 @@ pub enum WorkflowNode {
         host_ip: String,
         hostname: String,
         users: Vec<UserEntry>,
+        #[serde(default)]
+        source: Option<netraze_core::UserEnumerationSource>,
+        #[serde(default)]
+        fallback_used: bool,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        done: bool,
+        #[serde(skip)]
+        loading: bool,
+        #[serde(default)]
+        cred_label: Option<String>,
     },
     DumpNode {
         host_ip: String,
@@ -160,6 +172,7 @@ impl WorkflowNode {
                 host_ip,
                 hostname,
                 users,
+                ..
             } => {
                 let host = if hostname.is_empty() {
                     host_ip.as_str()
@@ -594,9 +607,28 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 let border = if shares.is_empty() { theme::MUTED } else { theme::INFO };
                 Some(("📂", label, border))
             }
-            WorkflowNode::UsersNode { host_ip, hostname, users } => {
-                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
-                let border = if users.is_empty() { theme::MUTED } else { theme::INFO };
+            WorkflowNode::UsersNode {
+                host_ip,
+                hostname,
+                users,
+                loading,
+                error,
+                ..
+            } => {
+                let label = if hostname.is_empty() {
+                    host_ip.clone()
+                } else {
+                    hostname.clone()
+                };
+                let border = if *loading {
+                    theme::WARNING
+                } else if error.is_some() {
+                    theme::ERROR
+                } else if users.is_empty() {
+                    theme::MUTED
+                } else {
+                    theme::INFO
+                };
                 Some(("👥", label, border))
             }
             WorkflowNode::DumpNode { host_ip, hostname, dump_type, entries, error, .. } => {

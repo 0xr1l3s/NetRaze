@@ -211,6 +211,71 @@ fn show_default_config(
 fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
     let node_id = NodeId(raw_id);
 
+    // Large AD directories must not be cloned on every egui repaint.
+    if let WorkflowNode::UsersNode {
+        host_ip,
+        hostname,
+        users,
+        source,
+        fallback_used,
+        error,
+        done,
+        loading,
+        cred_label,
+    } = &state.workflow.snarl[node_id]
+    {
+        let refresh = show_users_panel(
+            ui,
+            host_ip,
+            hostname,
+            users,
+            *source,
+            *fallback_used,
+            error.as_deref(),
+            *done,
+            *loading,
+            cred_label.as_deref(),
+        );
+        if !refresh {
+            return;
+        }
+        let host_ip = host_ip.clone();
+        let cred_label = cred_label.clone();
+        let host = state.workflow.snarl.node_ids().find_map(|(id, node)| {
+            if let WorkflowNode::HostNode {
+                ip,
+                hostname,
+                logged_in_cred,
+                ..
+            } = node
+            {
+                (ip == &host_ip).then(|| (id.0, hostname.clone(), logged_in_cred.clone()))
+            } else {
+                None
+            }
+        });
+        if let Some((host_id, current_hostname, login_label)) = host {
+            let label = login_label.or(cred_label);
+            let credential = match label.as_deref() {
+                None | Some("(anonymous)") => Some(crate::state::anonymous_record()),
+                Some(label) => state
+                    .credentials
+                    .iter()
+                    .find(|cred| crate::state::cred_label(cred) == label)
+                    .cloned(),
+            };
+            if let Some(credential) = credential {
+                state.queue_user_enum(host_id, host_ip, current_hostname, credential);
+            } else {
+                state.add_log(
+                    crate::runtime::LogLevel::Error,
+                    "Cannot refresh users: the credential is no longer available",
+                );
+            }
+        }
+        return;
+    }
+
     match state.workflow.snarl[node_id].clone() {
         WorkflowNode::HostNode {
             ip,
@@ -246,13 +311,7 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
         } => {
             show_shares_panel(ui, &host_ip, &hostname, &shares, cred_label.as_deref());
         }
-        WorkflowNode::UsersNode {
-            host_ip,
-            hostname,
-            users,
-        } => {
-            show_users_panel(ui, &host_ip, &hostname, &users);
-        }
+        WorkflowNode::UsersNode { .. } => unreachable!("users are rendered by reference above"),
         WorkflowNode::DumpNode {
             host_ip,
             hostname,
@@ -260,7 +319,14 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
             entries,
             error,
         } => {
-            show_dump_panel(ui, &host_ip, &hostname, &dump_type, &entries, error.as_deref());
+            show_dump_panel(
+                ui,
+                &host_ip,
+                &hostname,
+                &dump_type,
+                &entries,
+                error.as_deref(),
+            );
         }
         WorkflowNode::EnumAvNode {
             host_ip,
@@ -490,12 +556,56 @@ fn show_users_panel(
     host_ip: &str,
     hostname: &str,
     users: &[crate::workflow::UserEntry],
-) {
+    source: Option<netraze_core::UserEnumerationSource>,
+    fallback_used: bool,
+    error: Option<&str>,
+    done: bool,
+    loading: bool,
+    cred_label: Option<&str>,
+) -> bool {
     panel_header(ui, "👥", host_ip, hostname, "Users");
 
+    let refresh = ui
+        .add_enabled(!loading, egui::Button::new("↻ Refresh users"))
+        .clicked();
+    if let Some(label) = cred_label {
+        ui.label(
+            egui::RichText::new(format!("Credential: {label}"))
+                .small()
+                .color(LABEL_COLOR),
+        );
+    }
+    if loading {
+        ui.spinner();
+        ui.label("Enumerating users…");
+        return refresh;
+    }
+    if let Some(error) = error {
+        ui.colored_label(theme::ERROR, format!("Enumeration failed: {error}"));
+        return refresh;
+    }
+    if let Some(source) = source {
+        let label = match source {
+            netraze_core::UserEnumerationSource::Ldap => "LDAP",
+            netraze_core::UserEnumerationSource::Samr => "SAMR",
+        };
+        ui.label(format!("Source: {label}"));
+        if fallback_used {
+            ui.colored_label(theme::WARNING, "LDAP unavailable; SAMR fallback succeeded");
+        }
+    }
+
     if users.is_empty() {
-        ui.label(egui::RichText::new("⚠ No users found").small().color(theme::WARNING));
-        return;
+        ui.label(
+            egui::RichText::new(if done {
+                "No users found"
+            } else {
+                "Not enumerated yet"
+            })
+            .small()
+            .color(LABEL_COLOR),
+        );
+        return refresh;
     }
 
     ui.label(
@@ -509,9 +619,9 @@ fn show_users_panel(
     egui::ScrollArea::vertical()
         .id_salt("cfg_users_list")
         .max_height(ui.available_height() - 20.0)
-        .show(ui, |ui| {
+        .show_rows(ui, 22.0, users.len(), |ui, rows| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            for user in users {
+            for user in &users[rows] {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let icon = if user.privilege_level == 2 { "👑" } else { "👤" };
@@ -542,6 +652,7 @@ fn show_users_panel(
                 });
             }
         });
+    refresh
 }
 
 fn show_dump_panel(
