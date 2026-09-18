@@ -583,24 +583,20 @@ pub(crate) fn ber_frame_length(buffer: &[u8], maximum: usize) -> Result<Option<u
                 "indefinite BER length is not allowed".into(),
             ));
         }
-        if count > core::mem::size_of::<usize>() {
-            return Err(LdapError::Ber("BER length is too wide".into()));
+        if count == 0x7f {
+            return Err(LdapError::Ber("reserved BER length form".into()));
         }
         if buffer.len() < 2 + count {
             return Ok(None);
         }
-        if buffer[2] == 0 {
-            return Err(LdapError::Ber("non-minimal BER length".into()));
-        }
+        // BER permits a sender to use more length octets than necessary.
+        // LDAP forbids indefinite lengths, but does not require DER minimality.
         let mut length = 0_usize;
         for byte in &buffer[2..2 + count] {
             length = length
                 .checked_mul(256)
                 .and_then(|value| value.checked_add(usize::from(*byte)))
                 .ok_or_else(|| LdapError::Ber("BER length overflow".into()))?;
-        }
-        if length < 0x80 {
-            return Err(LdapError::Ber("non-minimal BER long-form length".into()));
         }
         (length, 2 + count)
     };
@@ -811,9 +807,22 @@ mod tests {
     }
 
     #[test]
-    fn ber_framing_rejects_indefinite_nonminimal_and_oversized_lengths() {
+    fn ber_framing_accepts_noncanonical_definite_lengths() {
+        // LDAP uses BER, not DER. AD can reserve length octets that begin
+        // with zero, and X.690 permits long form even below 128 bytes.
+        for header in [&[0x30, 0x81, 0x10][..], &[0x30, 0x82, 0x00, 0x10][..]] {
+            let mut frame = header.to_vec();
+            frame.extend_from_slice(&SASL_BIND_RESPONSE[2..]);
+            assert_eq!(ber_frame_length(&frame, 1024).unwrap(), Some(frame.len()));
+            let message: LdapMessage = rasn::ber::decode(&frame).unwrap();
+            assert_eq!(message.message_id, 1);
+        }
+    }
+
+    #[test]
+    fn ber_framing_rejects_indefinite_reserved_and_oversized_lengths() {
         assert!(ber_frame_length(&[0x30, 0x80], 1024).is_err());
-        assert!(ber_frame_length(&[0x30, 0x81, 0x7f], 1024).is_err());
+        assert!(ber_frame_length(&[0x30, 0xff], 1024).is_err());
         assert!(matches!(
             ber_frame_length(&[0x30, 0x82, 0x10, 0x00], 1024),
             Err(LdapError::OversizedPdu { .. })
