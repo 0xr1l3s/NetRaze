@@ -5,13 +5,31 @@ use core::future::Future;
 use crate::ldap::{LdapClient, LdapClientConfig};
 use crate::ntlm::NtlmCredential;
 use crate::smb::connection::SmbCredential;
-use netraze_core::UserInfo;
+use netraze_core::{UserEnumerationSource, UserInfo};
+
+/// Outcome metadata remains accurate even when the directory has no users.
+#[derive(Debug, Clone)]
+pub struct UserEnumerationOutcome {
+    pub users: Vec<UserInfo>,
+    pub source: UserEnumerationSource,
+    pub fallback_used: bool,
+}
 
 /// Enumerate users through LDAP when secret-bearing credentials are available,
 /// falling back to the existing SAMR implementation on LDAP failure.
 pub async fn enum_users(target: &str, credential: &SmbCredential) -> Result<Vec<UserInfo>, String> {
+    enum_users_detailed(target, credential)
+        .await
+        .map(|outcome| outcome.users)
+}
+
+/// Enumerate users and report which backend completed the request.
+pub async fn enum_users_detailed(
+    target: &str,
+    credential: &SmbCredential,
+) -> Result<UserEnumerationOutcome, String> {
     let ldap_endpoint = ldap_endpoint(target);
-    dispatch(
+    dispatch_detailed(
         credential,
         |ntlm_credential| async {
             let config = LdapClientConfig::new(ldap_endpoint);
@@ -37,6 +55,7 @@ pub async fn enum_users(target: &str, credential: &SmbCredential) -> Result<Vec<
     .await
 }
 
+#[cfg(test)]
 async fn dispatch<L, LFuture, S, SFuture>(
     credential: &SmbCredential,
     ldap: L,
@@ -48,16 +67,44 @@ where
     S: FnOnce() -> SFuture,
     SFuture: Future<Output = Result<Vec<UserInfo>, String>>,
 {
+    dispatch_detailed(credential, ldap, samr)
+        .await
+        .map(|outcome| outcome.users)
+}
+
+async fn dispatch_detailed<L, LFuture, S, SFuture>(
+    credential: &SmbCredential,
+    ldap: L,
+    samr: S,
+) -> Result<UserEnumerationOutcome, String>
+where
+    L: FnOnce(NtlmCredential) -> LFuture,
+    LFuture: Future<Output = Result<Vec<UserInfo>, String>>,
+    S: FnOnce() -> SFuture,
+    SFuture: Future<Output = Result<Vec<UserInfo>, String>>,
+{
     let Some(ntlm_credential) = ldap_credential(credential) else {
-        return samr().await;
+        return samr().await.map(|users| UserEnumerationOutcome {
+            users,
+            source: UserEnumerationSource::Samr,
+            fallback_used: false,
+        });
     };
     match ldap(ntlm_credential).await {
-        Ok(users) => Ok(users),
+        Ok(users) => Ok(UserEnumerationOutcome {
+            users,
+            source: UserEnumerationSource::Ldap,
+            fallback_used: false,
+        }),
         Err(ldap_error) => {
             let ldap_error = sanitize_error(&ldap_error, credential);
             tracing::warn!(error = %ldap_error, "LDAP user enumeration failed; falling back to SAMR");
             match samr().await {
-                Ok(users) => Ok(users),
+                Ok(users) => Ok(UserEnumerationOutcome {
+                    users,
+                    source: UserEnumerationSource::Samr,
+                    fallback_used: true,
+                }),
                 Err(samr_error) => Err(format!(
                     "LDAP user enumeration failed ({ldap_error}); SAMR fallback failed ({samr_error})"
                 )),
@@ -133,6 +180,34 @@ mod tests {
         .unwrap();
         assert!(result.is_empty());
         assert_eq!(samr_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn detailed_result_identifies_empty_ldap_success() {
+        let result = dispatch_detailed(
+            &SmbCredential::new("alice", "EXAMPLE", "secret"),
+            |_| async { Ok(Vec::new()) },
+            || async { Err("SAMR must not run".into()) },
+        )
+        .await
+        .unwrap();
+        assert!(result.users.is_empty());
+        assert_eq!(result.source, UserEnumerationSource::Ldap);
+        assert!(!result.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn detailed_result_identifies_empty_samr_fallback() {
+        let result = dispatch_detailed(
+            &SmbCredential::new("alice", "EXAMPLE", "secret"),
+            |_| async { Err("LDAP unavailable".into()) },
+            || async { Ok(Vec::new()) },
+        )
+        .await
+        .unwrap();
+        assert!(result.users.is_empty());
+        assert_eq!(result.source, UserEnumerationSource::Samr);
+        assert!(result.fallback_used);
     }
 
     #[tokio::test]
