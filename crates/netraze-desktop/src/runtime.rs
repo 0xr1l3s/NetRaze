@@ -65,7 +65,7 @@ pub enum RuntimeEvent {
         host_node_id: usize,
         ip: String,
         hostname: String,
-        users: Vec<(String, bool, bool, u32)>, // (name, disabled, locked, priv_level)
+        result: Result<netraze_protocols::users::UserEnumerationOutcome, String>,
     },
     DumpResult {
         host_node_id: usize,
@@ -611,21 +611,23 @@ impl RuntimeServices {
             // Keep an explicitly typed port (e.g. a container harness on
             // :1445); default to 445 only for bare hosts.
             let target = netraze_protocols::targets::with_default_port(&ip_clone, 445);
-            let result = netraze_protocols::users::enum_users(&target, &smb_cred).await;
+            let result = netraze_protocols::users::enum_users_detailed(&target, &smb_cred).await;
 
-            let users = match result {
-                Ok(user_list) => {
+            match &result {
+                Ok(outcome) => {
                     let _ = tx.send(RuntimeEvent::Log {
                         level: LogLevel::Success,
                         message: format!(
-                            "{ip_clone}: {} utilisateur(s) trouvé(s)",
-                            user_list.len()
+                            "{ip_clone}: {} utilisateur(s) trouvé(s) via {:?}{}",
+                            outcome.users.len(),
+                            outcome.source,
+                            if outcome.fallback_used {
+                                " (fallback)"
+                            } else {
+                                ""
+                            }
                         ),
                     });
-                    user_list
-                        .into_iter()
-                        .map(|u| (u.name, u.disabled, u.locked, u.privilege_level))
-                        .collect()
                 }
                 Err(e) => {
                     let (level, prefix) = if e.contains("ACCESS_DENIED (0x5)") {
@@ -637,15 +639,14 @@ impl RuntimeServices {
                         level,
                         message: format!("{ip_clone}: {prefix}: {e}"),
                     });
-                    Vec::new()
                 }
-            };
+            }
 
             let _ = tx.send(RuntimeEvent::UserEnumResult {
                 host_node_id,
                 ip: ip_clone,
                 hostname: hostname_clone,
-                users,
+                result,
             });
         });
     }

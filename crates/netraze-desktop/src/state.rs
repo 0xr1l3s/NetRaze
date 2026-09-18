@@ -312,6 +312,77 @@ impl AppState {
         id
     }
 
+    /// Queue one manual user lookup per host and immediately expose its state.
+    pub fn queue_user_enum(
+        &mut self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: CredentialRecord,
+    ) {
+        let label = cred_label(&cred);
+        if let Some(node) =
+            self.workflow.snarl.nodes_mut().find(
+                |node| matches!(node, WorkflowNode::UsersNode { host_ip, .. } if *host_ip == ip),
+            )
+        {
+            if let WorkflowNode::UsersNode {
+                users,
+                source,
+                fallback_used,
+                error,
+                done,
+                loading,
+                cred_label,
+                ..
+            } = node
+            {
+                if *loading {
+                    return;
+                }
+                users.clear();
+                *source = None;
+                *fallback_used = false;
+                *error = None;
+                *done = false;
+                *loading = true;
+                *cred_label = Some(label);
+            }
+        } else {
+            let count = self.workflow.snarl.nodes().count() as f32;
+            let pos = egui::Pos2::new(
+                40.0 + (count % 4.0) * 280.0,
+                40.0 + (count / 4.0).floor() * 200.0,
+            );
+            let new_id = self.workflow.snarl.insert_node(
+                pos,
+                WorkflowNode::UsersNode {
+                    host_ip: ip.clone(),
+                    hostname: hostname.clone(),
+                    users: Vec::new(),
+                    source: None,
+                    fallback_used: false,
+                    error: None,
+                    done: false,
+                    loading: true,
+                    cred_label: Some(label),
+                },
+            );
+            let from = egui_snarl::OutPinId {
+                node: egui_snarl::NodeId(host_node_id),
+                output: 0,
+            };
+            let to = egui_snarl::InPinId {
+                node: new_id,
+                input: 0,
+            };
+            self.workflow.snarl.connect(from, to);
+            self.selected_workflow_node = Some(new_id.0);
+        }
+        self.pending_user_enums
+            .push((host_node_id, ip, hostname, cred));
+    }
+
     pub fn poll_logs(&mut self) {
         while let Ok(event) = self.log_rx.try_recv() {
             match event {
@@ -527,23 +598,27 @@ impl AppState {
                     host_node_id,
                     ip,
                     hostname,
-                    users,
+                    result,
                 } => {
-                    use crate::workflow::{UserEntry, WorkflowNode};
+                    use crate::workflow::UserEntry;
+                    let users = result
+                        .as_ref()
+                        .map(|outcome| outcome.users.as_slice())
+                        .unwrap_or_default();
                     // Sync users back to networks
                     for net in &mut self.networks {
                         if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
                             h.users = users
                                 .iter()
-                                .map(|(name, disabled, locked, _)| {
-                                    let tag = if *disabled {
+                                .map(|user| {
+                                    let tag = if user.disabled {
                                         " (disabled)"
-                                    } else if *locked {
+                                    } else if user.locked {
                                         " (locked)"
                                     } else {
                                         ""
                                     };
-                                    format!("{name}{tag}")
+                                    format!("{}{tag}", user.name)
                                 })
                                 .collect();
                             if !hostname.is_empty() && h.hostname.is_empty() {
@@ -551,44 +626,51 @@ impl AppState {
                             }
                         }
                     }
-                    // Check if a UsersNode for this host already exists
-                    let already_exists = self.workflow.snarl.nodes().any(|n| {
-                        matches!(n, WorkflowNode::UsersNode { host_ip: existing, .. } if *existing == ip)
-                    });
-                    if !already_exists {
-                        let count = self.workflow.snarl.nodes().count() as f32;
-                        let pos = egui::Pos2::new(
-                            40.0 + (count % 4.0) * 280.0,
-                            40.0 + (count / 4.0).floor() * 200.0,
-                        );
-                        let user_entries: Vec<UserEntry> = users
-                            .into_iter()
-                            .map(|(name, disabled, locked, priv_level)| UserEntry {
-                                name,
-                                disabled,
-                                locked,
-                                privilege_level: priv_level,
-                            })
-                            .collect();
-                        let new_id = self.workflow.snarl.insert_node(
-                            pos,
-                            WorkflowNode::UsersNode {
-                                host_ip: ip,
-                                hostname,
-                                users: user_entries,
-                            },
-                        );
-                        // Connect host → users
-                        let node_id = egui_snarl::NodeId(host_node_id);
-                        let from = egui_snarl::OutPinId {
-                            node: node_id,
-                            output: 0,
-                        };
-                        let to = egui_snarl::InPinId {
-                            node: new_id,
-                            input: 0,
-                        };
-                        self.workflow.snarl.connect(from, to);
+                    let _ = host_node_id;
+                    for node in self.workflow.snarl.nodes_mut() {
+                        if let WorkflowNode::UsersNode {
+                            host_ip,
+                            hostname: node_hostname,
+                            users: node_users,
+                            source,
+                            fallback_used,
+                            error,
+                            done,
+                            loading,
+                            ..
+                        } = node
+                        {
+                            if *host_ip != ip {
+                                continue;
+                            }
+                            *node_hostname = hostname;
+                            *loading = false;
+                            *done = true;
+                            match result {
+                                Ok(outcome) => {
+                                    *node_users = outcome
+                                        .users
+                                        .into_iter()
+                                        .map(|user| UserEntry {
+                                            name: user.name,
+                                            disabled: user.disabled,
+                                            locked: user.locked,
+                                            privilege_level: user.privilege_level,
+                                        })
+                                        .collect();
+                                    *source = Some(outcome.source);
+                                    *fallback_used = outcome.fallback_used;
+                                    *error = None;
+                                }
+                                Err(message) => {
+                                    node_users.clear();
+                                    *source = None;
+                                    *fallback_used = false;
+                                    *error = Some(message);
+                                }
+                            }
+                            break;
+                        }
                     }
                 }
                 RuntimeEvent::DumpResult {
@@ -884,5 +966,139 @@ impl AppState {
             serde_json::from_str(&json).map_err(|e| format!("Deserialize error: {e}"))?;
         self.load_from(save);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod user_enum_tests {
+    use super::*;
+    use netraze_core::{UserEnumerationSource, UserInfo};
+    use netraze_protocols::users::UserEnumerationOutcome;
+
+    fn state_with_host() -> (
+        AppState,
+        usize,
+        tokio::sync::mpsc::UnboundedSender<RuntimeLogEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(rx);
+        state.workflow.add_host_node(
+            "127.0.0.1".into(),
+            "dc".into(),
+            String::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+        );
+        let id = state
+            .workflow
+            .snarl
+            .node_ids()
+            .find_map(|(id, node)| matches!(node, WorkflowNode::HostNode { .. }).then_some(id.0))
+            .unwrap();
+        (state, id, tx)
+    }
+
+    #[test]
+    fn queues_only_one_request_and_does_not_persist_a_secret_or_loading_state() {
+        let (mut state, host_id, _tx) = state_with_host();
+        let credential = CredentialRecord {
+            username: "alice".into(),
+            domain: "NETRAZE".into(),
+            secret: "test-only-secret".into(),
+            ..anonymous_record()
+        };
+        for _ in 0..2 {
+            state.queue_user_enum(host_id, "127.0.0.1".into(), "dc".into(), credential.clone());
+        }
+        assert_eq!(state.pending_user_enums.len(), 1);
+        let json = serde_json::to_string(&state.to_save()).unwrap();
+        assert!(!json.contains("test-only-secret"));
+        let node = state
+            .workflow
+            .snarl
+            .nodes()
+            .find(|node| matches!(node, WorkflowNode::UsersNode { .. }))
+            .unwrap();
+        let encoded = serde_json::to_string(node).unwrap();
+        assert!(!encoded.contains("loading"));
+    }
+
+    #[test]
+    fn empty_success_and_error_remain_distinct_after_refresh() {
+        let (mut state, host_id, tx) = state_with_host();
+        let cred = anonymous_record();
+        state.queue_user_enum(host_id, "127.0.0.1".into(), "dc".into(), cred.clone());
+        tx.send(RuntimeEvent::UserEnumResult {
+            host_node_id: host_id,
+            ip: "127.0.0.1".into(),
+            hostname: "dc".into(),
+            result: Ok(UserEnumerationOutcome {
+                users: Vec::<UserInfo>::new(),
+                source: UserEnumerationSource::Samr,
+                fallback_used: false,
+            }),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert!(matches!(
+            state
+                .workflow
+                .snarl
+                .nodes()
+                .find(|node| matches!(node, WorkflowNode::UsersNode { .. })),
+            Some(WorkflowNode::UsersNode {
+                done: true,
+                error: None,
+                source: Some(UserEnumerationSource::Samr),
+                ..
+            })
+        ));
+
+        state.queue_user_enum(host_id, "127.0.0.1".into(), "dc".into(), cred);
+        tx.send(RuntimeEvent::UserEnumResult {
+            host_node_id: host_id,
+            ip: "127.0.0.1".into(),
+            hostname: "dc".into(),
+            result: Err("access denied".into()),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert!(matches!(
+            state.workflow.snarl.nodes().find(|node| matches!(node, WorkflowNode::UsersNode { .. })),
+            Some(WorkflowNode::UsersNode { done: true, error: Some(message), source: None, .. }) if message == "access denied"
+        ));
+    }
+
+    #[test]
+    fn saved_users_nodes_without_new_fields_still_load() {
+        let mut value = serde_json::to_value(WorkflowNode::UsersNode {
+            host_ip: "127.0.0.1".into(),
+            hostname: "dc".into(),
+            users: Vec::new(),
+            source: None,
+            fallback_used: false,
+            error: None,
+            done: false,
+            loading: false,
+            cred_label: None,
+        })
+        .unwrap();
+        let fields = value.get_mut("UsersNode").unwrap().as_object_mut().unwrap();
+        for field in ["source", "fallback_used", "error", "done", "cred_label"] {
+            fields.remove(field);
+        }
+        let node: WorkflowNode = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            node,
+            WorkflowNode::UsersNode {
+                source: None,
+                fallback_used: false,
+                error: None,
+                done: false,
+                loading: false,
+                ..
+            }
+        ));
     }
 }
