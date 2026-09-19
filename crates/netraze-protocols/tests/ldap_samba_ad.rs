@@ -1,6 +1,6 @@
 use netraze_core::UserEnumerationSource;
 use netraze_protocols::{
-    ldap::{LdapClient, LdapClientConfig},
+    ldap::{self, LdapClient, LdapClientConfig},
     ntlm::{NtlmCredential, nt_hash_from_password},
 };
 
@@ -61,6 +61,97 @@ async fn nt_hash_bind_enumerates_multiple_pages_in_stable_order() {
     );
 
     client.unbind().await.expect("LDAP unbind failed");
+}
+
+#[tokio::test]
+#[ignore = "requires the local tests/samba-ad Docker harness"]
+async fn full_inventory_covers_directory_structure_and_security_sections() {
+    let mut config = LdapClientConfig::new(LDAP_ENDPOINT);
+    config.page_size = 2;
+    let inventory = ldap::inventory(
+        config,
+        TEST_USER,
+        TEST_DOMAIN,
+        NtlmCredential::Password(TEST_PASSWORD.into()),
+    )
+    .await
+    .expect("full local AD inventory failed");
+
+    assert_eq!(
+        inventory.server.default_naming_context,
+        "DC=netraze,DC=test"
+    );
+    assert!(
+        inventory
+            .users
+            .items
+            .iter()
+            .any(|user| user.name.eq_ignore_ascii_case("alice"))
+    );
+    for expected in ["interns", "operators"] {
+        assert!(
+            inventory
+                .groups
+                .items
+                .iter()
+                .any(|group| group.name.eq_ignore_ascii_case(expected)),
+            "missing provisioned group {expected}"
+        );
+    }
+    assert!(
+        inventory
+            .computers
+            .items
+            .iter()
+            .any(|computer| computer.name.eq_ignore_ascii_case("DC1$"))
+    );
+    assert!(
+        inventory
+            .organization
+            .items
+            .iter()
+            .any(|container| container.is_organizational_unit)
+    );
+
+    let topology = inventory
+        .topology
+        .items
+        .first()
+        .expect("topology collector returned no snapshot");
+    assert!(!topology.domains.is_empty());
+    assert!(!topology.sites.is_empty());
+    assert!(!topology.group_policies.is_empty());
+    assert!(!inventory.privileged.items.is_empty());
+    assert!(
+        inventory
+            .services
+            .items
+            .iter()
+            .any(|principal| !principal.service_principal_names.is_empty())
+    );
+
+    let security = inventory
+        .security
+        .items
+        .first()
+        .expect("security collector returned no snapshot");
+    assert!(security.session_signing);
+    assert!(security.session_sealing);
+    assert!(security.minimum_password_length.is_some());
+    assert!(security.machine_account_quota.is_some());
+
+    for (name, error) in [
+        ("users", inventory.users.error.as_deref()),
+        ("groups", inventory.groups.error.as_deref()),
+        ("computers", inventory.computers.error.as_deref()),
+        ("organization", inventory.organization.error.as_deref()),
+        ("topology", inventory.topology.error.as_deref()),
+        ("privileged", inventory.privileged.error.as_deref()),
+        ("services", inventory.services.error.as_deref()),
+        ("security", inventory.security.error.as_deref()),
+    ] {
+        assert!(error.is_none(), "{name} inventory was partial: {error:?}");
+    }
 }
 
 async fn connect(credential: NtlmCredential, page_size: u32) -> LdapClient {
