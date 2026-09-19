@@ -11,7 +11,9 @@ mod message;
 mod search;
 
 pub use client::{LdapClient, LdapClientConfig, LdapEntry, LdapError, SearchOutcome};
-pub use inventory::inventory;
+pub use inventory::{
+    LdapAuthentication, inventory, inventory_anonymous, inventory_with_authentication,
+};
 
 use crate::StaticProtocolFactory;
 use netraze_core::Capability;

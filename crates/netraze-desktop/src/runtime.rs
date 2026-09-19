@@ -12,7 +12,7 @@ use netraze_protocols::smb::{
 };
 use netraze_protocols::targets::parse_target_list;
 
-use crate::state::CredentialRecord;
+use crate::state::{CredentialRecord, ScanCredentialPlan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogLevel {
@@ -146,8 +146,7 @@ impl RuntimeServices {
     pub fn spawn_smb_scan(
         &self,
         raw_targets: Vec<String>,
-        credential: Option<SmbCredential>,
-        credential_label: Option<String>,
+        credential_plan: ScanCredentialPlan,
         threads: usize,
         timeout_seconds: u64,
     ) {
@@ -256,9 +255,42 @@ impl RuntimeServices {
                     message: format!("[{}/{}] SMB scan: {}...", idx + 1, total_live, target),
                 });
 
+                let credential = match credential_plan.for_target(target) {
+                    Ok(credential) => credential,
+                    Err(error) => {
+                        let _ = tx.send(RuntimeEvent::Log {
+                            level: LogLevel::Error,
+                            message: format!("{target}: SMB scan skipped: {error}"),
+                        });
+                        let _ = tx.send(RuntimeEvent::SmbResult {
+                            result: Box::new(SmbScanResult {
+                                target: target.clone(),
+                                hostname: None,
+                                os_info: None,
+                                signing: None,
+                                smb_version: None,
+                                shares: Vec::new(),
+                                users: Vec::new(),
+                                admin: false,
+                                error: Some(error),
+                            }),
+                            credential_label: None,
+                        });
+                        step += 5;
+                        let _ = tx.send(RuntimeEvent::ScanProgress {
+                            done: step,
+                            total: total_steps,
+                        });
+                        continue;
+                    }
+                };
+                let credential_label = credential
+                    .as_ref()
+                    .map(crate::state::cred_label)
+                    .unwrap_or_else(|| "(anonymous)".to_owned());
                 let mut client = SmbClient::new(target);
                 if let Some(ref cred) = credential {
-                    client = client.with_credential(cred.clone());
+                    client = client.with_credential(cred_to_smb(cred));
                 }
 
                 // Step 0: Fingerprint (no auth needed)
@@ -449,7 +481,7 @@ impl RuntimeServices {
                 };
                 let _ = tx.send(RuntimeEvent::SmbResult {
                     result: Box::new(result),
-                    credential_label: credential_label.clone(),
+                    credential_label: Some(credential_label),
                 });
             }
 
@@ -461,12 +493,12 @@ impl RuntimeServices {
         });
     }
 
-    /// Launch explicit LDAP/NTLM directory discovery. Targets are processed in
+    /// Launch LDAP directory discovery with each target's selected login. Targets are processed in
     /// bounded batches so a large CIDR cannot create an unbounded task set.
     pub fn spawn_ldap_scan(
         &self,
         raw_targets: Vec<String>,
-        credential: CredentialRecord,
+        credential_plan: ScanCredentialPlan,
         threads: usize,
         timeout_seconds: u64,
     ) {
@@ -488,56 +520,72 @@ impl RuntimeServices {
                 return;
             }
 
-            let ntlm = match cred_to_ntlm(&credential) {
-                Ok(credential) => credential,
-                Err(error) => {
-                    let label = crate::state::cred_label(&credential);
-                    for target in targets {
-                        let endpoint = netraze_protocols::targets::with_default_port(&target, 389);
-                        let _ = tx.send(RuntimeEvent::DirectoryResult {
-                            endpoint,
-                            cred_label: label.clone(),
-                            result: Box::new(Err(error.clone())),
-                        });
-                    }
-                    let _ = tx.send(RuntimeEvent::ScanFinished);
-                    return;
-                }
-            };
-
-            let username = credential.username.clone();
-            let domain = credential.domain.clone();
-            let secret = credential.secret.clone();
-            let label = crate::state::cred_label(&credential);
             let timeout = Duration::from_secs(timeout_seconds.max(1));
             let mut completed = 0_usize;
             for batch in targets.chunks(threads.max(1)) {
                 let mut tasks = JoinSet::new();
                 for target in batch {
                     let endpoint = netraze_protocols::targets::with_default_port(target, 389);
-                    let username = username.clone();
-                    let domain = domain.clone();
-                    let ntlm = ntlm.clone();
+                    let credential = match credential_plan.for_target(target) {
+                        Ok(Some(credential)) => credential,
+                        Ok(None) => crate::state::anonymous_record(),
+                        Err(error) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Error,
+                                message: format!("{endpoint}: LDAP scan skipped: {error}"),
+                            });
+                            let _ = tx.send(RuntimeEvent::DirectoryResult {
+                                endpoint,
+                                cred_label: "(unavailable)".to_owned(),
+                                result: Box::new(Err(error)),
+                            });
+                            completed += 1;
+                            let _ = tx.send(RuntimeEvent::ScanProgress {
+                                done: completed,
+                                total,
+                            });
+                            continue;
+                        }
+                    };
+                    let label = crate::state::cred_label(&credential);
+                    let authentication = match cred_to_ldap_auth(&credential) {
+                        Ok(authentication) => authentication,
+                        Err(error) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Error,
+                                message: format!("{endpoint}: LDAP scan skipped: {error}"),
+                            });
+                            let _ = tx.send(RuntimeEvent::DirectoryResult {
+                                endpoint,
+                                cred_label: label,
+                                result: Box::new(Err(error)),
+                            });
+                            completed += 1;
+                            let _ = tx.send(RuntimeEvent::ScanProgress {
+                                done: completed,
+                                total,
+                            });
+                            continue;
+                        }
+                    };
+                    let secret = credential.secret;
                     tasks.spawn(async move {
                         let mut config = netraze_protocols::ldap::LdapClientConfig::new(&endpoint);
                         config.connect_timeout = timeout;
                         config.operation_timeout = timeout;
-                        let result = netraze_protocols::ldap::inventory(
+                        let result = netraze_protocols::ldap::inventory_with_authentication(
                             config,
-                            &username,
-                            &domain,
-                            ntlm,
+                            authentication,
                         )
                         .await
-                        .map_err(|error| error.to_string());
-                        (endpoint, result)
+                        .map_err(|error| redact_secret(&error.to_string(), &secret));
+                        (endpoint, label, result)
                     });
                 }
                 while let Some(joined) = tasks.join_next().await {
                     completed += 1;
                     match joined {
-                        Ok((endpoint, result)) => {
-                            let result = result.map_err(|error| redact_secret(&error, &secret));
+                        Ok((endpoint, label, result)) => {
                             let (level, message) = match &result {
                                 Ok(inventory) => (
                                     LogLevel::Success,
@@ -556,7 +604,7 @@ impl RuntimeServices {
                             let _ = tx.send(RuntimeEvent::Log { level, message });
                             let _ = tx.send(RuntimeEvent::DirectoryResult {
                                 endpoint,
-                                cred_label: label.clone(),
+                                cred_label: label,
                                 result: Box::new(result),
                             });
                         }
@@ -1315,6 +1363,43 @@ pub(crate) fn cred_to_ntlm(
     }
 }
 
+pub(crate) fn cred_to_ldap_auth(
+    cred: &crate::state::CredentialRecord,
+) -> Result<netraze_protocols::ldap::LdapAuthentication, String> {
+    use netraze_protocols::ldap::LdapAuthentication;
+    use netraze_protocols::ntlm::NtlmCredential;
+
+    if cred.username.trim().is_empty() {
+        return if cred.domain.is_empty()
+            && cred.secret.is_empty()
+            && matches!(cred.cred_type, crate::state::CredType::Password)
+        {
+            Ok(LdapAuthentication::Anonymous)
+        } else {
+            Err("Anonymous LDAP requires empty username, domain, password, and NT hash".into())
+        };
+    }
+
+    let credential = if cred.secret.is_empty() {
+        if cred.username.eq_ignore_ascii_case("Guest")
+            && matches!(cred.cred_type, crate::state::CredType::Password)
+        {
+            // This is a real NTLM attempt for the Guest account, not an
+            // unauthenticated simple bind or an automatic guest downgrade.
+            NtlmCredential::Password(String::new())
+        } else {
+            return Err("LDAP requires a password or NT hash, except for the Guest account".into());
+        }
+    } else {
+        cred_to_ntlm(cred)?
+    };
+    Ok(LdapAuthentication::Ntlm {
+        username: cred.username.clone(),
+        domain: cred.domain.clone(),
+        credential,
+    })
+}
+
 fn redact_secret(message: &str, secret: &str) -> String {
     if secret.is_empty() {
         return message.to_owned();
@@ -1357,6 +1442,43 @@ mod ldap_runtime_tests {
             ..valid_hash
         };
         assert!(cred_to_ntlm(&invalid_hash).is_err());
+    }
+
+    #[test]
+    fn ldap_auth_distinguishes_anonymous_guest_and_named_credentials() {
+        use netraze_protocols::ldap::LdapAuthentication;
+        use netraze_protocols::ntlm::NtlmCredential;
+
+        assert!(matches!(
+            cred_to_ldap_auth(&anonymous_record()),
+            Ok(LdapAuthentication::Anonymous)
+        ));
+
+        let guest = CredentialRecord {
+            username: "Guest".to_owned(),
+            domain: "EXAMPLE".to_owned(),
+            ..anonymous_record()
+        };
+        assert!(matches!(
+            cred_to_ldap_auth(&guest),
+            Ok(LdapAuthentication::Ntlm {
+                username,
+                domain,
+                credential: NtlmCredential::Password(password),
+            }) if username == "Guest" && domain == "EXAMPLE" && password.is_empty()
+        ));
+
+        let named_without_secret = CredentialRecord {
+            username: "alice".to_owned(),
+            ..anonymous_record()
+        };
+        assert!(cred_to_ldap_auth(&named_without_secret).is_err());
+
+        let anonymous_with_secret = CredentialRecord {
+            secret: "test-only-secret".to_owned(),
+            ..anonymous_record()
+        };
+        assert!(cred_to_ldap_auth(&anonymous_with_secret).is_err());
     }
 
     #[test]
