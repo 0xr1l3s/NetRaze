@@ -109,14 +109,14 @@ porte **à la demande**, par module Rust ciblé, avec Impacket comme
 Le socle LDAP est livré dans `netraze-protocols` : port 389, BER borné,
 bind NTLMv2 SASL/SPNEGO avec signature et chiffrement, RootDSE, recherche
 paginée et inventaire AD en lecture seule. Le harness Samba AD séparé
-(`tests/samba-ad/`) valide le chemin authentifié ; le bind anonyme est
-couvert par un serveur factice en boucle locale.
+(`tests/samba-ad/`) valide les chemins authentifié et anonyme ; ce dernier
+est limité à la lecture de RootDSE, sans assertion d'énumération du domaine.
 
 | Module | Statut | Notes |
 |---|---|---|
 | `message` (BER via `rasn-ldap`) | ✅ | RFC 4511 §4.1.1, fixtures Impacket |
 | Bind simple avec mot de passe en clair | ❌ | Non exposé ; seul le bind anonyme (nom et mot de passe vides) utilise cette forme sur le port 389 |
-| Bind anonyme | 🟡 | BER non protégé après bind ; testé en boucle locale, sans assertion live contre Samba AD |
+| Bind anonyme | ✅ | BER non protégé après bind ; RootDSE validé en test unitaire et contre le Samba AD local, sans assertion d'énumération du domaine |
 | `bind::sasl_gss_spnego` (NTLMSSP wrapped) | ✅ | NTLMv2 mot de passe/hash, MIC, sign-and-seal |
 | `search::request` + `search::result_entry` | ✅ | RFC 4511 §4.5, framing borné |
 | `controls::paged_results` (1.2.840.113556.1.4.319) | ✅ | Cookies itérés avec détection des répétitions |
