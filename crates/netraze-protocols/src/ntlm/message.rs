@@ -56,6 +56,8 @@ pub enum NtlmError {
     Integrity,
     #[error("invalid SPNEGO token: {0}")]
     Spnego(String),
+    #[error("NT hash must contain exactly 32 hexadecimal characters")]
+    InvalidNtHash,
 }
 
 impl From<NtlmError> for String {
@@ -81,6 +83,19 @@ impl core::fmt::Debug for NtlmCredential {
 }
 
 impl NtlmCredential {
+    pub fn from_nt_hash_hex(value: &str) -> Result<Self, NtlmError> {
+        let value = value.trim();
+        if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(NtlmError::InvalidNtHash);
+        }
+        let mut hash = [0_u8; 16];
+        for (index, byte) in hash.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+                .map_err(|_| NtlmError::InvalidNtHash)?;
+        }
+        Ok(Self::NtHash(hash))
+    }
+
     pub fn nt_hash(&self) -> Result<[u8; 16], NtlmError> {
         Ok(match self {
             Self::Password(password) => super::crypto::nt_hash_from_password(password),
@@ -555,5 +570,20 @@ mod tests {
         assert!(target_info_with_mic_flag(&missing_eol).is_err());
         assert!(target_info_with_mic_flag(&trailing_after_eol).is_err());
         assert!(target_info_with_mic_flag(&duplicate_flags).is_err());
+    }
+
+    #[test]
+    fn parses_nt_hash_hex_strictly() {
+        let credential =
+            NtlmCredential::from_nt_hash_hex("8846f7eaee8fb117ad06bdd830b7586c").unwrap();
+        assert_eq!(
+            credential.nt_hash().unwrap(),
+            [
+                0x88, 0x46, 0xf7, 0xea, 0xee, 0x8f, 0xb1, 0x17, 0xad, 0x06, 0xbd, 0xd8, 0x30, 0xb7,
+                0x58, 0x6c,
+            ]
+        );
+        assert!(NtlmCredential::from_nt_hash_hex("00").is_err());
+        assert!(NtlmCredential::from_nt_hash_hex("z846f7eaee8fb117ad06bdd830b7586c").is_err());
     }
 }

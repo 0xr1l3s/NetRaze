@@ -5,10 +5,12 @@
 mod ad;
 pub mod client;
 mod controls;
+mod inventory;
 mod message;
 mod search;
 
 pub use client::{LdapClient, LdapClientConfig, LdapEntry, LdapError, SearchOutcome};
+pub use inventory::inventory;
 
 use crate::StaticProtocolFactory;
 use netraze_core::Capability;
