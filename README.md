@@ -344,8 +344,9 @@ implemented SMB/DCE-RPC and LDAP paths:
 4. **Samba AD LDAP harness.** `tests/samba-ad/` runs a separate, digest-pinned
    domain controller bound to loopback. Its ignored suite verifies NTLM
    password/hash bind, protected RootDSE search, paging, and complete
-   read-only inventory. Anonymous LDAP bind has a loopback mock-server
-   test, not a live AD assertion.
+   read-only inventory. It also checks anonymous RootDSE access, rejection
+   of wrong-password and Guest NTLM binds, and protected searches with
+   escaped filters and returned referrals.
 
 See the [SMB harness guide](tests/samba/README.md) and
 [LDAP harness guide](tests/samba-ad/README.md) for local commands.

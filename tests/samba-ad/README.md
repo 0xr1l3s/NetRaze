@@ -5,9 +5,23 @@ used only for NetRaze's local LDAP/NTLM integration tests. It is separate from
 `tests/samba/`, which remains the standalone SMB/SAMR fixture for guest and
 anonymous-session behavior.
 
-The harness uses the Samba project's AD DC container image. The image is pinned
-by digest, provisions `NETRAZE.TEST` from `domain.json`, and publishes services
-only on the loopback interface.
+Unit tests validate BER, NTLM, and paging in isolation; this harness checks
+those operations against a real directory server. The Samba project's AD DC
+image is pinned by digest, provisions `NETRAZE.TEST` from `domain.json`, and
+publishes LDAP and SMB only on the loopback interface.
+
+---
+
+## What runs here
+
+| File | Role |
+|---|---|
+| `docker-compose.yml` | Starts the digest-pinned `quay.io/samba.org/samba-ad-server` on loopback ports 1389 (LDAP) and 2445 (SMB). The healthcheck waits for a directory query to succeed. |
+| `domain.json` | Provisions the fixed test realm, users, groups, and domain controller. Names and credentials are load-bearing test fixtures. |
+| `crates/netraze-protocols/tests/ldap_samba_ad.rs` | Six ignored, fixed-endpoint integration tests for binds, searches, paging, referrals, and inventory. |
+
+The container runs privileged because Samba AD provisioning needs filesystem
+extended attributes. Do not run it on an untrusted Docker host.
 
 ## Test directory
 
@@ -19,42 +33,108 @@ only on the loopback interface.
 | NetBIOS domain | `NETRAZE` |
 | Administrator password | `NetRaze-Admin-42!` |
 | LDAP test account | `alice` / `Wonderland-42!` |
-| Additional users | `bob`, `carol` |
+| Additional users | `bob` / `Builder-42!`, `carol` / `Carolina-42!` |
+| Provisioned groups | `interns`, `operators` |
+| Domain controller | `dc1` (`DC1$` in computer enumeration) |
 
 Every credential above is public test data. Never reuse it outside this
 disposable harness.
 
-## Run the LDAP/NTLM tests
+---
+
+## Running locally
+
+### Start the domain controller
 
 ```shell
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
+```
+
+`--wait` blocks until the container's LDAP healthcheck passes. The first
+provisioning run can take longer than subsequent starts.
+
+### Run the LDAP/NTLM integration tests
+
+```shell
 cargo test -p netraze-protocols --test ldap_samba_ad -- --ignored --test-threads=1
+```
+
+The suite is ignored by ordinary `cargo test`. Keep `--test-threads=1` so
+the shared directory fixture is exercised sequentially during local runs.
+
+### Test cases
+
+| Test | Covers |
+|---|---|
+| `password_bind_discovers_root_dse_and_enumerates_users` | GSS-SPNEGO/NTLMv2 password bind, protected RootDSE, `defaultNamingContext`, and LDAP-source user records. |
+| `nt_hash_bind_enumerates_multiple_pages_in_stable_order` | Pass-the-hash bind, page size two, all provisioned users, and deterministic case-insensitive order. |
+| `full_inventory_covers_directory_structure_and_security_sections` | Paged read-only inventory of users, groups, computers, OUs/containers, topology, privileged principals, SPNs, and reported domain/LDAP policy; no partial-section error. |
+| `anonymous_bind_can_read_root_dse_without_ntlm_credentials` | Empty-name/empty-password anonymous bind, unprotected RootDSE read, and Unbind. |
+| `wrong_password_and_guest_do_not_authorize_ldap_searches` | Wrong-password and empty-password `Guest` NTLM attempts are rejected and do not authorize a subsequent search. |
+| `protected_search_supports_compound_escaped_filter_and_base_scope` | Signed/sealed compound search with a hex-escaped assertion, base-object lookup, and returned referrals. |
+
+The tests issue no LDAP write operations. Authentication may still update
+server-managed logon metadata.
+
+### Tear down
+
+```shell
 docker compose -f tests/samba-ad/docker-compose.yml down -v
 ```
 
-The ignored Rust suite validates:
+`-v` removes the disposable `samba-ad-state` volume and its provisioned
+accounts. Only tear down a harness you started for this run; omit `-v` if
+you intentionally want to retain its state.
 
-- GSS-SPNEGO/NTLMv2 password authentication over LDAP port 389.
-- NT-hash authentication without passing the plaintext password to the bind.
-- NTLM sign-and-seal by performing RootDSE and search operations after bind.
-- RootDSE `defaultNamingContext` discovery.
-- Paged AD user enumeration with a page size of two.
-- Deterministic case-insensitive result ordering and LDAP source metadata.
-- Full read-only inventory coverage for users, groups, computers, OUs and
-  containers, domain topology, privileged principals, SPNs, and domain/LDAP
-  security policy.
+---
 
-Anonymous LDAP bind and empty-password Guest NTLM have loopback/unit tests,
-but this ignored live suite currently exercises authenticated `alice` only.
-It does not assert server-side anonymous directory access or Guest policy.
+## Known Samba AD behavior and limits
+
+- Anonymous bind can read RootDSE. This does **not** prove that anonymous
+  users can enumerate the domain naming context; that policy is not asserted.
+- The provisioned `Guest` account has no usable empty-password NTLM LDAP
+  login. A `Guest` failure is not an anonymous bind fallback.
+- A domain subtree search returns referrals for other naming contexts,
+  including `CN=Configuration,DC=netraze,DC=test`. NetRaze reports them
+  alongside entries and does not automatically follow them with credentials.
+- The named-account tests perform searches after NTLM bind, requiring the
+  LDAP SASL sign-and-seal layer. The anonymous RootDSE test uses plain BER.
+
+Not covered here: LDAPS, StartTLS, Kerberos, channel binding, cross-domain
+referral chasing, LDAP writes, or active probes of server signing and
+channel-binding enforcement. The Security tab reports those untested
+checks as `Not tested`; this suite only validates values the directory
+returns and the protection negotiated for its own NTLM session. SMB/SAMR
+guest and null-session behavior belongs to the separate
+[standalone Samba harness](../samba/README.md).
+
+---
+
+## Fixed endpoint and CI
 
 The tests intentionally use a fixed loopback endpoint and provide no
 environment-variable override. They cannot be redirected to a real AD server.
+If port 1389 or 2445 is occupied, stop the conflicting local service before
+running the suite; changing only the Compose port mapping will not change the
+Rust test endpoint.
+
+The ignored suite is not run by the tag-driven GitHub Actions release
+workflow. For fast checks without Docker, run:
+
+```shell
+cargo test -p netraze-protocols --lib
+cargo test -p netraze-protocols --test ldap_samba_ad
+```
+
+The second command compiles the live suite but leaves its six tests ignored.
+
+---
 
 ## Reset and troubleshooting
 
-Provisioning state is stored in the `samba-ad-state` Docker volume. Remove it
-after changing `domain.json`:
+Provisioning state is stored in the `samba-ad-state` Docker volume. If you
+change `domain.json` and want a fresh directory, remove the disposable volume
+and reprovision:
 
 ```shell
 docker compose -f tests/samba-ad/docker-compose.yml down -v
@@ -67,5 +147,14 @@ If startup does not become healthy, inspect the provisioning log:
 docker compose -f tests/samba-ad/docker-compose.yml logs samba-ad
 ```
 
-The official image currently requires a privileged container because Samba AD
-uses filesystem extended attributes while provisioning its directory state.
+If the container is healthy but Rust cannot connect, confirm the loopback
+port bindings:
+
+```shell
+docker port netraze-samba-ad
+```
+
+The expected mappings are `389/tcp -> 127.0.0.1:1389` and
+`445/tcp -> 127.0.0.1:2445`. A stale volume after fixture changes or a
+port collision are the first things to check; do not redirect the tests to
+an unrelated directory server.

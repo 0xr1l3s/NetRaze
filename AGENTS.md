@@ -186,8 +186,8 @@ Environment variable `NETRAZE_SAMBA_ADDR` defaults to `127.0.0.1:1445` and can b
 Directory: `tests/samba-ad/` (separate from the SMB fixture).
 
 - The digest-pinned Samba AD DC exposes LDAP on `127.0.0.1:1389` and SMB on `127.0.0.1:2445`; test accounts and domain data are disposable, published fixtures.
-- `ldap_samba_ad` is ignored by default. It exercises NTLM password and NT-hash bind, required sign-and-seal, RootDSE, multi-page users, and the complete read-only inventory (groups, computers, OUs, topology, privileged principals, SPNs, reported security settings).
-- It has a fixed loopback endpoint and no environment override. Anonymous bind is covered by a loopback mock-server test, not by the live AD suite. Do not add real-environment credentials or targets to tests.
+- `ldap_samba_ad` is ignored by default. Its six tests exercise NTLM password and NT-hash bind, required sign-and-seal, RootDSE, multi-page users, and the complete read-only inventory (groups, computers, OUs, topology, privileged principals, SPNs, reported security settings). They also check anonymous RootDSE access, wrong-password and Guest rejection, protected escaped-filter search, and returned referrals.
+- It has a fixed loopback endpoint and no environment override. Anonymous bind is covered by both a loopback mock-server test and a live RootDSE assertion against the local Samba AD DC; anonymous domain-wide enumeration is not asserted. Do not add real-environment credentials or targets to tests.
 
 ```bash
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
