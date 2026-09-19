@@ -680,15 +680,18 @@ impl AppState {
                 } => {
                     let hostname = result
                         .as_ref()
+                        .as_ref()
                         .ok()
                         .and_then(|inventory| inventory.server.dns_host_name.clone())
                         .unwrap_or_default();
                     let domain = result
                         .as_ref()
+                        .as_ref()
                         .ok()
                         .map(|inventory| inventory.server.default_naming_context.clone())
                         .unwrap_or_default();
                     let user_names = result
+                        .as_ref()
                         .as_ref()
                         .ok()
                         .map(|inventory| {
@@ -747,6 +750,7 @@ impl AppState {
                                     os_info: "Active Directory (LDAP)".to_owned(),
                                     domain: result
                                         .as_ref()
+                                        .as_ref()
                                         .ok()
                                         .map(|inventory| {
                                             inventory.server.default_naming_context.clone()
@@ -782,7 +786,7 @@ impl AppState {
                             *node_hostname = hostname;
                             *loading = false;
                             *node_cred_label = Some(cred_label);
-                            match result {
+                            match *result {
                                 Ok(value) => {
                                     *inventory = Some(Box::new(value));
                                     *error = None;
@@ -796,7 +800,7 @@ impl AppState {
                         }
                     } else {
                         let count = self.workflow.snarl.nodes().count() as f32;
-                        let (inventory, error) = match result {
+                        let (inventory, error) = match *result {
                             Ok(value) => (Some(Box::new(value)), None),
                             Err(message) => (None, Some(message)),
                         };
@@ -1270,7 +1274,7 @@ mod user_enum_tests {
         tx.send(RuntimeEvent::DirectoryResult {
             endpoint: "127.0.0.1:389".to_owned(),
             cred_label: "EXAMPLE\\alice".to_owned(),
-            result: Ok(inventory),
+            result: Box::new(Ok(inventory)),
         })
         .unwrap();
         state.poll_logs();
