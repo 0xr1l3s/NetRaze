@@ -673,6 +673,160 @@ impl AppState {
                         }
                     }
                 }
+                RuntimeEvent::DirectoryResult {
+                    endpoint,
+                    cred_label,
+                    result,
+                } => {
+                    let hostname = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|inventory| inventory.server.dns_host_name.clone())
+                        .unwrap_or_default();
+                    let domain = result
+                        .as_ref()
+                        .ok()
+                        .map(|inventory| inventory.server.default_naming_context.clone())
+                        .unwrap_or_default();
+                    let user_names = result
+                        .as_ref()
+                        .ok()
+                        .map(|inventory| {
+                            inventory
+                                .users
+                                .items
+                                .iter()
+                                .map(|user| user.name.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let host = HostRecord {
+                        ip: endpoint.clone(),
+                        hostname: hostname.clone(),
+                        status: if result.is_ok() {
+                            HostStatus::Accessible
+                        } else {
+                            HostStatus::Unknown
+                        },
+                        os_info: "Active Directory (LDAP)".to_owned(),
+                        domain,
+                        signing: None,
+                        smbv1: None,
+                        shares: Vec::new(),
+                        admin: false,
+                        users: user_names.clone(),
+                    };
+                    if let Some(network) = self.networks.last_mut() {
+                        if let Some(existing) =
+                            network.hosts.iter_mut().find(|item| item.ip == endpoint)
+                        {
+                            *existing = host;
+                        } else {
+                            network.hosts.push(host);
+                        }
+                    }
+
+                    let host_id = self
+                        .workflow
+                        .snarl
+                        .node_ids()
+                        .find_map(|(id, node)| match node {
+                            WorkflowNode::HostNode { ip, .. } if *ip == endpoint => Some(id),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| {
+                            let count = self.workflow.snarl.nodes().count() as f32;
+                            self.workflow.snarl.insert_node(
+                                egui::Pos2::new(
+                                    40.0 + (count % 4.0) * 280.0,
+                                    40.0 + (count / 4.0).floor() * 200.0,
+                                ),
+                                WorkflowNode::HostNode {
+                                    ip: endpoint.clone(),
+                                    hostname: hostname.clone(),
+                                    os_info: "Active Directory (LDAP)".to_owned(),
+                                    domain: result
+                                        .as_ref()
+                                        .ok()
+                                        .map(|inventory| {
+                                            inventory.server.default_naming_context.clone()
+                                        })
+                                        .unwrap_or_default(),
+                                    signing: None,
+                                    smbv1: None,
+                                    shares: Vec::new(),
+                                    admin: false,
+                                    users: user_names,
+                                    logged_in_cred: Some(cred_label.clone()),
+                                },
+                            )
+                        });
+
+                    if let Some((directory_id, node)) = self
+                        .workflow
+                        .snarl
+                        .nodes_ids_mut()
+                        .find(|(_, node)| {
+                            matches!(node, WorkflowNode::DirectoryNode { endpoint: value, .. } if *value == endpoint)
+                        })
+                    {
+                        if let WorkflowNode::DirectoryNode {
+                            hostname: node_hostname,
+                            inventory,
+                            error,
+                            loading,
+                            cred_label: node_cred_label,
+                            ..
+                        } = node
+                        {
+                            *node_hostname = hostname;
+                            *loading = false;
+                            *node_cred_label = Some(cred_label);
+                            match result {
+                                Ok(value) => {
+                                    *inventory = Some(Box::new(value));
+                                    *error = None;
+                                }
+                                Err(message) => {
+                                    *inventory = None;
+                                    *error = Some(message);
+                                }
+                            }
+                            self.selected_workflow_node = Some(directory_id.0);
+                        }
+                    } else {
+                        let count = self.workflow.snarl.nodes().count() as f32;
+                        let (inventory, error) = match result {
+                            Ok(value) => (Some(Box::new(value)), None),
+                            Err(message) => (None, Some(message)),
+                        };
+                        let directory_id = self.workflow.snarl.insert_node(
+                            egui::Pos2::new(
+                                40.0 + (count % 4.0) * 280.0,
+                                40.0 + (count / 4.0).floor() * 200.0,
+                            ),
+                            WorkflowNode::DirectoryNode {
+                                endpoint,
+                                hostname,
+                                inventory,
+                                error,
+                                loading: false,
+                                cred_label: Some(cred_label),
+                            },
+                        );
+                        self.workflow.snarl.connect(
+                            egui_snarl::OutPinId {
+                                node: host_id,
+                                output: 0,
+                            },
+                            egui_snarl::InPinId {
+                                node: directory_id,
+                                input: 0,
+                            },
+                        );
+                        self.selected_workflow_node = Some(directory_id.0);
+                    }
+                }
                 RuntimeEvent::DumpResult {
                     host_node_id,
                     ip,
@@ -1100,5 +1254,45 @@ mod user_enum_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn directory_results_create_connected_secret_free_nodes() {
+        let (mut state, _host_id, tx) = state_with_host();
+        let mut inventory = netraze_core::DirectoryInventory::default();
+        inventory.server.endpoint = "127.0.0.1:389".to_owned();
+        inventory.server.dns_host_name = Some("dc.example.test".to_owned());
+        inventory.server.default_naming_context = "DC=example,DC=test".to_owned();
+        inventory.users.items.push(netraze_core::DirectoryUser {
+            name: "alice".to_owned(),
+            ..netraze_core::DirectoryUser::default()
+        });
+        tx.send(RuntimeEvent::DirectoryResult {
+            endpoint: "127.0.0.1:389".to_owned(),
+            cred_label: "EXAMPLE\\alice".to_owned(),
+            result: Ok(inventory),
+        })
+        .unwrap();
+        state.poll_logs();
+
+        let directory = state
+            .workflow
+            .snarl
+            .nodes()
+            .find(|node| matches!(node, WorkflowNode::DirectoryNode { .. }))
+            .unwrap();
+        assert!(matches!(
+            directory,
+            WorkflowNode::DirectoryNode {
+                inventory: Some(value),
+                error: None,
+                loading: false,
+                ..
+            } if value.users.items.len() == 1
+        ));
+        let serialized = serde_json::to_string(&state.to_save()).unwrap();
+        assert!(!serialized.contains("test-only-ldap-secret"));
+        assert!(!serialized.contains("[REMOVED_NTLM_HASH]"));
+        assert!(!serialized.contains("\"loading\""));
     }
 }

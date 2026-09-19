@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, sleep};
 
 use netraze_protocols::smb::connection::is_port_open;
@@ -66,6 +67,11 @@ pub enum RuntimeEvent {
         ip: String,
         hostname: String,
         result: Result<netraze_protocols::users::UserEnumerationOutcome, String>,
+    },
+    DirectoryResult {
+        endpoint: String,
+        cred_label: String,
+        result: Result<netraze_core::DirectoryInventory, String>,
     },
     DumpResult {
         host_node_id: usize,
@@ -419,6 +425,122 @@ impl RuntimeServices {
         });
     }
 
+    /// Launch explicit LDAP/NTLM directory discovery. Targets are processed in
+    /// bounded batches so a large CIDR cannot create an unbounded task set.
+    pub fn spawn_ldap_scan(
+        &self,
+        raw_targets: Vec<String>,
+        credential: CredentialRecord,
+        threads: usize,
+        timeout_seconds: u64,
+    ) {
+        let tx = self.log_tx.clone();
+        self.runtime.spawn(async move {
+            let target_label = raw_targets.join(", ");
+            let _ = tx.send(RuntimeEvent::ScanStarted { target_label });
+            let targets = raw_targets
+                .iter()
+                .flat_map(|target| parse_target_list(target))
+                .collect::<Vec<_>>();
+            let total = targets.len();
+            if total == 0 {
+                let _ = tx.send(RuntimeEvent::Log {
+                    level: LogLevel::Error,
+                    message: "Aucune cible LDAP valide".to_owned(),
+                });
+                let _ = tx.send(RuntimeEvent::ScanFinished);
+                return;
+            }
+
+            let ntlm = match cred_to_ntlm(&credential) {
+                Ok(credential) => credential,
+                Err(error) => {
+                    let label = crate::state::cred_label(&credential);
+                    for target in targets {
+                        let endpoint = netraze_protocols::targets::with_default_port(&target, 389);
+                        let _ = tx.send(RuntimeEvent::DirectoryResult {
+                            endpoint,
+                            cred_label: label.clone(),
+                            result: Err(error.clone()),
+                        });
+                    }
+                    let _ = tx.send(RuntimeEvent::ScanFinished);
+                    return;
+                }
+            };
+
+            let username = credential.username.clone();
+            let domain = credential.domain.clone();
+            let secret = credential.secret.clone();
+            let label = crate::state::cred_label(&credential);
+            let timeout = Duration::from_secs(timeout_seconds.max(1));
+            let mut completed = 0_usize;
+            for batch in targets.chunks(threads.max(1)) {
+                let mut tasks = JoinSet::new();
+                for target in batch {
+                    let endpoint = netraze_protocols::targets::with_default_port(target, 389);
+                    let username = username.clone();
+                    let domain = domain.clone();
+                    let ntlm = ntlm.clone();
+                    tasks.spawn(async move {
+                        let mut config = netraze_protocols::ldap::LdapClientConfig::new(&endpoint);
+                        config.connect_timeout = timeout;
+                        config.operation_timeout = timeout;
+                        let result = netraze_protocols::ldap::inventory(
+                            config,
+                            &username,
+                            &domain,
+                            ntlm,
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
+                        (endpoint, result)
+                    });
+                }
+                while let Some(joined) = tasks.join_next().await {
+                    completed += 1;
+                    match joined {
+                        Ok((endpoint, result)) => {
+                            let result = result.map_err(|error| redact_secret(&error, &secret));
+                            let (level, message) = match &result {
+                                Ok(inventory) => (
+                                    LogLevel::Success,
+                                    format!(
+                                        "{endpoint}: LDAP discovery completed ({} users, {} groups, {} computers)",
+                                        inventory.users.items.len(),
+                                        inventory.groups.items.len(),
+                                        inventory.computers.items.len()
+                                    ),
+                                ),
+                                Err(error) => (
+                                    LogLevel::Error,
+                                    format!("{endpoint}: LDAP discovery failed: {error}"),
+                                ),
+                            };
+                            let _ = tx.send(RuntimeEvent::Log { level, message });
+                            let _ = tx.send(RuntimeEvent::DirectoryResult {
+                                endpoint,
+                                cred_label: label.clone(),
+                                result,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Error,
+                                message: format!("LDAP discovery task failed: {error}"),
+                            });
+                        }
+                    }
+                    let _ = tx.send(RuntimeEvent::ScanProgress {
+                        done: completed,
+                        total,
+                    });
+                }
+            }
+            let _ = tx.send(RuntimeEvent::ScanFinished);
+        });
+    }
+
     pub fn emit_log(&self, level: LogLevel, message: impl Into<String>) {
         let _ = self.log_tx.send(RuntimeEvent::Log {
             level,
@@ -611,7 +733,13 @@ impl RuntimeServices {
             // Keep an explicitly typed port (e.g. a container harness on
             // :1445); default to 445 only for bare hosts.
             let target = netraze_protocols::targets::with_default_port(&ip_clone, 445);
-            let result = netraze_protocols::users::enum_users_detailed(&target, &smb_cred).await;
+            let result = netraze_protocols::smb::users::enum_users(&target, &smb_cred)
+                .await
+                .map(|users| netraze_protocols::users::UserEnumerationOutcome {
+                    users,
+                    source: netraze_core::UserEnumerationSource::Samr,
+                    fallback_used: false,
+                });
 
             match &result {
                 Ok(outcome) => {
@@ -1132,5 +1260,85 @@ pub(crate) fn cred_to_smb(cred: &crate::state::CredentialRecord) -> SmbCredentia
                 nt_hash: Some(hash),
             }
         }
+    }
+}
+
+pub(crate) fn cred_to_ntlm(
+    cred: &crate::state::CredentialRecord,
+) -> Result<netraze_protocols::ntlm::NtlmCredential, String> {
+    if cred.username.trim().is_empty() {
+        return Err("LDAP NTLM authentication requires a username".to_owned());
+    }
+    if cred.secret.is_empty() {
+        return Err("LDAP NTLM authentication requires a password or NT hash".to_owned());
+    }
+    match cred.cred_type {
+        crate::state::CredType::Password => Ok(netraze_protocols::ntlm::NtlmCredential::Password(
+            cred.secret.clone(),
+        )),
+        crate::state::CredType::Hash => {
+            netraze_protocols::ntlm::NtlmCredential::from_nt_hash_hex(&cred.secret)
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn redact_secret(message: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return message.to_owned();
+    }
+    let mut redacted = message.replace(secret, "<redacted>");
+    redacted = redacted.replace(&secret.to_ascii_lowercase(), "<redacted>");
+    redacted.replace(&secret.to_ascii_uppercase(), "<redacted>")
+}
+
+#[cfg(test)]
+mod ldap_runtime_tests {
+    use super::*;
+    use crate::state::{CredType, anonymous_record};
+
+    #[test]
+    fn converts_saved_password_and_hash_credentials_strictly() {
+        let password = CredentialRecord {
+            username: "alice".to_owned(),
+            domain: "EXAMPLE".to_owned(),
+            secret: "test-only-password".to_owned(),
+            ..anonymous_record()
+        };
+        assert!(matches!(
+            cred_to_ntlm(&password),
+            Ok(netraze_protocols::ntlm::NtlmCredential::Password(_))
+        ));
+
+        let valid_hash = CredentialRecord {
+            cred_type: CredType::Hash,
+            secret: "[REMOVED_NTLM_HASH]".to_owned(),
+            ..password.clone()
+        };
+        assert!(matches!(
+            cred_to_ntlm(&valid_hash),
+            Ok(netraze_protocols::ntlm::NtlmCredential::NtHash(_))
+        ));
+
+        let invalid_hash = CredentialRecord {
+            secret: "not-a-hash".to_owned(),
+            ..valid_hash
+        };
+        assert!(cred_to_ntlm(&invalid_hash).is_err());
+    }
+
+    #[test]
+    fn runtime_errors_redact_passwords_and_hashes() {
+        assert_eq!(
+            redact_secret("bind rejected test-only-password", "test-only-password"),
+            "bind rejected <redacted>"
+        );
+        assert_eq!(
+            redact_secret(
+                "hash [REMOVED_NTLM_HASH] rejected",
+                "[REMOVED_NTLM_HASH]"
+            ),
+            "hash <redacted> rejected"
+        );
     }
 }

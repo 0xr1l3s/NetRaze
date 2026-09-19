@@ -184,16 +184,6 @@ fn show_default_config(
         state.progress = 0.0;
         state.progress_message = "Démarrage...".to_owned();
 
-        let credential = if !state.credential_config.username.is_empty() {
-            Some(netraze_protocols::smb::SmbCredential::new(
-                &state.credential_config.username,
-                "",
-                &state.credential_config.password,
-            ))
-        } else {
-            None
-        };
-
         let targets: Vec<String> = state
             .target_config
             .target
@@ -202,7 +192,48 @@ fn show_default_config(
             .filter(|s| !s.is_empty())
             .collect();
 
-        runtime.spawn_smb_scan(targets, credential, state.threads, state.timeout_seconds);
+        match state.target_config.protocol.as_str() {
+            "LDAP" => {
+                let credential = state
+                    .selected_cred
+                    .and_then(|index| state.credentials.get(index))
+                    .filter(|credential| credential.active)
+                    .cloned();
+                if let Some(credential) = credential {
+                    runtime.spawn_ldap_scan(
+                        targets,
+                        credential,
+                        state.threads,
+                        state.timeout_seconds,
+                    );
+                } else {
+                    state.is_running = false;
+                    state.status_text = "Idle".to_owned();
+                    runtime.emit_error(
+                        "LDAP requires an active saved credential selected in Credential Manager",
+                    );
+                }
+            }
+            "SMB" => {
+                let credential = if !state.credential_config.username.is_empty() {
+                    Some(netraze_protocols::smb::SmbCredential::new(
+                        &state.credential_config.username,
+                        "",
+                        &state.credential_config.password,
+                    ))
+                } else {
+                    None
+                };
+                runtime.spawn_smb_scan(targets, credential, state.threads, state.timeout_seconds);
+            }
+            protocol => {
+                state.is_running = false;
+                state.status_text = "Idle".to_owned();
+                runtime.emit_error(format!(
+                    "Protocol {protocol} does not have a desktop scan workflow yet"
+                ));
+            }
+        }
     }
 }
 
