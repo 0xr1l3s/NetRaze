@@ -40,6 +40,9 @@ The ignored Rust suite validates:
 - RootDSE `defaultNamingContext` discovery.
 - Paged AD user enumeration with a page size of two.
 - Deterministic case-insensitive result ordering and LDAP source metadata.
+- Full read-only inventory coverage for users, groups, computers, OUs and
+  containers, domain topology, privileged principals, SPNs, and domain/LDAP
+  security policy.
 
 The tests intentionally use a fixed loopback endpoint and provide no
 environment-variable override. They cannot be redirected to a real AD server.
