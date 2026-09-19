@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use egui::{Color32, Pos2, Rect, Stroke, Style, Ui};
 use egui_snarl::ui::{BackgroundPattern, NodeLayout, NodeLayoutKind, SnarlStyle, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl, ui::PinInfo};
@@ -365,6 +367,17 @@ pub struct WorkflowViewer {
 
 impl WorkflowViewer {
     pub fn new(credentials: Vec<CredentialRecord>) -> Self {
+        // The canvas combines session credentials with Credential Manager
+        // records. Keep the session copy for an identity when both exist, so
+        // Login As has one entry and resolves the latest in-session secret.
+        let mut seen = HashSet::new();
+        let credentials = credentials
+            .into_iter()
+            .filter(|credential| {
+                !credential.username.is_empty()
+                    && seen.insert(crate::state::cred_label(credential).to_ascii_lowercase())
+            })
+            .collect();
         Self {
             credentials,
             login_requests: Vec::new(),
@@ -391,7 +404,7 @@ impl WorkflowViewer {
             return Some(crate::state::anonymous_record());
         }
         for c in &self.credentials {
-            if &crate::state::cred_label(c) == label {
+            if crate::state::cred_label(c).eq_ignore_ascii_case(label) {
                 return Some(c.clone());
             }
         }
@@ -414,6 +427,36 @@ impl WorkflowViewer {
             ));
         }
         credential
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::WorkflowViewer;
+    use crate::state::{anonymous_record, cred_label};
+
+    #[test]
+    fn login_menu_deduplicates_session_and_saved_accounts() {
+        let mut session = anonymous_record();
+        session.domain = "EXAMPLE".to_owned();
+        session.username = "Alice".to_owned();
+        session.secret = "new-session-secret".to_owned();
+
+        let mut saved = session.clone();
+        saved.username = "alice".to_owned();
+        saved.secret = "older-saved-secret".to_owned();
+
+        let viewer = WorkflowViewer::new(vec![session.clone(), saved, anonymous_record()]);
+        assert_eq!(viewer.credentials.len(), 1);
+        assert_eq!(cred_label(&viewer.credentials[0]), "EXAMPLE\\Alice");
+        assert_eq!(viewer.credentials[0].secret, "new-session-secret");
+        assert_eq!(
+            viewer
+                .resolve_cred(&Some("example\\alice".to_owned()))
+                .unwrap()
+                .secret,
+            "new-session-secret"
+        );
     }
 }
 

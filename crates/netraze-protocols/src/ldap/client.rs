@@ -115,6 +115,7 @@ pub struct LdapClient {
     next_message_id: u32,
     read_buffer: Vec<u8>,
     security_context: Option<NtlmSecurityContext>,
+    anonymous_bound: bool,
     usable: bool,
 }
 
@@ -125,6 +126,7 @@ impl core::fmt::Debug for LdapClient {
             .field("config", &self.config)
             .field("next_message_id", &self.next_message_id)
             .field("protected", &self.security_context.is_some())
+            .field("anonymous_bound", &self.anonymous_bound)
             .field("usable", &self.usable)
             .finish_non_exhaustive()
     }
@@ -142,8 +144,31 @@ impl LdapClient {
             next_message_id: 1,
             read_buffer: Vec::new(),
             security_context: None,
+            anonymous_bound: false,
             usable: true,
         })
+    }
+
+    /// Enter anonymous LDAP authorization state without sending a secret.
+    /// Subsequent operations use ordinary BER because there is no SASL layer.
+    pub async fn bind_anonymous(&mut self) -> Result<(), LdapError> {
+        if self.anonymous_bound || self.security_context.is_some() {
+            return Err(LdapError::State("connection is already bound".into()));
+        }
+        let request = BindRequest::new(
+            3,
+            LdapString::from(""),
+            AuthenticationChoice::Simple(OctetString::from(Vec::<u8>::new())),
+        );
+        let response = self.send_bind_request(request).await?;
+        if response.result_code != ResultCode::Success {
+            return Err(result_error(
+                response.result_code,
+                &response.diagnostic_message,
+            ));
+        }
+        self.anonymous_bound = true;
+        Ok(())
     }
 
     /// Authenticate with GSS-SPNEGO/NTLMv2 and require integrity plus confidentiality.
@@ -153,7 +178,7 @@ impl LdapClient {
         domain: &str,
         credential: NtlmCredential,
     ) -> Result<(), LdapError> {
-        if self.security_context.is_some() {
+        if self.anonymous_bound || self.security_context.is_some() {
             return Err(LdapError::State("connection is already bound".into()));
         }
         let mut ntlm = NtlmClient::new(username, domain, credential);
@@ -265,6 +290,10 @@ impl LdapClient {
         .await
     }
 
+    pub(crate) fn is_protected(&self) -> bool {
+        self.security_context.is_some()
+    }
+
     async fn search_with_scope(
         &mut self,
         base_dn: &str,
@@ -273,10 +302,8 @@ impl LdapClient {
         scope: SearchRequestScope,
         paged: bool,
     ) -> Result<SearchOutcome, LdapError> {
-        if self.security_context.is_none() {
-            return Err(LdapError::State(
-                "search requires an authenticated sign-and-seal context".into(),
-            ));
+        if !self.anonymous_bound && self.security_context.is_none() {
+            return Err(LdapError::State("search requires a successful bind".into()));
         }
         let filter = parse_filter(filter).map_err(LdapError::Ber)?;
         let attributes = attributes
@@ -406,6 +433,10 @@ impl LdapClient {
                 Some(OctetString::from(token)),
             )),
         );
+        self.send_bind_request(request).await
+    }
+
+    async fn send_bind_request(&mut self, request: BindRequest) -> Result<BindResponse, LdapError> {
         let message_id = self.allocate_message_id();
         let message = LdapMessage::new(message_id, ProtocolOp::BindRequest(request));
         let operation_timeout = self.config.operation_timeout;
@@ -745,6 +776,10 @@ mod tests {
         0x0a, 0x47, 0x53, 0x53, 0x2d, 0x53, 0x50, 0x4e, 0x45, 0x47, 0x4f, 0x04, 0x03, 0x01, 0x02,
         0x03,
     ];
+    // RFC 4513 anonymous simple bind: empty name and empty password.
+    const ANONYMOUS_BIND: &[u8] = &[
+        0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00,
+    ];
     const SASL_BIND_RESPONSE: &[u8] = &[
         0x30, 0x10, 0x02, 0x01, 0x01, 0x61, 0x0b, 0x0a, 0x01, 0x0e, 0x04, 0x00, 0x04, 0x00, 0x87,
         0x02, 0x04, 0x05,
@@ -905,6 +940,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anonymous_bind_uses_plain_ber_and_allows_root_dse_search() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_test_ber(&mut socket).await, ANONYMOUS_BIND);
+            write_test_message(
+                &mut socket,
+                LdapMessage::new(
+                    1,
+                    ProtocolOp::BindResponse(BindResponse::new(
+                        ResultCode::Success,
+                        LdapString::from(""),
+                        LdapString::from(""),
+                        None,
+                        None,
+                    )),
+                ),
+            )
+            .await;
+
+            let search: LdapMessage = rasn::ber::decode(&read_test_ber(&mut socket).await).unwrap();
+            assert_eq!(search.message_id, 2);
+            assert!(matches!(search.protocol_op, ProtocolOp::SearchRequest(_)));
+            write_test_message(
+                &mut socket,
+                LdapMessage::new(
+                    2,
+                    ProtocolOp::SearchResEntry(SearchResultEntry::new(
+                        LdapString::from(""),
+                        vec![PartialAttribute::new(
+                            LdapString::from("defaultNamingContext"),
+                            SetOf::from_vec(vec![OctetString::from(
+                                b"DC=example,DC=test".to_vec(),
+                            )]),
+                        )],
+                    )),
+                ),
+            )
+            .await;
+            write_test_message(
+                &mut socket,
+                LdapMessage::new(
+                    2,
+                    ProtocolOp::SearchResDone(SearchResultDone(LdapResult::new(
+                        ResultCode::Success,
+                        LdapString::from(""),
+                        LdapString::from(""),
+                    ))),
+                ),
+            )
+            .await;
+
+            let unbind: LdapMessage = rasn::ber::decode(&read_test_ber(&mut socket).await).unwrap();
+            assert_eq!(unbind.message_id, 3);
+            assert!(matches!(unbind.protocol_op, ProtocolOp::UnbindRequest(_)));
+        });
+
+        let mut client = LdapClient::connect(LdapClientConfig::new(address.to_string()))
+            .await
+            .unwrap();
+        assert!(client.root_dse().await.is_err());
+        client.bind_anonymous().await.unwrap();
+        assert!(!client.is_protected());
+        assert!(client.bind_anonymous().await.is_err());
+        assert!(matches!(
+            client
+                .bind_ntlm("Guest", "EXAMPLE", NtlmCredential::Password(String::new()),)
+                .await,
+            Err(LdapError::State(_))
+        ));
+        let root_dse = client.root_dse().await.unwrap();
+        assert_eq!(
+            root_dse.first_utf8("defaultNamingContext"),
+            Some("DC=example,DC=test")
+        );
+        client.unbind().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_anonymous_bind_does_not_authorize_searches() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_test_ber(&mut socket).await;
+            write_test_message(
+                &mut socket,
+                LdapMessage::new(
+                    1,
+                    ProtocolOp::BindResponse(BindResponse::new(
+                        ResultCode::InvalidCredentials,
+                        LdapString::from(""),
+                        LdapString::from("bind refused"),
+                        None,
+                        None,
+                    )),
+                ),
+            )
+            .await;
+        });
+        let mut client = LdapClient::connect(LdapClientConfig::new(address.to_string()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.bind_anonymous().await,
+            Err(LdapError::Result { .. })
+        ));
+        assert!(!client.anonymous_bound);
+        assert!(matches!(client.root_dse().await, Err(LdapError::State(_))));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn ntlm_bind_advances_and_correlates_message_ids() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -959,6 +1109,21 @@ mod tests {
         assert!(client.security_context.is_some());
         assert_eq!(client.next_message_id, 3);
         server.await.unwrap();
+    }
+
+    #[test]
+    fn guest_account_with_empty_password_builds_ntlm_authenticate_token() {
+        let mut guest =
+            NtlmClient::new("Guest", "EXAMPLE", NtlmCredential::Password(String::new()));
+        guest.negotiate_token().unwrap();
+        let challenge = crate::ntlm::wrap_spnego_resp(&test_challenge());
+        assert!(
+            !guest
+                .authenticate_token(&challenge)
+                .unwrap()
+                .spnego_token
+                .is_empty()
+        );
     }
 
     #[tokio::test]

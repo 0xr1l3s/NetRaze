@@ -124,6 +124,22 @@ fn show_default_config(
                 .small()
                 .color(LABEL_COLOR),
             );
+        ui.label(
+            egui::RichText::new(
+                "Blank credentials reuse each target's current login, or anonymous if there is none. Entering credentials overrides the login and adds them to Credential Manager when you run the scan. Workspace saves include credential secrets.",
+            )
+            .small()
+            .color(LABEL_COLOR),
+        );
+    }
+    if state.target_config.protocol == "LDAP" {
+        ui.label(
+            egui::RichText::new(
+                "To force anonymous on a logged-in host, select Login As (anonymous) for that host. DOMAIN\\Guest with no secret attempts Guest NTLM; the server may reject it.",
+            )
+            .small()
+            .color(LABEL_COLOR),
+        );
     }
     ui.add_space(8.0);
     ui.separator();
@@ -205,40 +221,40 @@ fn show_default_config(
             .collect();
 
         match state.target_config.protocol.as_str() {
-            "LDAP" => {
-                let credential = state.credential_config.as_record().ok().flatten();
-                if let Some(credential) = credential {
-                    state.remember_scan_credential(credential.clone());
-                    runtime.spawn_ldap_scan(
-                        targets,
-                        credential,
-                        state.threads,
-                        state.timeout_seconds,
-                    );
-                } else {
+            "LDAP" => match state.credential_config.as_record() {
+                Ok(mut record) => {
+                    if let Some(credential) = &mut record {
+                        credential.protocol = "LDAP".to_owned();
+                    }
+                    if let Some(credential) = &record {
+                        state.remember_scan_credential(credential.clone());
+                    }
+                    let plan = state.scan_credential_plan(record);
+                    runtime.spawn_ldap_scan(targets, plan, state.threads, state.timeout_seconds);
+                }
+                Err(error) => {
                     state.is_running = false;
                     state.status_text = "Idle".to_owned();
-                    runtime.emit_error("LDAP requires a username and a password or NT hash");
+                    runtime.emit_error(error);
                 }
-            }
-            "SMB" => {
-                let record = state.credential_config.as_record().ok().flatten();
-                if let Some(credential) = &record {
-                    state.remember_scan_credential(credential.clone());
+            },
+            "SMB" => match state.credential_config.as_record() {
+                Ok(mut record) => {
+                    if let Some(credential) = &mut record {
+                        credential.protocol = "SMB".to_owned();
+                    }
+                    if let Some(credential) = &record {
+                        state.remember_scan_credential(credential.clone());
+                    }
+                    let plan = state.scan_credential_plan(record);
+                    runtime.spawn_smb_scan(targets, plan, state.threads, state.timeout_seconds);
                 }
-                let credential_label = record
-                    .as_ref()
-                    .map(crate::state::cred_label)
-                    .or_else(|| Some("(anonymous)".to_owned()));
-                let credential = record.as_ref().map(crate::runtime::cred_to_smb);
-                runtime.spawn_smb_scan(
-                    targets,
-                    credential,
-                    credential_label,
-                    state.threads,
-                    state.timeout_seconds,
-                );
-            }
+                Err(error) => {
+                    state.is_running = false;
+                    state.status_text = "Idle".to_owned();
+                    runtime.emit_error(error);
+                }
+            },
             protocol => {
                 state.is_running = false;
                 state.status_text = "Idle".to_owned();
@@ -270,12 +286,10 @@ fn scan_validation_error(state: &AppState) -> Option<String> {
         "LDAP" => {
             let credential = match state.credential_config.as_record() {
                 Ok(Some(credential)) => credential,
-                Ok(None) => {
-                    return Some("Enter a username and password or NT hash for LDAP".to_owned());
-                }
+                Ok(None) => crate::state::anonymous_record(),
                 Err(error) => return Some(error),
             };
-            crate::runtime::cred_to_ntlm(&credential)
+            crate::runtime::cred_to_ldap_auth(&credential)
                 .map(|_| ())
                 .map_err(|error| format!("Invalid LDAP credential: {error}"))
                 .err()
@@ -942,15 +956,19 @@ mod tests {
     }
 
     #[test]
-    fn ldap_run_accepts_inline_password_and_rejects_missing_secret() {
+    fn ldap_run_accepts_anonymous_and_inline_password_but_rejects_missing_named_secret() {
         let mut state = ldap_state();
-        assert_eq!(
-            scan_validation_error(&state).as_deref(),
-            Some("Enter a username and password or NT hash for LDAP")
-        );
+        assert!(scan_validation_error(&state).is_none());
         state.credential_config.username = "EXAMPLE\\alice".to_owned();
         assert!(scan_validation_error(&state).is_some());
         state.credential_config.password = "test-only-password".to_owned();
+        assert!(scan_validation_error(&state).is_none());
+    }
+
+    #[test]
+    fn ldap_run_accepts_explicit_guest_without_secret() {
+        let mut state = ldap_state();
+        state.credential_config.username = "EXAMPLE\\Guest".to_owned();
         assert!(scan_validation_error(&state).is_none());
     }
 

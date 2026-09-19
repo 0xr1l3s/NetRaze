@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -110,6 +112,27 @@ pub fn anonymous_record() -> CredentialRecord {
     }
 }
 
+/// Credentials chosen for a scan. Inline fields override host logins; with
+/// blank fields each target inherits its own most recent successful login.
+#[derive(Clone)]
+pub enum ScanCredentialPlan {
+    Explicit(CredentialRecord),
+    ByHost(HashMap<String, Result<CredentialRecord, String>>),
+}
+
+impl ScanCredentialPlan {
+    pub fn for_target(&self, target: &str) -> Result<Option<CredentialRecord>, String> {
+        match self {
+            Self::Explicit(credential) => Ok(Some(credential.clone())),
+            Self::ByHost(hosts) => hosts.get(&scan_host_key(target)).cloned().transpose(),
+        }
+    }
+}
+
+fn scan_host_key(value: &str) -> String {
+    netraze_protocols::targets::endpoint_host(value).to_ascii_lowercase()
+}
+
 fn bool_true() -> bool {
     true
 }
@@ -135,8 +158,8 @@ pub struct CredentialConfig {
 }
 
 impl CredentialConfig {
-    /// Build a scan-only credential from the fields in the configuration panel.
-    /// The returned record is never added to the persisted credential list.
+    /// Build a credential from the Configuration fields. The caller decides
+    /// whether to save it to Credential Manager when the scan starts.
     pub fn as_record(&self) -> Result<Option<CredentialRecord>, String> {
         if !self.kerberos_ticket.trim().is_empty() {
             return Err(
@@ -485,6 +508,12 @@ impl AppState {
                     result,
                     credential_label,
                 } => {
+                    let previous_login = self.host_login_label(&result.target);
+                    let current_login = if result.error.is_none() {
+                        credential_label.or(previous_login)
+                    } else {
+                        previous_login
+                    };
                     let hostname = result.hostname.clone().unwrap_or_default();
                     let status = if result.error.is_some() {
                         HostStatus::Unknown
@@ -532,8 +561,21 @@ impl AppState {
                         shares,
                         admin: result.admin,
                         users,
-                        logged_in_cred: credential_label,
+                        logged_in_cred: current_login.clone(),
                     };
+
+                    if result.error.is_none() {
+                        for node in self.workflow.snarl.nodes_mut() {
+                            if let WorkflowNode::HostNode {
+                                ip, logged_in_cred, ..
+                            } = node
+                            {
+                                if scan_host_key(ip) == scan_host_key(&result.target) {
+                                    *logged_in_cred = current_login.clone();
+                                }
+                            }
+                        }
+                    }
 
                     // Add to the most recent subnet (created by ScanStarted)
                     let subnet = self.networks.last_mut();
@@ -590,6 +632,7 @@ impl AppState {
                         for net in &mut self.networks {
                             if let Some(h) = net.hosts.iter_mut().find(|h| h.ip == ip) {
                                 h.admin = admin;
+                                h.logged_in_cred = Some(cred_label.clone());
                                 h.status = if admin {
                                     HostStatus::Accessible
                                 } else {
@@ -779,6 +822,12 @@ impl AppState {
                     result,
                 } => {
                     let host_target = netraze_protocols::targets::endpoint_host(&endpoint);
+                    let previous_login = self.host_login_label(&host_target);
+                    let current_login = if result.is_ok() {
+                        Some(cred_label.clone())
+                    } else {
+                        previous_login
+                    };
                     let hostname = result
                         .as_ref()
                         .as_ref()
@@ -819,7 +868,7 @@ impl AppState {
                         shares: Vec::new(),
                         admin: false,
                         users: user_names.clone(),
-                        logged_in_cred: result.is_ok().then(|| cred_label.clone()),
+                        logged_in_cred: current_login.clone(),
                     };
                     if let Some(network) = self.networks.last_mut() {
                         if let Some(existing) = network
@@ -869,7 +918,7 @@ impl AppState {
                                     shares: Vec::new(),
                                     admin: false,
                                     users: user_names.clone(),
-                                    logged_in_cred: result.is_ok().then(|| cred_label.clone()),
+                                    logged_in_cred: current_login.clone(),
                                 },
                             )
                         });
@@ -889,7 +938,7 @@ impl AppState {
                         *os_info = "Active Directory (LDAP)".to_owned();
                         *node_domain = domain;
                         *users = user_names;
-                        *logged_in_cred = result.is_ok().then(|| cred_label.clone());
+                        *logged_in_cred = current_login;
                     }
 
                     if let Some((directory_id, node)) = self
@@ -1183,19 +1232,130 @@ pub struct TargetConfigSave {
 }
 
 impl AppState {
-    /// Retain the credential used for a scan without adding it to the saved
-    /// Credential Manager list. Reusing the same identity updates its secret.
+    fn host_login_label(&self, target: &str) -> Option<String> {
+        let key = scan_host_key(target);
+        self.workflow
+            .snarl
+            .nodes()
+            .find_map(|node| match node {
+                WorkflowNode::HostNode {
+                    ip,
+                    hostname,
+                    logged_in_cred: Some(label),
+                    ..
+                } if scan_host_key(ip) == key || scan_host_key(hostname) == key => {
+                    Some(label.clone())
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                self.networks
+                    .iter()
+                    .flat_map(|network| &network.hosts)
+                    .find(|host| {
+                        scan_host_key(&host.ip) == key || scan_host_key(&host.hostname) == key
+                    })
+                    .and_then(|host| host.logged_in_cred.clone())
+            })
+    }
+
+    /// Add an inline scan credential to Credential Manager and keep a session
+    /// copy for actions that reuse the current login. Reusing an identity
+    /// updates its secret without creating duplicate manager rows.
     pub fn remember_scan_credential(&mut self, credential: CredentialRecord) {
         let label = cred_label(&credential);
         if let Some(existing) = self
             .session_credentials
             .iter_mut()
-            .find(|existing| cred_label(existing) == label)
+            .find(|existing| cred_label(existing).eq_ignore_ascii_case(&label))
         {
-            *existing = credential;
+            *existing = credential.clone();
         } else {
-            self.session_credentials.push(credential);
+            self.session_credentials.push(credential.clone());
         }
+
+        if let Some(existing) = self
+            .credentials
+            .iter_mut()
+            .find(|existing| cred_label(existing).eq_ignore_ascii_case(&label))
+        {
+            if existing.secret != credential.secret || existing.cred_type != credential.cred_type {
+                existing.valid = None;
+            }
+            // Keep persisted identity spelling aligned with the login label
+            // recorded on hosts, including after the session cache is cleared.
+            existing.username = credential.username.clone();
+            existing.domain = credential.domain.clone();
+            existing.secret = credential.secret;
+            existing.cred_type = credential.cred_type;
+            existing.active = true;
+            if !credential.protocol.is_empty()
+                && !existing
+                    .protocol
+                    .split(',')
+                    .any(|protocol| protocol.trim().eq_ignore_ascii_case(&credential.protocol))
+            {
+                if !existing.protocol.is_empty() {
+                    existing.protocol.push_str(", ");
+                }
+                existing.protocol.push_str(&credential.protocol);
+            }
+        } else {
+            let mut credential = credential;
+            credential.source = "Configuration".to_owned();
+            self.credentials.push(credential);
+        }
+    }
+
+    /// Capture host login identities before a scan clears/refills network rows.
+    /// A missing saved secret is kept as an error, never treated as anonymous.
+    pub fn scan_credential_plan(&self, explicit: Option<CredentialRecord>) -> ScanCredentialPlan {
+        if let Some(credential) = explicit {
+            return ScanCredentialPlan::Explicit(credential);
+        }
+
+        let mut hosts = HashMap::new();
+        let mut insert_login = |ip: &str, hostname: &str, label: &str| {
+            let resolved = self.resolve_scan_login(label);
+            if !ip.is_empty() {
+                hosts.insert(scan_host_key(ip), resolved.clone());
+            }
+            if !hostname.is_empty() {
+                hosts.insert(scan_host_key(hostname), resolved);
+            }
+        };
+
+        for host in self.networks.iter().flat_map(|network| &network.hosts) {
+            if let Some(label) = host.logged_in_cred.as_deref() {
+                insert_login(&host.ip, &host.hostname, label);
+            }
+        }
+        // Workspace HostNodes carry the current Login As choice and override
+        // potentially stale rows from an earlier network scan.
+        for node in self.workflow.snarl.nodes() {
+            if let WorkflowNode::HostNode {
+                ip,
+                hostname,
+                logged_in_cred: Some(label),
+                ..
+            } = node
+            {
+                insert_login(ip, hostname, label);
+            }
+        }
+        ScanCredentialPlan::ByHost(hosts)
+    }
+
+    fn resolve_scan_login(&self, label: &str) -> Result<CredentialRecord, String> {
+        if label == "(anonymous)" {
+            return Ok(anonymous_record());
+        }
+        self.session_credentials
+            .iter()
+            .chain(&self.credentials)
+            .find(|credential| cred_label(credential).eq_ignore_ascii_case(label))
+            .cloned()
+            .ok_or_else(|| format!("logged-in credential {label} is no longer available"))
     }
 
     /// Create a saveable snapshot from current state.
@@ -1589,37 +1749,134 @@ mod user_enum_tests {
     }
 
     #[test]
-    fn inline_scan_credentials_are_available_without_workspace_persistence() {
+    fn inline_scan_credentials_are_upserted_into_credential_manager() {
         let (mut state, _host_id, _tx) = state_with_host();
         state.credential_config.username = "EXAMPLE\\alice".to_owned();
         state.credential_config.password = "test-only-inline-secret".to_owned();
-        let credential = state.credential_config.as_record().unwrap().unwrap();
+        let mut credential = state.credential_config.as_record().unwrap().unwrap();
         assert_eq!(credential.domain, "EXAMPLE");
         assert_eq!(credential.username, "alice");
         assert_eq!(cred_label(&credential), "EXAMPLE\\alice");
         assert_eq!(credential.cred_type, CredType::Password);
+        credential.protocol = "SMB".to_owned();
         state.remember_scan_credential(credential);
-        state.credential_config.username = "OTHER\\bob".to_owned();
         assert_eq!(state.session_credentials.len(), 1);
+        assert_eq!(state.credentials.len(), 1);
         assert_eq!(state.session_credentials[0].username, "alice");
+        assert_eq!(state.credentials[0].source, "Configuration");
+        assert_eq!(state.credentials[0].protocol, "SMB");
 
         let workspace = serde_json::to_string(&state.to_save()).unwrap();
-        assert!(!workspace.contains("test-only-inline-secret"));
+        assert!(workspace.contains("test-only-inline-secret"));
 
         state.credential_config.ntlm_hash = "[REMOVED_NTLM_HASH]".to_owned();
-        let credential = state.credential_config.as_record().unwrap().unwrap();
+        let mut credential = state.credential_config.as_record().unwrap().unwrap();
         assert_eq!(credential.cred_type, CredType::Hash);
         assert_eq!(credential.secret, "[REMOVED_NTLM_HASH]");
-        assert!(
-            !serde_json::to_string(&state.to_save())
-                .unwrap()
-                .contains(&credential.secret)
-        );
+        credential.protocol = "LDAP".to_owned();
+        credential.username = "ALICE".to_owned();
+        state.credentials[0].valid = Some(true);
+        state.remember_scan_credential(credential);
+        assert_eq!(state.credentials.len(), 1);
+        assert_eq!(state.credentials[0].username, "ALICE");
+        assert_eq!(state.credentials[0].cred_type, CredType::Hash);
+        assert_eq!(state.credentials[0].valid, None);
+        assert_eq!(state.credentials[0].protocol, "SMB, LDAP");
 
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut loaded = AppState::new(rx);
         loaded.load_from(state.to_save());
         assert!(loaded.session_credentials.is_empty());
+        assert_eq!(loaded.credentials.len(), 1);
+        assert_eq!(
+            loaded.credentials[0].secret,
+            "[REMOVED_NTLM_HASH]"
+        );
+    }
+
+    #[test]
+    fn blank_scan_fields_inherit_each_host_login_and_explicit_fields_override_it() {
+        let (mut state, _host_id, _tx) = state_with_host();
+        let alice = CredentialRecord {
+            username: "alice".to_owned(),
+            domain: "EXAMPLE".to_owned(),
+            secret: "test-only-alice-secret".to_owned(),
+            ..anonymous_record()
+        };
+        let bob = CredentialRecord {
+            username: "bob".to_owned(),
+            domain: "EXAMPLE".to_owned(),
+            secret: "test-only-bob-secret".to_owned(),
+            ..anonymous_record()
+        };
+        state.credentials.extend([alice.clone(), bob.clone()]);
+        for node in state.workflow.snarl.nodes_mut() {
+            if let WorkflowNode::HostNode { logged_in_cred, .. } = node {
+                *logged_in_cred = Some(cred_label(&alice));
+            }
+        }
+        state.workflow.add_host_node(
+            "10.0.0.42".to_owned(),
+            "second-dc".to_owned(),
+            String::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+            Some(cred_label(&bob)),
+        );
+
+        let plan = state.scan_credential_plan(None);
+        assert_eq!(
+            plan.for_target("127.0.0.1:389").unwrap().unwrap().username,
+            "alice"
+        );
+        assert_eq!(
+            plan.for_target("second-dc:445").unwrap().unwrap().username,
+            "bob"
+        );
+        assert!(plan.for_target("10.0.0.99").unwrap().is_none());
+
+        let explicit = state.scan_credential_plan(Some(bob));
+        assert_eq!(
+            explicit.for_target("127.0.0.1").unwrap().unwrap().username,
+            "bob"
+        );
+    }
+
+    #[test]
+    fn missing_host_login_secret_is_an_error_not_an_anonymous_scan() {
+        let (mut state, _host_id, _tx) = state_with_host();
+        for node in state.workflow.snarl.nodes_mut() {
+            if let WorkflowNode::HostNode { logged_in_cred, .. } = node {
+                *logged_in_cred = Some("EXAMPLE\\removed".to_owned());
+            }
+        }
+        let plan = state.scan_credential_plan(None);
+        assert!(plan.for_target("127.0.0.1").is_err());
+        assert!(plan.for_target("10.0.0.99").unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_directory_scan_preserves_current_host_login() {
+        let (mut state, _host_id, tx) = state_with_host();
+        tx.send(RuntimeEvent::LoginResult {
+            ip: "127.0.0.1".to_owned(),
+            cred_label: "EXAMPLE\\alice".to_owned(),
+            success: true,
+            admin: false,
+        })
+        .unwrap();
+        tx.send(RuntimeEvent::DirectoryResult {
+            endpoint: "127.0.0.1:389".to_owned(),
+            cred_label: "(unavailable)".to_owned(),
+            result: Box::new(Err("test-only-failure".to_owned())),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert_eq!(
+            state.host_login_label("127.0.0.1").as_deref(),
+            Some("EXAMPLE\\alice")
+        );
     }
 
     #[test]

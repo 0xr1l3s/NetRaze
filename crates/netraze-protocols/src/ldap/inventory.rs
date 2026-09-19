@@ -1,4 +1,4 @@
-//! High-level authenticated Active Directory inventory workflow.
+//! High-level Active Directory inventory workflow.
 
 use netraze_core::{DirectoryInventory, DirectoryServerInfo};
 
@@ -6,18 +6,58 @@ use crate::ntlm::NtlmCredential;
 
 use super::{LdapClient, LdapClientConfig, LdapEntry, LdapError};
 
-/// Connect, establish an NTLMv2 sign-and-seal context, discover RootDSE, and
-/// close the LDAP session. Enumeration sections are populated by the focused
-/// collectors in this module as they become available.
+/// Authentication choices for a read-only LDAP inventory.
+#[derive(Debug, Clone)]
+pub enum LdapAuthentication {
+    Anonymous,
+    Ntlm {
+        username: String,
+        domain: String,
+        credential: NtlmCredential,
+    },
+}
+
+/// Connect, bind, discover RootDSE, collect read-only inventory, and unbind.
 pub async fn inventory(
     config: LdapClientConfig,
     username: &str,
     domain: &str,
     credential: NtlmCredential,
 ) -> Result<DirectoryInventory, LdapError> {
+    inventory_with_authentication(
+        config,
+        LdapAuthentication::Ntlm {
+            username: username.to_owned(),
+            domain: domain.to_owned(),
+            credential,
+        },
+    )
+    .await
+}
+
+/// Anonymous bind sends an empty name and empty password; it does not request
+/// the server's Guest account or establish NTLM sign-and-seal protection.
+pub async fn inventory_anonymous(
+    config: LdapClientConfig,
+) -> Result<DirectoryInventory, LdapError> {
+    inventory_with_authentication(config, LdapAuthentication::Anonymous).await
+}
+
+pub async fn inventory_with_authentication(
+    config: LdapClientConfig,
+    authentication: LdapAuthentication,
+) -> Result<DirectoryInventory, LdapError> {
     let endpoint = config.endpoint.clone();
     let mut client = LdapClient::connect(config).await?;
-    if let Err(error) = client.bind_ntlm(username, domain, credential).await {
+    let bind_result = match authentication {
+        LdapAuthentication::Anonymous => client.bind_anonymous().await,
+        LdapAuthentication::Ntlm {
+            username,
+            domain,
+            credential,
+        } => client.bind_ntlm(&username, &domain, credential).await,
+    };
+    if let Err(error) = bind_result {
         let _ = client.unbind().await;
         return Err(error);
     }

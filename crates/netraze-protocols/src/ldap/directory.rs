@@ -338,8 +338,8 @@ async fn collect_security(
     server: &DirectoryServerInfo,
 ) -> DirectorySection<DirectorySecuritySettings> {
     let mut settings = DirectorySecuritySettings {
-        session_signing: true,
-        session_sealing: true,
+        session_signing: client.is_protected(),
+        session_sealing: client.is_protected(),
         ..DirectorySecuritySettings::default()
     };
     let mut referrals = Vec::new();
