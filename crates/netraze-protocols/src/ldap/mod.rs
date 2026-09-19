@@ -5,6 +5,7 @@
 mod ad;
 pub mod client;
 mod controls;
+mod directory;
 mod inventory;
 mod message;
 mod search;

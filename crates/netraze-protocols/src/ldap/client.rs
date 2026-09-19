@@ -248,6 +248,23 @@ impl LdapClient {
         .await
     }
 
+    /// Search exactly one LDAP object without paging.
+    pub async fn search_base(
+        &mut self,
+        base_dn: &str,
+        filter: &str,
+        attributes: &[&str],
+    ) -> Result<SearchOutcome, LdapError> {
+        self.search_with_scope(
+            base_dn,
+            filter,
+            attributes,
+            SearchRequestScope::BaseObject,
+            false,
+        )
+        .await
+    }
+
     async fn search_with_scope(
         &mut self,
         base_dn: &str,
