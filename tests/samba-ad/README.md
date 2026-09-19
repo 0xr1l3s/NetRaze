@@ -44,6 +44,10 @@ The ignored Rust suite validates:
   containers, domain topology, privileged principals, SPNs, and domain/LDAP
   security policy.
 
+Anonymous LDAP bind and empty-password Guest NTLM have loopback/unit tests,
+but this ignored live suite currently exercises authenticated `alice` only.
+It does not assert server-side anonymous directory access or Guest policy.
+
 The tests intentionally use a fixed loopback endpoint and provide no
 environment-variable override. They cannot be redirected to a real AD server.
 

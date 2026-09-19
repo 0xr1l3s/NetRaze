@@ -3,12 +3,12 @@
 [![Release](https://github.com/Ah4ds/NetRaze/actions/workflows/release.yml/badge.svg)](https://github.com/Ah4ds/NetRaze/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue)](#license)
 [![Rust Edition](https://img.shields.io/badge/rust-2024%20edition%20%28MSRV%201.85%29-orange)](rust-toolchain.toml)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20SMB%20stack%20cross--platform-yellow)](#current-status)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20SMB%20%2B%20LDAP-yellow)](#current-status)
 
 **NetRaze** is an offensive network-execution toolkit, rewritten from scratch
 in pure Rust. It is the spiritual successor to the NetExec / CrackMapExec
 lineage — same workflow (enumerate, authenticate, execute, post-exploit),
-but with a memory-safe backend, a single static binary, and a built-in
+but with a memory-safe backend, native binaries, and a built-in
 desktop workflow graph.
 
 This repository is the **active port**. The mature Python reference
@@ -48,8 +48,9 @@ long-term pain points that get worse as the tool grows:
    `nxc` invocation pays 400–800 ms before the first packet goes out.
    Disruptive during iteration on large target sets.
 2. **Packaging and deployment.** Operator laptops, red-team C2 relays, and
-   CI runners all want a single static artifact. A Python tree with native
-   extensions (Impacket, pycryptodome, LDAP3) is hostile to that.
+   CI runners all want a self-contained application binary. A Python
+   tree with native extensions (Impacket, pycryptodome, LDAP3) is hostile
+   to that.
 
 NetRaze keeps the NetExec model — protocol handlers, post-auth modules,
 workspace-per-engagement — and rebases it on:
@@ -57,8 +58,8 @@ workspace-per-engagement — and rebases it on:
 - **Pure Rust wire code.** No FFI bindings to Impacket or Samba. The
   DCE/RPC NDR walker, NTLMSSP, and SMB2 framing are re-implemented and
   validated byte-for-byte against Impacket-generated fixtures.
-- **Single-binary distribution.** `cargo build --release` produces one
-  executable per binary crate.
+- **Single-binary applications.** `cargo build --release` produces one
+  executable per binary crate; static linking is not the default build mode.
 - **Async I/O from the ground up.** `tokio` across the board, not retrofitted
   onto a synchronous Python core.
 - **Desktop workflow graph.** An `egui`/`egui-snarl` canvas for composing
@@ -106,7 +107,7 @@ enumeration work in both modes.
 
 | Protocol | State |
 |---|---|
-| LDAP | NTLMv2 SASL sign-and-seal, RootDSE discovery, paged AD user enumeration, SAMR fallback |
+| LDAP | Port 389; NTLMv2 SASL/SPNEGO sign-and-seal (password or NT hash), anonymous bind, RootDSE, paged read-only AD inventory (users, groups, computers, OUs, topology, privileged principals, SPNs, and reported security policy). |
 | WinRM, MSSQL, SSH, RDP, FTP, NFS, VNC, WMI | Scaffold only — factory registered, no wire code yet |
 
 ### DCE/RPC stack (`netraze-dcerpc`)
@@ -123,8 +124,8 @@ enumeration work in both modes.
 - Kerberos / AES-based authentication (only NTLMv2 today).
 - SMB3 encryption (AES-CCM/GCM) — most targets still accept unencrypted
   SMB2.
-- LDAP expansion (`netraze-protocols::ldap`) — AD group/computer enumeration
-  and Kerberoast/AS-REP-roast discovery.
+- LDAP follow-ups — ACL/security-descriptor collection and active checks for
+  settings currently shown as `Not tested` in the desktop Security tab.
 - Relay attacks, coercion (PetitPotam, PrinterBug), ADCS abuse, DCSync
   (see `docs/protocol-stack-plan.md`).
 
@@ -232,6 +233,31 @@ be saved without a secret for guest access (badged `GUEST`), and a
 Secret-less credentials can also be imported in bulk through the
 Credential Manager's CSV import.
 
+For SMB or LDAP scans, enter a target and select the protocol in
+Configuration. The Username, Password, and NTLM Hash fields apply to both;
+`DOMAIN\username` selects a domain, and an NT hash takes priority over a
+password. A nonempty Kerberos Ticket field is rejected because ticket
+authentication is not implemented. If the credential fields are blank,
+each target reuses its current **Login As** account or scans anonymously
+when it has none. Entered credentials override that choice and are added
+to Credential Manager when the scan starts. A missing saved secret is an
+error for that target, not a silent anonymous retry. LDAP anonymous bind
+has no SASL sign-and-seal; named LDAP credentials use NTLMv2 sign-and-seal.
+`Guest` with an empty password is an explicit NTLM attempt that the server
+may reject.
+
+LDAP discovery creates an **AD Directory** workflow node with Overview,
+Users, Groups, Computers, OUs, Topology, Privileged, Services, and Security
+tabs. The Security tab separates reported policy values from checks marked
+`Not tested`; referrals and partial-section errors are surfaced rather
+than followed automatically. The bottom Network/Credentials/Progress dock
+can be closed with `×` and reopened from the status bar without clearing
+its contents.
+
+**Workspace files contain Credential Manager secrets** (passwords and NT
+hashes) in their saved JSON. Treat them as sensitive files and do not
+commit or share them. Session-only credential copies are not serialized.
+
 Backend is `wgpu` by default, which works natively on Linux (Vulkan),
 Windows (DX12), macOS (Metal), and in WSL (via Lavapipe software
 fallback).
@@ -270,17 +296,17 @@ Full write-up in [`docs/architecture.md`](docs/architecture.md).
 ### Daily commands
 
 ```shell
-cargo check --workspace              # type-check
+cargo check --workspace --all-targets # type-check
 cargo clippy -p netraze-dcerpc -- -D warnings   # strict gate for new code
-cargo test --workspace               # run all unit + integration tests
-cargo fmt --all                      # format
+cargo test --workspace --no-fail-fast # excludes ignored live suites
+cargo fmt --all --check               # check formatting
 ```
 
 ### Per-crate testing
 
 ```shell
 cargo test -p netraze-dcerpc         # NDR / PDU / NTLMSSP / interface suites
-cargo test -p netraze-protocols      # SMB crypto, NTLM vectors, anonymous AUTHENTICATE shape
+cargo test -p netraze-protocols      # SMB, LDAP, NTLM, and dispatcher tests
 ```
 
 ### CI / release
@@ -293,8 +319,9 @@ clippy / test gates locally before pushing — the strict clippy gate
 
 ## Validation methodology
 
-A wire-level offensive toolkit is only as trustworthy as its test harness.
-Three independent layers protect the SMB/DCE-RPC stack:
+A wire-level toolkit is only as trustworthy as its test harness. Unit
+tests, pinned byte fixtures, and isolated live harnesses cover the
+implemented SMB/DCE-RPC and LDAP paths:
 
 1. **Known-answer vectors for crypto.** NTLMv2 response, NTOWFv2,
    SIGN/SEAL key derivation, and RC4 keystream are validated against
@@ -302,21 +329,26 @@ Three independent layers protect the SMB/DCE-RPC stack:
    built.
 2. **Impacket-pinned byte fixtures for NDR.** Python scripts in
    `crates/netraze-dcerpc/tests/` use the Impacket library to generate
-   exact bytes for `NetrShareEnum` requests and responses, which are
-   then baked into Rust tests. Any divergence in our encoder/decoder is
-   a test failure with a clear byte-level diff.
-3. **Live Samba integration harness.** `tests/samba/` ships a
+   exact bytes for `NetrShareEnum` requests and responses; the LDAP
+   fixture script covers BER bind/search messages, controls, and entries.
+   Bytes are pinned in Rust tests, so normal test runs need no Python.
+3. **Live Samba SMB integration harness.** `tests/samba/` ships a
    `docker-compose.yml` + `smb.conf` that pin a Samba server with a
-   known share inventory. Nine integration suites (29 tests) in
+   known share inventory. Ignored integration suites in
    `crates/netraze-protocols/tests/` drive the full stack against the
    real daemon — session setup (including anonymous and guest), share
-   and user enumeration, file ops, smbexec, AV probes, SAM dump —
+   and user enumeration, file ops, smbexec wire behavior, and AV probes —
    proving the wire is not just internally consistent but actually
-   interoperable. Each behaviour change is cross-checked against
-   Impacket against the same harness before it lands.
+   interoperable. SMB wire changes are cross-checked against Impacket
+   against the same harness before they land.
+4. **Samba AD LDAP harness.** `tests/samba-ad/` runs a separate, digest-pinned
+   domain controller bound to loopback. Its ignored suite verifies NTLM
+   password/hash bind, protected RootDSE search, paging, and complete
+   read-only inventory. Anonymous LDAP bind has a loopback mock-server
+   test, not a live AD assertion.
 
-See [`tests/samba/README.md`](tests/samba/README.md) for how to run the
-integration suite locally.
+See the [SMB harness guide](tests/samba/README.md) and
+[LDAP harness guide](tests/samba-ad/README.md) for local commands.
 
 ## Roadmap
 
@@ -334,8 +366,9 @@ Full write-up in [`docs/migration-roadmap.md`](docs/migration-roadmap.md).
 
 This is an early-stage port. The highest-leverage contributions right now:
 
-- **The LDAP module** (`netraze-protocols::ldap`) — extend the existing AD
-  user enumeration with groups, computers, and roastable-account discovery.
+- **LDAP follow-ups** (`netraze-protocols::ldap`) — security-descriptor
+  collection and explicitly tested policy probes; the read-only inventory
+  already covers users, groups, computers, SPNs, and directory structure.
 - **Kerberos** (`netraze-protocols::kerberos`) — AS/TGS exchange, RC4/AES key
   handling; the next big authentication milestone after NTLMv2.
 - **Deep per-protocol modules** inside `netraze-protocols` as coverage grows.
@@ -346,8 +379,9 @@ Before opening a PR, please ensure:
 
 - `cargo fmt --all --check` passes.
 - `cargo clippy -p netraze-dcerpc -- -D warnings` passes.
-- `cargo test --workspace` passes on your OS. If you touched SMB2 or
-  NTLMSSP code, run the Samba integration suite too.
+- `cargo test --workspace --no-fail-fast` passes on your OS. If you touched
+  SMB2/DCE-RPC, run the SMB Samba suite; if you touched LDAP or its NTLM
+  SASL path, run the separate Samba AD suite as well.
 
 ## Related projects
 

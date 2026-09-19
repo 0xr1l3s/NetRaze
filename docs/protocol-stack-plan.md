@@ -20,7 +20,7 @@ et "est-ce que tel module post-exploit est utilisable aujourd'hui ?"
 
 **Stratégie générale** : pas de port en bloc d'Impacket — les ~150k LOC
 Python évoluent et 60-70% ne servent jamais en pentest. À la place, on
-porte **à la demande**, par crate Rust dédié, avec Impacket comme
+porte **à la demande**, par module Rust ciblé, avec Impacket comme
 **oracle byte-pour-byte** (cf. les `gen_*_fixture.py` de
 `crates/netraze-dcerpc/tests/`).
 
@@ -43,7 +43,7 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 
 | Couche | Crate | Statut | Notes |
 |---|---|---|---|
-| TCP transport (timeout, IPv4/IPv6) | `std::net` | ✅ | Pas besoin de wrapper — `std::net::TcpStream` suffit |
+| TCP transport (timeout, IPv4/IPv6) | `std::net` + `tokio::net` | ✅ | SMB utilise son transport existant ; LDAP est async avec délais et plafond de PDU |
 | TLS (rustls) | `rustls` | ⚪ | Requis pour LDAPS, RPC over HTTPS, WinRM. Out v1 |
 | ASN.1 / DER / BER | `rasn` + `rasn-ldap` dans `netraze-protocols::ldap` | ✅ | Modèle RFC 4511 maintenu par `rasn-ldap`; façade interne étroite |
 | NTLMSSP (NEGOTIATE/CHALLENGE/AUTHENTICATE + seal/sign) | `netraze-protocols::ntlm` | ✅ | Implémentation LDAP SASL partagée dans le crate protocoles; SMB et DCE/RPC restent inchangés jusqu'à migration validée |
@@ -106,32 +106,39 @@ porte **à la demande**, par crate Rust dédié, avec Impacket comme
 
 ### `netraze-protocols::ldap`
 
-C'est la priorité #1 immédiate — débloquer `enum_users` AD stable et
-préparer le terrain pour Kerberoasting.
+Le socle LDAP est livré dans `netraze-protocols` : port 389, BER borné,
+bind NTLMv2 SASL/SPNEGO avec signature et chiffrement, RootDSE, recherche
+paginée et inventaire AD en lecture seule. Le harness Samba AD séparé
+(`tests/samba-ad/`) valide le chemin authentifié ; le bind anonyme est
+couvert par un serveur factice en boucle locale.
 
 | Module | Statut | Notes |
 |---|---|---|
 | `message` (BER via `rasn-ldap`) | ✅ | RFC 4511 §4.1.1, fixtures Impacket |
-| `bind::simple` (cleartext credentials) | ❌ | Non exposé par l'interface par défaut |
+| Bind simple avec mot de passe en clair | ❌ | Non exposé ; seul le bind anonyme (nom et mot de passe vides) utilise cette forme sur le port 389 |
+| Bind anonyme | 🟡 | BER non protégé après bind ; testé en boucle locale, sans assertion live contre Samba AD |
 | `bind::sasl_gss_spnego` (NTLMSSP wrapped) | ✅ | NTLMv2 mot de passe/hash, MIC, sign-and-seal |
 | `search::request` + `search::result_entry` | ✅ | RFC 4511 §4.5, framing borné |
 | `controls::paged_results` (1.2.840.113556.1.4.319) | ✅ | Cookies itérés avec détection des répétitions |
 | `controls::sd_flags` (security descriptor) | ⚪ | Pour ACL enum (BloodHound-equivalent) |
-| `client::LdapClient` (TCP + bind + search loop) | ✅ | Async, tokio, timeouts et plafond 16 Mio |
+| `client::LdapClient` (TCP + bind + search loop) | ✅ | Async, tokio, délais de 5 s/20 s, plafond 16 Mio, IDs de message corrélés ; referrals retournés sans suivi automatique |
+| `inventory` (RootDSE + sections AD) | ✅ | Utilisateurs, groupes, ordinateurs, OU/conteneurs, topologie, privilèges, SPN et politiques rapportées ; erreurs partielles exposées |
 
-### Modules NetRaze qui consommeront `netraze-protocols::ldap`
+### Collecteurs LDAP et usages suivants
 
 | Use case | Statut | Notes |
 |---|---|---|
 | `enum_users_ldap` (≈ `GetADUsers.py`) | ✅ | Filtre `(sAMAccountType=805306368)`, attrs `sAMAccountName, userAccountControl, adminCount` |
-| `enum_computers_ldap` (≈ `GetMachineAccounts.py`) | 🔜 | Filtre `(&(sAMAccountType=805306369))` |
-| `enum_groups_ldap` | 🔜 | Filtre `(objectClass=group)` |
-| `find_kerberoastable` | 🔜 | Filtre `(&(samAccountType=805306368)(servicePrincipalName=*))` — alimente `netraze-protocols::kerberos::kerberoast` |
+| Inventaire des ordinateurs | ✅ | Objets ordinateur, OS, SPN et indicateurs de délégation |
+| Inventaire des groupes | ✅ | Groupes, membres et groupes parents ; analyse des appartenances privilégiées |
+| OU, topologie et politique | ✅ | Conteneurs, domaines, trusts, sites, sous-réseaux, GPO et attributs de politique en lecture seule |
+| Comptes de service et SPN | ✅ | Découverte LDAP des principaux et SPN ; pas d'extraction de tickets Kerberos |
+| `find_kerberoastable` / extraction TGS | 🔜 | La découverte SPN est faite ; l'obtention et le traitement des tickets attendent `netraze-protocols::kerberos` |
 | `find_asreproastable` | 🔜 | Filtre `(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304))` — alimente `netraze-protocols::kerberos::asreproast` |
-| `find_unconstrained_delegation` | 🔜 | UAC bit `TRUSTED_FOR_DELEGATION` |
+| Indicateurs de délégation | ✅ | Bits UAC exposés dans l'inventaire utilisateur/ordinateur ; pas encore de module d'exploitation dédié |
 | RootDSE fetch (defaultNamingContext) | ✅ | Préliminaire à toute search |
 
-### Smart `enum_users` orchestration
+### Smart `enum_users` orchestration (livrée)
 
 ```
 enum_users(target, cred):
@@ -235,16 +242,16 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 ## Roadmap d'attaque (ordre opérationnel)
 
 L'ordre **chronologique** dans lequel je recommande d'avancer.
-Les chantiers 1–3 et 8 (file ops SMB2, `exec_rpc`, `browser_rpc`, SMB
-signing) sont **faits** — validés contre le harness Samba (+ live pour
-signing). Reste, chaque ligne débloquant les suivantes :
+Les chantiers 1–4 et 8 (SMB2 file ops, `exec_rpc`, `browser_rpc`, LDAP,
+SMB signing) sont **faits** ; le chantier LDAP est validé contre le
+harness Samba AD local. Reste, chaque ligne débloquant les suivantes :
 
 | # | Chantier | Coût | Débloque |
 |---|---|---|---|
 | ~~1~~ | ~~**Phase D.1** — SMB2 file ops~~ | ✅ fait | write/delete/query_directory/create_directory — live Samba (browser_ops) |
 | ~~2~~ | ~~**Phase D.3** — `exec_rpc` via SCMR~~ | ✅ fait | smbexec complet (create/start/stop/delete) — wire-smoke Samba OK |
 | ~~3~~ | ~~**Phase D.4** — `browser_rpc`~~ | ✅ fait | browser cross-platform + suites browser_ops |
-| 4 | **Module `netraze-protocols::ldap`** — BER + LDAPMessage + bind SASL/NTLMSSP + search + paged_results | 5j | enum_users AD stable, enum_computers, enum_groups, find_kerberoastable |
+| ~~4~~ | ~~**Module `netraze-protocols::ldap`** — BER, bind SASL/NTLMSSP, recherche paginée et inventaire AD~~ | ✅ fait | Utilisateurs, groupes, ordinateurs, OU, topologie, privilèges, SPN et politiques rapportées |
 | 5 | **Module `netraze-protocols::kerberos`** — ASN.1 Kerberos + AS-REQ/REP + TGS-REQ/REP + RC4/AES decrypt | 8j | AS-REProast + Kerberoast |
 | 6 | `dcerpc.lsarpc` — OpenPolicy2 + LookupSids/Names | 3j | Account naming dans LSA dump |
 | 7 | `dcerpc.drsuapi` — DRSBind + DRSGetNCChanges | 10j | **DCSync** = NTDS.dit complet sans toucher disque |
@@ -252,9 +259,8 @@ signing). Reste, chaque ligne débloquant les suivantes :
 | 9 | `netraze-protocols::{dcom, wmi}` | 15j | wmiexec, dcomexec |
 | 10 | Coerced auth modules (PetitPotam/PrinterBug) | 5j | Relay attacks → ADCS abuse |
 
-**Total ~46j restants** pour un NetRaze qui couvre les use
-cases pentest AD modernes essentiels. Comparé au "porter tout Impacket"
-qui prendrait ≥2 ans pour 80% de code mort.
+Les estimations précédentes ne sont plus fiables depuis la livraison du
+socle LDAP ; les tâches restantes seront chiffrées séparément.
 
 ---
 

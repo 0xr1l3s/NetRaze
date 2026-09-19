@@ -32,6 +32,8 @@ what those phases mean.
   - `netraze_protocols::ldap`
   - `netraze_protocols::winrm`
   - `netraze_protocols::ssh`
+- Shipped: SMB and read-only LDAP/NTLM inventory, with separate local Samba
+  and Samba AD integration harnesses. WinRM and SSH remain scaffolds.
 - Wire a real SQLite backend into `netraze-storage`.
 
 ## Phase 3 — Plugin API, exports, module parity
@@ -42,7 +44,8 @@ what those phases mean.
 
 ## Phase 4 — Integration and operator-facing surface
 
-- Per-protocol integration test suites.
+- Per-protocol integration test suites (SMB and LDAP harnesses shipped;
+  other protocols remain to be covered).
 - Network fixtures and regression harnesses.
 - TUI or machine-friendly API.
 
