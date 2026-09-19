@@ -4,12 +4,10 @@ use crate::state::AppState;
 use crate::workflow::{WorkflowDocument, WorkflowViewer};
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
-    let mut credentials = state.credentials.clone();
-    if let Ok(Some(inline)) = state.credential_config.as_record() {
-        // The scan panel's credential stays in memory for follow-up node
-        // actions, while WorkspaceSave continues to persist only Manager entries.
-        credentials.insert(0, inline);
-    }
+    // Session credentials take priority when an identity was rescanned with a
+    // new secret; only Credential Manager entries are persisted on disk.
+    let mut credentials = state.session_credentials.clone();
+    credentials.extend(state.credentials.iter().cloned());
     let mut viewer = WorkflowViewer::new(credentials);
     let style = WorkflowDocument::snarl_style();
     let response = SnarlWidget::new()

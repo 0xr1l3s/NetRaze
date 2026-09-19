@@ -208,6 +208,7 @@ fn show_default_config(
             "LDAP" => {
                 let credential = state.credential_config.as_record().ok().flatten();
                 if let Some(credential) = credential {
+                    state.remember_scan_credential(credential.clone());
                     runtime.spawn_ldap_scan(
                         targets,
                         credential,
@@ -222,6 +223,9 @@ fn show_default_config(
             }
             "SMB" => {
                 let record = state.credential_config.as_record().ok().flatten();
+                if let Some(credential) = &record {
+                    state.remember_scan_credential(credential.clone());
+                }
                 let credential_label = record
                     .as_ref()
                     .map(crate::state::cred_label)
