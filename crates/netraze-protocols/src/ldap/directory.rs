@@ -2,9 +2,11 @@
 
 use netraze_core::{
     DirectoryComputer, DirectoryContainer, DirectoryDomain, DirectoryGroup, DirectoryInventory,
-    DirectorySection, DirectoryServerInfo, DirectorySite, DirectorySubnet, DirectoryTopology,
-    DirectoryTrust, DirectoryUser, GpoLink, GroupPolicy,
+    DirectoryPrincipalKind, DirectorySection, DirectorySecuritySettings, DirectoryServerInfo,
+    DirectorySite, DirectorySubnet, DirectoryTopology, DirectoryTrust, DirectoryUser, GpoLink,
+    GroupPolicy, PrivilegedPrincipal, ServicePrincipal,
 };
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::{LdapClient, LdapEntry, SearchOutcome};
 
@@ -23,10 +25,14 @@ pub(super) async fn collect(
 ) -> DirectoryInventory {
     let base = server.default_naming_context.clone();
     let users = collect_users(client, &base).await;
-    let groups = collect_groups(client, &base).await;
+    let mut groups = collect_groups(client, &base).await;
     let computers = collect_computers(client, &base).await;
+    augment_group_members(&mut groups.items, &users.items, &computers.items);
     let organization = collect_organization(client, &base).await;
     let topology = collect_topology(client, &server).await;
+    let privileged = analyze_privileged(&users, &groups, &computers);
+    let services = collect_services(client, &base, &users.items, &computers.items).await;
+    let security = collect_security(client, &server).await;
     DirectoryInventory {
         server,
         users,
@@ -34,8 +40,410 @@ pub(super) async fn collect(
         computers,
         organization,
         topology,
-        ..DirectoryInventory::default()
+        privileged,
+        services,
+        security,
     }
+}
+
+fn augment_group_members(
+    groups: &mut [DirectoryGroup],
+    users: &[DirectoryUser],
+    computers: &[DirectoryComputer],
+) {
+    let group_dns = groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (group.dn.to_ascii_lowercase(), index))
+        .collect::<HashMap<_, _>>();
+    let mut reverse = Vec::new();
+    for user in users {
+        reverse.extend(
+            user.member_of
+                .iter()
+                .map(|group| (group.to_ascii_lowercase(), user.dn.clone())),
+        );
+    }
+    for computer in computers {
+        reverse.extend(
+            computer
+                .member_of
+                .iter()
+                .map(|group| (group.to_ascii_lowercase(), computer.dn.clone())),
+        );
+    }
+    for group in groups.iter() {
+        reverse.extend(
+            group
+                .member_of
+                .iter()
+                .map(|parent| (parent.to_ascii_lowercase(), group.dn.clone())),
+        );
+    }
+    for (group_dn, member_dn) in reverse {
+        if let Some(index) = group_dns.get(&group_dn) {
+            groups[*index].members.push(member_dn);
+        }
+    }
+    for group in groups {
+        group
+            .members
+            .sort_by(|left, right| compare_names(left, right));
+        group
+            .members
+            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    }
+}
+
+fn analyze_privileged(
+    users: &DirectorySection<DirectoryUser>,
+    groups: &DirectorySection<DirectoryGroup>,
+    computers: &DirectorySection<DirectoryComputer>,
+) -> DirectorySection<PrivilegedPrincipal> {
+    let group_by_dn = groups
+        .items
+        .iter()
+        .map(|group| (group.dn.to_ascii_lowercase(), group))
+        .collect::<HashMap<_, _>>();
+    let privileged_groups = groups
+        .items
+        .iter()
+        .filter(|group| {
+            group.admin_count || group.object_sid.as_deref().is_some_and(privileged_sid)
+        })
+        .map(|group| group.dn.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut principals = Vec::new();
+
+    for group in &groups.items {
+        let mut reasons = BTreeSet::new();
+        if group.admin_count {
+            reasons.insert("adminCount=1 (AdminSDHolder-protected)".to_owned());
+        }
+        if let Some(sid) = group.object_sid.as_deref()
+            && privileged_sid(sid)
+        {
+            reasons.insert(format!("well-known privileged group SID {sid}"));
+        }
+        reasons.extend(nested_privilege_reasons(
+            &group.member_of,
+            &group_by_dn,
+            &privileged_groups,
+        ));
+        if !reasons.is_empty() {
+            principals.push(PrivilegedPrincipal {
+                dn: group.dn.clone(),
+                name: group.name.clone(),
+                kind: DirectoryPrincipalKind::Group,
+                reasons: reasons.into_iter().collect(),
+                member_of: group.member_of.clone(),
+            });
+        }
+    }
+
+    for user in &users.items {
+        let mut reasons = BTreeSet::new();
+        if user.admin_count {
+            reasons.insert("adminCount=1 (AdminSDHolder-protected)".to_owned());
+        }
+        reasons.extend(nested_privilege_reasons(
+            &user.member_of,
+            &group_by_dn,
+            &privileged_groups,
+        ));
+        if let Some(reason) = primary_group_reason(
+            user.object_sid.as_deref(),
+            user.primary_group_id,
+            &groups.items,
+        ) {
+            reasons.insert(reason);
+        }
+        if !reasons.is_empty() {
+            principals.push(PrivilegedPrincipal {
+                dn: user.dn.clone(),
+                name: user.name.clone(),
+                kind: DirectoryPrincipalKind::User,
+                reasons: reasons.into_iter().collect(),
+                member_of: user.member_of.clone(),
+            });
+        }
+    }
+
+    for computer in &computers.items {
+        let reasons =
+            nested_privilege_reasons(&computer.member_of, &group_by_dn, &privileged_groups);
+        if !reasons.is_empty() {
+            principals.push(PrivilegedPrincipal {
+                dn: computer.dn.clone(),
+                name: computer.name.clone(),
+                kind: DirectoryPrincipalKind::Computer,
+                reasons,
+                member_of: computer.member_of.clone(),
+            });
+        }
+    }
+
+    principals.sort_by(|left, right| compare_names(&left.name, &right.name));
+    let errors = [&users.error, &groups.error, &computers.error]
+        .into_iter()
+        .filter_map(|error| error.as_deref())
+        .collect::<Vec<_>>();
+    DirectorySection {
+        items: principals,
+        referrals: Vec::new(),
+        error: (!errors.is_empty()).then(|| {
+            format!(
+                "privilege analysis is partial because prerequisite inventory failed: {}",
+                errors.join("; ")
+            )
+        }),
+    }
+}
+
+fn nested_privilege_reasons(
+    initial_groups: &[String],
+    group_by_dn: &HashMap<String, &DirectoryGroup>,
+    privileged_groups: &HashSet<String>,
+) -> Vec<String> {
+    let mut queue = initial_groups.iter().cloned().collect::<VecDeque<_>>();
+    let mut visited = HashSet::new();
+    let mut reasons = BTreeSet::new();
+    while let Some(group_dn) = queue.pop_front() {
+        let key = group_dn.to_ascii_lowercase();
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        if privileged_groups.contains(&key) {
+            let group_name = group_by_dn
+                .get(&key)
+                .map_or(group_dn.as_str(), |group| group.name.as_str());
+            reasons.insert(format!("direct or nested member of {group_name}"));
+        }
+        if let Some(group) = group_by_dn.get(&key) {
+            queue.extend(group.member_of.iter().cloned());
+        }
+    }
+    reasons.into_iter().collect()
+}
+
+fn primary_group_reason(
+    object_sid: Option<&str>,
+    primary_group_id: Option<u32>,
+    groups: &[DirectoryGroup],
+) -> Option<String> {
+    let object_sid = object_sid?;
+    let primary_group_id = primary_group_id?;
+    let domain_sid = object_sid.rsplit_once('-')?.0;
+    let primary_sid = format!("{domain_sid}-{primary_group_id}");
+    let group = groups.iter().find(|group| {
+        group
+            .object_sid
+            .as_deref()
+            .is_some_and(|sid| sid.eq_ignore_ascii_case(&primary_sid))
+    })?;
+    privileged_sid(&primary_sid).then(|| format!("primary group is {}", group.name))
+}
+
+fn privileged_sid(sid: &str) -> bool {
+    const BUILTIN: [&str; 6] = [
+        "S-1-5-32-544",
+        "S-1-5-32-548",
+        "S-1-5-32-549",
+        "S-1-5-32-550",
+        "S-1-5-32-551",
+        "S-1-5-32-552",
+    ];
+    BUILTIN
+        .iter()
+        .any(|candidate| sid.eq_ignore_ascii_case(candidate))
+        || sid
+            .rsplit_once('-')
+            .and_then(|(_, rid)| rid.parse::<u32>().ok())
+            .is_some_and(|rid| matches!(rid, 512 | 518 | 519 | 520))
+}
+
+async fn collect_services(
+    client: &mut LdapClient,
+    base: &str,
+    users: &[DirectoryUser],
+    computers: &[DirectoryComputer],
+) -> DirectorySection<ServicePrincipal> {
+    let mut items = users
+        .iter()
+        .filter(|user| !user.service_principal_names.is_empty())
+        .map(|user| ServicePrincipal {
+            dn: user.dn.clone(),
+            name: user.name.clone(),
+            kind: DirectoryPrincipalKind::User,
+            dns_host_name: None,
+            service_principal_names: user.service_principal_names.clone(),
+            supported_encryption_types: user.supported_encryption_types,
+        })
+        .chain(
+            computers
+                .iter()
+                .filter(|computer| !computer.service_principal_names.is_empty())
+                .map(|computer| ServicePrincipal {
+                    dn: computer.dn.clone(),
+                    name: computer.name.clone(),
+                    kind: DirectoryPrincipalKind::Computer,
+                    dns_host_name: computer.dns_host_name.clone(),
+                    service_principal_names: computer.service_principal_names.clone(),
+                    supported_encryption_types: computer.supported_encryption_types,
+                }),
+        )
+        .collect::<Vec<_>>();
+    let result = client
+        .search(
+            base,
+            "(|(objectClass=msDS-ManagedServiceAccount)(objectClass=msDS-GroupManagedServiceAccount))",
+            &[
+                "objectClass",
+                "sAMAccountName",
+                "dNSHostName",
+                "servicePrincipalName",
+                "msDS-SupportedEncryptionTypes",
+            ],
+        )
+        .await;
+    let (referrals, error) = match result {
+        Ok(outcome) => {
+            items.extend(outcome.entries.iter().filter_map(service_from_entry));
+            (outcome.referrals, None)
+        }
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    items.sort_by(|left, right| compare_names(&left.name, &right.name));
+    items.dedup_by(|left, right| left.dn.eq_ignore_ascii_case(&right.dn));
+    DirectorySection {
+        items,
+        referrals,
+        error,
+    }
+}
+
+fn service_from_entry(entry: &LdapEntry) -> Option<ServicePrincipal> {
+    Some(ServicePrincipal {
+        dn: entry.dn.clone(),
+        name: text(entry, "sAMAccountName")?,
+        kind: DirectoryPrincipalKind::ManagedServiceAccount,
+        dns_host_name: text(entry, "dNSHostName"),
+        service_principal_names: texts(entry, "servicePrincipalName"),
+        supported_encryption_types: number(entry, "msDS-SupportedEncryptionTypes"),
+    })
+}
+
+async fn collect_security(
+    client: &mut LdapClient,
+    server: &DirectoryServerInfo,
+) -> DirectorySection<DirectorySecuritySettings> {
+    let mut settings = DirectorySecuritySettings {
+        session_signing: true,
+        session_sealing: true,
+        ..DirectorySecuritySettings::default()
+    };
+    let mut referrals = Vec::new();
+    let mut errors = Vec::new();
+    match client
+        .search_base(
+            &server.default_naming_context,
+            "(objectClass=domainDNS)",
+            &[
+                "minPwdLength",
+                "pwdHistoryLength",
+                "minPwdAge",
+                "maxPwdAge",
+                "pwdProperties",
+                "lockoutThreshold",
+                "lockoutDuration",
+                "lockOutObservationWindow",
+                "ms-DS-MachineAccountQuota",
+                "msDS-Behavior-Version",
+            ],
+        )
+        .await
+    {
+        Ok(outcome) => {
+            referrals.extend(outcome.referrals);
+            if let Some(entry) = outcome.entries.first() {
+                settings.minimum_password_length = number(entry, "minPwdLength");
+                settings.password_history_length = number(entry, "pwdHistoryLength");
+                settings.minimum_password_age_100ns = signed_i64(entry, "minPwdAge");
+                settings.maximum_password_age_100ns = signed_i64(entry, "maxPwdAge");
+                settings.password_properties = number(entry, "pwdProperties");
+                settings.lockout_threshold = number(entry, "lockoutThreshold");
+                settings.lockout_duration_100ns = signed_i64(entry, "lockoutDuration");
+                settings.lockout_observation_window_100ns =
+                    signed_i64(entry, "lockOutObservationWindow");
+                settings.machine_account_quota = number(entry, "ms-DS-MachineAccountQuota");
+                settings.domain_behavior_version = number(entry, "msDS-Behavior-Version");
+            } else {
+                errors.push("domain policy search returned no entry".to_owned());
+            }
+        }
+        Err(error) => errors.push(error.to_string()),
+    }
+
+    let policy_dn = query_policy_dn(client, server).await;
+    if let Some(policy_dn) = policy_dn {
+        match client
+            .search_base(
+                &policy_dn,
+                "(objectClass=queryPolicy)",
+                &["lDAPAdminLimits"],
+            )
+            .await
+        {
+            Ok(outcome) => {
+                referrals.extend(outcome.referrals);
+                if let Some(entry) = outcome.entries.first() {
+                    settings.ldap_admin_limits = parse_admin_limits(entry);
+                }
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    referrals.sort();
+    referrals.dedup();
+    DirectorySection {
+        items: vec![settings],
+        referrals,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+}
+
+async fn query_policy_dn(client: &mut LdapClient, server: &DirectoryServerInfo) -> Option<String> {
+    if let Some(service_name) = &server.service_name
+        && let Ok(outcome) = client
+            .search_base(
+                service_name,
+                "(objectClass=nTDSDSA)",
+                &["queryPolicyObject"],
+            )
+            .await
+        && let Some(policy) = outcome
+            .entries
+            .first()
+            .and_then(|entry| text(entry, "queryPolicyObject"))
+    {
+        return Some(policy);
+    }
+    server.configuration_naming_context.as_ref().map(|configuration| {
+        format!(
+            "CN=Default Query Policy,CN=Query-Policies,CN=Directory Service,CN=Windows NT,CN=Services,{configuration}"
+        )
+    })
+}
+
+fn parse_admin_limits(entry: &LdapEntry) -> BTreeMap<String, String> {
+    texts(entry, "lDAPAdminLimits")
+        .into_iter()
+        .filter_map(|value| {
+            let (name, value) = value.split_once('=')?;
+            Some((name.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect()
 }
 
 async fn collect_users(client: &mut LdapClient, base: &str) -> DirectorySection<DirectoryUser> {
@@ -520,6 +928,10 @@ fn signed_number(entry: &LdapEntry, attribute: &str) -> Option<i32> {
     entry.first_utf8(attribute)?.parse().ok()
 }
 
+fn signed_i64(entry: &LdapEntry, attribute: &str) -> Option<i64> {
+    entry.first_utf8(attribute)?.parse().ok()
+}
+
 fn sid(entry: &LdapEntry, attribute: &str) -> Option<String> {
     parse_sid(entry.values(attribute)?.first()?)
 }
@@ -659,5 +1071,57 @@ mod tests {
         assert!(user.disabled);
         assert!(user.password_never_expires);
         assert_eq!(user.service_principal_names, ["HTTP/web.example.test"]);
+    }
+
+    #[test]
+    fn privilege_analysis_walks_nested_groups() {
+        let domain_admins = DirectoryGroup {
+            dn: "CN=Domain Admins,DC=example,DC=test".to_owned(),
+            name: "Domain Admins".to_owned(),
+            object_sid: Some("S-1-5-21-1-2-3-512".to_owned()),
+            ..DirectoryGroup::default()
+        };
+        let helpdesk = DirectoryGroup {
+            dn: "CN=Helpdesk,DC=example,DC=test".to_owned(),
+            name: "Helpdesk".to_owned(),
+            member_of: vec![domain_admins.dn.clone()],
+            ..DirectoryGroup::default()
+        };
+        let user = DirectoryUser {
+            dn: "CN=Alice,DC=example,DC=test".to_owned(),
+            name: "alice".to_owned(),
+            member_of: vec![helpdesk.dn.clone()],
+            ..DirectoryUser::default()
+        };
+        let privileged = analyze_privileged(
+            &DirectorySection::success(vec![user], Vec::new()),
+            &DirectorySection::success(vec![domain_admins, helpdesk], Vec::new()),
+            &DirectorySection::default(),
+        );
+        let alice = privileged
+            .items
+            .iter()
+            .find(|principal| principal.name == "alice")
+            .unwrap();
+        assert!(
+            alice
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Domain Admins"))
+        );
+    }
+
+    #[test]
+    fn parses_query_policy_limits_without_guessing_unknown_values() {
+        let entry = LdapEntry {
+            dn: "CN=Default Query Policy".to_owned(),
+            attributes: BTreeMap::from([(
+                "lDAPAdminLimits".to_owned(),
+                vec![b"MaxPageSize=1000".to_vec(), b"MaxValRange=1500".to_vec()],
+            )]),
+        };
+        let limits = parse_admin_limits(&entry);
+        assert_eq!(limits.get("MaxPageSize").map(String::as_str), Some("1000"));
+        assert_eq!(limits.get("MaxValRange").map(String::as_str), Some("1500"));
     }
 }
