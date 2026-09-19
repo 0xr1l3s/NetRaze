@@ -1,0 +1,94 @@
+# Samba integration-test harness for NetRaze.
+#
+# Spins up a pinned Samba server on 127.0.0.1:1445 (port 445 on the host is
+# usually taken by the OS SMB client). Every doc that says
+# `docker compose -f tests/samba/docker-compose.yml ...` means this file.
+#
+# The image is env-var driven: its entrypoint generates /etc/samba/smb.conf
+# from SAMBA_* environment variables on first boot, so a bind-mounted
+# smb.conf would be overwritten. The env vars below therefore MIRROR
+# tests/samba/smb.conf — that file is the human-readable pinned reference.
+# Change both together.
+#
+# Run:
+#   docker compose -f tests/samba/docker-compose.yml up -d --wait
+#   cargo test -p netraze-protocols --test samba_integration -- --ignored --test-threads=1
+#   docker compose -f tests/samba/docker-compose.yml down -v
+
+services:
+  samba:
+    image: ghcr.io/servercontainers/samba:smbd-only-latest
+    container_name: netraze-samba
+    ports:
+      # High port on loopback only: the host OS SMB client owns 445, and the
+      # server must not be reachable from outside the dev machine.
+      - "127.0.0.1:1445:445"
+    environment:
+      # ── Account ────────────────────────────────────────────────────────
+      # Test-only credentials, published openly in tests/samba/README.md.
+      ACCOUNT_alice: wonderland
+      UID_alice: "1000"
+
+      # ── Global settings (mirror of smb.conf [global]) ──────────────────
+      SAMBA_CONF_WORKGROUP: NETRAZE
+      SAMBA_CONF_SERVER_STRING: NetRaze Test Samba
+      # `Bad Password` globally — wrong passwords map onto the guest
+      # account (matching Windows boxes with the guest account enabled).
+      # The bad-password rejection test now asserts the *GUEST-downgrade
+      # rejection* instead of a raw LOGON_FAILURE, and the guest-access
+      # suite (anonymous_samba) needs this mapping to exercise
+      # `Smb2Session::connect_guest` positively.
+      SAMBA_CONF_MAP_TO_GUEST: "Bad Password"
+      # `;`-separated lines appended to [global] by the image entrypoint.
+      # - SMB2/SMB3 only: we don't test SMB1.
+      # - ntlmv2-only: blocks LM/NTLMv1 so a bug can't "pass" by negotiating
+      #   a weaker auth variant.
+      # - tdbsam: overrides the image template's `passdb backend = smbpasswd`
+      #   to match the documented pdbedit / samba-passdb-volume workflow.
+      SAMBA_GLOBAL_STANZA: >-
+        netbios name = NETRAZE-TEST;
+        server min protocol = SMB2;
+        server max protocol = SMB3;
+        ntlm auth = ntlmv2-only;
+        passdb backend = tdbsam;
+        security = user
+
+      # ── Share inventory (mirror of smb.conf; names + comments are
+      #    load-bearing — Rust tests assert on them) ──────────────────────
+      SAMBA_VOLUME_CONFIG_private: "[private]; comment = Alice's private share; path = /shares/private; browseable = yes; read only = no; valid users = alice; create mask = 0600; directory mask = 0700"
+      SAMBA_VOLUME_CONFIG_public: "[public]; comment = Public read-only; path = /shares/public; browseable = yes; read only = yes; guest ok = yes"
+      SAMBA_VOLUME_CONFIG_admin: "[ADMIN$]; comment = Remote Admin; path = /shares/admin; browseable = yes; read only = no; valid users = alice; admin users = alice"
+
+      # ── Unused daemons off ─────────────────────────────────────────────
+      # The tests speak raw TCP to 445 — zeroconf, WS-Discovery and NetBIOS
+      # are dead weight. Disabling them also keeps the image's built-in
+      # process-count healthcheck expectations correct.
+      AVAHI_DISABLE: "1"
+      WSDD2_DISABLE: "1"
+      NETBIOS_DISABLE: "1"
+
+    # Share data lives on tmpfs: empty, deterministic contents on every
+    # `up`, and no host directories to pollute or accidentally commit.
+    tmpfs:
+      - /shares/private
+      - /shares/public
+      - /shares/admin
+
+    # Persistent account database (tdbsam). `docker compose down -v` wipes
+    # it — required after changing any ACCOUNT_* or share config so the
+    # entrypoint re-provisions from scratch.
+    volumes:
+      - samba-passdb:/var/lib/samba
+
+    # Override the image's process-count healthcheck with a real protocol
+    # liveness probe, so `up --wait` only unblocks once smbd answers —
+    # the tests then can't race the daemon's startup.
+    healthcheck:
+      test: ["CMD", "smbcontrol", "smbd", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  samba-passdb:

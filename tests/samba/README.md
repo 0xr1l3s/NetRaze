@@ -20,7 +20,7 @@ in CI.
 
 The container provisions a single user, `alice` / `wonderland`, in the
 `NETRAZE` workgroup. Wrong passwords map onto the guest account
-(`map to guest = Bad Password` — mirroring Windows boxes with the guest
+(`map to guest = Bad Password` in `smb.conf` — mirroring Windows boxes with the guest
 account enabled): the client's strict path rejects the resulting
 GUEST-flagged session, which is how the bad-password tests assert failure.
 These credentials are test-only and published here
