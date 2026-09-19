@@ -36,6 +36,11 @@ pub enum RuntimeEvent {
     ScanStarted {
         target_label: String,
     },
+    /// A host whose SMB port passed the pre-scan. This arrives before the
+    /// slower authentication and RPC enumeration stages complete.
+    SmbHostDiscovered {
+        target: String,
+    },
     ScanFinished,
     LoginResult {
         ip: String,
@@ -201,6 +206,7 @@ impl RuntimeServices {
                         scanned += 1;
                         if open {
                             live_hosts.push(ip.clone());
+                            let _ = tx.send(RuntimeEvent::SmbHostDiscovered { target: ip.clone() });
                             let _ = tx.send(RuntimeEvent::Log {
                                 level: LogLevel::Success,
                                 message: format!("  ✓ {} port 445 ouvert", ip),
@@ -664,9 +670,8 @@ impl RuntimeServices {
         let cred_label = crate::state::cred_label(&cred);
         self.runtime.spawn(async move {
             let mut client = SmbClient::new(&ip_clone).with_credential(smb_cred);
-            let result = client.connect().await;
-            let shares = if result.is_ok() {
-                match client.enum_shares_with_access().await {
+            let shares = match client.connect().await {
+                Ok(()) => match client.enum_shares_with_access().await {
                     Ok(shares) => {
                         let formatted: Vec<String> = shares
                             .iter()
@@ -694,13 +699,14 @@ impl RuntimeServices {
                         client.disconnect().await;
                         Vec::new()
                     }
+                },
+                Err(error) => {
+                    let _ = tx.send(RuntimeEvent::Log {
+                        level: LogLevel::Error,
+                        message: format!("{ip_clone}: connexion échouée pour enum shares: {error}"),
+                    });
+                    Vec::new()
                 }
-            } else {
-                let _ = tx.send(RuntimeEvent::Log {
-                    level: LogLevel::Error,
-                    message: format!("{ip_clone}: connexion échouée pour enum shares"),
-                });
-                Vec::new()
             };
 
             let _ = tx.send(RuntimeEvent::ShareEnumResult {

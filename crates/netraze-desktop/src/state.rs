@@ -403,6 +403,31 @@ impl AppState {
                         });
                     }
                 }
+                RuntimeEvent::SmbHostDiscovered { target } => {
+                    let discovered = HostRecord {
+                        ip: target.clone(),
+                        hostname: String::new(),
+                        status: HostStatus::Unknown,
+                        os_info: String::new(),
+                        domain: String::new(),
+                        signing: None,
+                        smbv1: None,
+                        shares: Vec::new(),
+                        admin: false,
+                        users: Vec::new(),
+                    };
+                    if let Some(subnet) = self.networks.last_mut() {
+                        if !subnet.hosts.iter().any(|host| host.ip == target) {
+                            subnet.hosts.push(discovered);
+                        }
+                    } else {
+                        self.networks.push(NetworkSubnet {
+                            cidr: "Scan Results".to_owned(),
+                            hosts: vec![discovered],
+                            expanded: true,
+                        });
+                    }
+                }
                 RuntimeEvent::SmbResult(result) => {
                     let hostname = result.hostname.clone().unwrap_or_default();
                     let status = if result.error.is_some() {
@@ -533,11 +558,25 @@ impl AppState {
                             }
                         }
                     }
-                    // Check if a SharesNode for this host already exists
-                    let already_exists = self.workflow.snarl.nodes().any(|n| {
-                        matches!(n, WorkflowNode::SharesNode { host_ip: existing, .. } if *existing == ip)
-                    });
-                    if !already_exists {
+                    let mut updated = false;
+                    for node in self.workflow.snarl.nodes_mut() {
+                        if let WorkflowNode::SharesNode {
+                            host_ip,
+                            hostname: node_hostname,
+                            shares: node_shares,
+                            cred_label: node_cred_label,
+                        } = node
+                        {
+                            if *host_ip == ip {
+                                *node_hostname = hostname.clone();
+                                *node_shares = shares.clone();
+                                *node_cred_label = cred_label.clone();
+                                updated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !updated {
                         let count = self.workflow.snarl.nodes().count() as f32;
                         let pos = egui::Pos2::new(
                             40.0 + (count % 4.0) * 280.0,
@@ -678,6 +717,7 @@ impl AppState {
                     cred_label,
                     result,
                 } => {
+                    let host_target = netraze_protocols::targets::endpoint_host(&endpoint);
                     let hostname = result
                         .as_ref()
                         .as_ref()
@@ -704,7 +744,7 @@ impl AppState {
                         })
                         .unwrap_or_default();
                     let host = HostRecord {
-                        ip: endpoint.clone(),
+                        ip: host_target.clone(),
                         hostname: hostname.clone(),
                         status: if result.is_ok() {
                             HostStatus::Accessible
@@ -712,7 +752,7 @@ impl AppState {
                             HostStatus::Unknown
                         },
                         os_info: "Active Directory (LDAP)".to_owned(),
-                        domain,
+                        domain: domain.clone(),
                         signing: None,
                         smbv1: None,
                         shares: Vec::new(),
@@ -720,8 +760,10 @@ impl AppState {
                         users: user_names.clone(),
                     };
                     if let Some(network) = self.networks.last_mut() {
-                        if let Some(existing) =
-                            network.hosts.iter_mut().find(|item| item.ip == endpoint)
+                        if let Some(existing) = network
+                            .hosts
+                            .iter_mut()
+                            .find(|item| item.ip == host_target || item.ip == endpoint)
                         {
                             *existing = host;
                         } else {
@@ -734,7 +776,11 @@ impl AppState {
                         .snarl
                         .node_ids()
                         .find_map(|(id, node)| match node {
-                            WorkflowNode::HostNode { ip, .. } if *ip == endpoint => Some(id),
+                            WorkflowNode::HostNode { ip, .. }
+                                if *ip == host_target || *ip == endpoint =>
+                            {
+                                Some(id)
+                            }
                             _ => None,
                         })
                         .unwrap_or_else(|| {
@@ -745,7 +791,7 @@ impl AppState {
                                     40.0 + (count / 4.0).floor() * 200.0,
                                 ),
                                 WorkflowNode::HostNode {
-                                    ip: endpoint.clone(),
+                                    ip: host_target.clone(),
                                     hostname: hostname.clone(),
                                     os_info: "Active Directory (LDAP)".to_owned(),
                                     domain: result
@@ -760,11 +806,29 @@ impl AppState {
                                     smbv1: None,
                                     shares: Vec::new(),
                                     admin: false,
-                                    users: user_names,
+                                    users: user_names.clone(),
                                     logged_in_cred: Some(cred_label.clone()),
                                 },
                             )
                         });
+
+                    if let Some(WorkflowNode::HostNode {
+                        ip,
+                        hostname: node_hostname,
+                        os_info,
+                        domain: node_domain,
+                        users,
+                        logged_in_cred,
+                        ..
+                    }) = self.workflow.snarl.get_node_mut(host_id)
+                    {
+                        *ip = host_target;
+                        *node_hostname = hostname.clone();
+                        *os_info = "Active Directory (LDAP)".to_owned();
+                        *node_domain = domain;
+                        *users = user_names;
+                        *logged_in_cred = Some(cred_label.clone());
+                    }
 
                     if let Some((directory_id, node)) = self
                         .workflow
@@ -1081,6 +1145,48 @@ impl AppState {
         self.target_config.target = save.target_config.target;
         self.target_config.protocol = save.target_config.protocol;
 
+        // Workspaces created before host/endpoint separation stored an LDAP
+        // endpoint (for example `dc:389`) as the HostNode identity. Migrate
+        // only values backed by a DirectoryNode so legitimate SMB endpoints
+        // on custom ports remain untouched.
+        let endpoint_migrations = self
+            .workflow
+            .snarl
+            .nodes()
+            .filter_map(|node| match node {
+                WorkflowNode::DirectoryNode { endpoint, .. } => {
+                    let host = netraze_protocols::targets::endpoint_host(endpoint);
+                    (host != *endpoint).then(|| (endpoint.clone(), host))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (endpoint, host) in endpoint_migrations {
+            for network in &mut self.networks {
+                for record in &mut network.hosts {
+                    if record.ip == endpoint {
+                        record.ip.clone_from(&host);
+                    }
+                }
+            }
+            for node in self.workflow.snarl.nodes_mut() {
+                match node {
+                    WorkflowNode::HostNode { ip, .. } if *ip == endpoint => {
+                        ip.clone_from(&host);
+                    }
+                    WorkflowNode::SharesNode { host_ip, .. }
+                    | WorkflowNode::UsersNode { host_ip, .. }
+                    | WorkflowNode::DumpNode { host_ip, .. }
+                    | WorkflowNode::EnumAvNode { host_ip, .. }
+                        if *host_ip == endpoint =>
+                    {
+                        host_ip.clone_from(&host);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Re-establish SMB sessions and auto-fingerprint hosts missing data
         for node in self.workflow.snarl.nodes() {
             if let crate::workflow::WorkflowNode::HostNode {
@@ -1294,9 +1400,153 @@ mod user_enum_tests {
                 ..
             } if value.users.items.len() == 1
         ));
+        assert!(state.workflow.snarl.nodes().any(|node| matches!(
+            node,
+            WorkflowNode::HostNode {
+                ip,
+                logged_in_cred: Some(label),
+                ..
+            } if ip == "127.0.0.1" && label == "EXAMPLE\\alice"
+        )));
         let serialized = serde_json::to_string(&state.to_save()).unwrap();
         assert!(!serialized.contains("test-only-ldap-secret"));
         assert!(!serialized.contains("[REMOVED_NTLM_HASH]"));
         assert!(!serialized.contains("\"loading\""));
+    }
+
+    #[test]
+    fn smb_pre_scan_discovery_is_counted_before_full_enumeration() {
+        let (mut state, _host_id, tx) = state_with_host();
+        tx.send(RuntimeEvent::ScanStarted {
+            target_label: "10.0.0.0/24".to_owned(),
+        })
+        .unwrap();
+        tx.send(RuntimeEvent::SmbHostDiscovered {
+            target: "10.0.0.42".to_owned(),
+        })
+        .unwrap();
+        state.poll_logs();
+
+        assert_eq!(state.discovered_hosts_count(), 1);
+        assert_eq!(state.networks[0].hosts[0].ip, "10.0.0.42");
+        assert_eq!(state.networks[0].hosts[0].status, HostStatus::Unknown);
+    }
+
+    #[test]
+    fn repeated_share_results_refresh_the_existing_node() {
+        let (mut state, host_id, tx) = state_with_host();
+        for shares in [["IPC$ [SPECIAL] (R)"], ["DATA [DISK] (RW)"]] {
+            tx.send(RuntimeEvent::ShareEnumResult {
+                host_node_id: host_id,
+                ip: "127.0.0.1".to_owned(),
+                hostname: "dc".to_owned(),
+                shares: shares.into_iter().map(str::to_owned).collect(),
+                cred_label: Some("NETRAZE\\alice".to_owned()),
+            })
+            .unwrap();
+            state.poll_logs();
+        }
+
+        let share_nodes = state
+            .workflow
+            .snarl
+            .nodes()
+            .filter_map(|node| match node {
+                WorkflowNode::SharesNode { shares, .. } => Some(shares),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(share_nodes.len(), 1);
+        assert_eq!(share_nodes[0], &["DATA [DISK] (RW)".to_owned()]);
+    }
+
+    #[test]
+    fn saved_ldap_endpoints_migrate_without_changing_custom_smb_ports() {
+        let (mut state, _host_id, _tx) = state_with_host();
+        state.workflow.add_host_node(
+            "dc.example.test:389".to_owned(),
+            "dc".to_owned(),
+            String::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+        );
+        state.workflow.add_host_node(
+            "127.0.0.1:1445".to_owned(),
+            "samba".to_owned(),
+            String::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+        );
+        state.workflow.snarl.insert_node(
+            egui::Pos2::ZERO,
+            WorkflowNode::DirectoryNode {
+                endpoint: "dc.example.test:389".to_owned(),
+                hostname: "dc".to_owned(),
+                inventory: None,
+                error: None,
+                loading: false,
+                cred_label: None,
+            },
+        );
+        state.networks.push(NetworkSubnet {
+            cidr: "test".to_owned(),
+            hosts: ["dc.example.test:389", "127.0.0.1:1445"]
+                .into_iter()
+                .map(|ip| HostRecord {
+                    ip: ip.to_owned(),
+                    hostname: String::new(),
+                    status: HostStatus::Unknown,
+                    os_info: String::new(),
+                    domain: String::new(),
+                    signing: None,
+                    smbv1: None,
+                    shares: Vec::new(),
+                    admin: false,
+                    users: Vec::new(),
+                })
+                .collect(),
+            expanded: true,
+        });
+
+        let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut loaded = AppState::new(rx);
+        loaded.load_from(state.to_save());
+
+        assert!(
+            loaded.networks[0]
+                .hosts
+                .iter()
+                .any(|h| h.ip == "dc.example.test")
+        );
+        assert!(
+            loaded.networks[0]
+                .hosts
+                .iter()
+                .any(|h| h.ip == "127.0.0.1:1445")
+        );
+        assert!(loaded.workflow.snarl.nodes().any(|node| matches!(
+            node,
+            WorkflowNode::HostNode { ip, .. } if ip == "dc.example.test"
+        )));
+        assert!(loaded.workflow.snarl.nodes().any(|node| matches!(
+            node,
+            WorkflowNode::HostNode { ip, .. } if ip == "127.0.0.1:1445"
+        )));
+        assert!(loaded.workflow.snarl.nodes().any(|node| matches!(
+            node,
+            WorkflowNode::DirectoryNode { endpoint, .. } if endpoint == "dc.example.test:389"
+        )));
+        assert!(
+            loaded
+                .pending_fingerprints
+                .contains(&"dc.example.test".to_owned())
+        );
+        assert!(
+            !loaded
+                .pending_fingerprints
+                .contains(&"dc.example.test:389".to_owned())
+        );
     }
 }
