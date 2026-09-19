@@ -21,14 +21,13 @@ pub async fn inventory(
         let _ = client.unbind().await;
         return Err(error);
     }
-    let result = client
-        .root_dse()
-        .await
-        .and_then(|entry| server_info(endpoint, &entry))
-        .map(|server| DirectoryInventory {
-            server,
-            ..DirectoryInventory::default()
-        });
+    let result = match client.root_dse().await {
+        Ok(entry) => match server_info(endpoint, &entry) {
+            Ok(server) => Ok(super::directory::collect(&mut client, server).await),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
     let _ = client.unbind().await;
     result
 }
