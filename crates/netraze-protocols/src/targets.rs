@@ -121,6 +121,31 @@ pub fn with_default_port(target: &str, default_port: u16) -> String {
     format!("{target}:{default_port}")
 }
 
+/// Return the host portion of a protocol endpoint.
+///
+/// This is intentionally separate from [`with_default_port`]: a host is the
+/// protocol-neutral identity stored by the desktop, while an endpoint may
+/// carry an LDAP, SMB, or test-harness port. Bracketed IPv6 literals are
+/// unwrapped, but bare IPv6 literals are left intact.
+pub fn endpoint_host(endpoint: &str) -> String {
+    let endpoint = endpoint.trim();
+    if let Some(bracketed) = endpoint.strip_prefix('[') {
+        if let Some(end) = bracketed.find(']') {
+            return bracketed[..end].to_owned();
+        }
+    }
+
+    if endpoint.matches(':').count() == 1 {
+        if let Some((host, port)) = endpoint.rsplit_once(':') {
+            if !host.is_empty() && port.parse::<u16>().is_ok() {
+                return host.to_owned();
+            }
+        }
+    }
+
+    endpoint.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +200,16 @@ mod tests {
             "[::1]:445",
             "bare IPv6 gets bracketed before the port"
         );
+    }
+
+    #[test]
+    fn endpoint_host_separates_protocol_ports_from_host_identity() {
+        assert_eq!(endpoint_host("10.0.0.5:389"), "10.0.0.5");
+        assert_eq!(endpoint_host("dc01.lan:389"), "dc01.lan");
+        assert_eq!(endpoint_host("[fe80::1]:389"), "fe80::1");
+        assert_eq!(endpoint_host("[fe80::1]"), "fe80::1");
+        assert_eq!(endpoint_host("fe80::1"), "fe80::1");
+        assert_eq!(endpoint_host("10.0.0.5"), "10.0.0.5");
+        assert_eq!(endpoint_host("dc01.lan:not-a-port"), "dc01.lan:not-a-port");
     }
 }
