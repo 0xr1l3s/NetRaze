@@ -71,7 +71,7 @@ pub enum RuntimeEvent {
     DirectoryResult {
         endpoint: String,
         cred_label: String,
-        result: Result<netraze_core::DirectoryInventory, String>,
+        result: Box<Result<netraze_core::DirectoryInventory, String>>,
     },
     DumpResult {
         host_node_id: usize,
@@ -461,7 +461,7 @@ impl RuntimeServices {
                         let _ = tx.send(RuntimeEvent::DirectoryResult {
                             endpoint,
                             cred_label: label.clone(),
-                            result: Err(error.clone()),
+                            result: Box::new(Err(error.clone())),
                         });
                     }
                     let _ = tx.send(RuntimeEvent::ScanFinished);
@@ -521,7 +521,7 @@ impl RuntimeServices {
                             let _ = tx.send(RuntimeEvent::DirectoryResult {
                                 endpoint,
                                 cred_label: label.clone(),
-                                result,
+                                result: Box::new(result),
                             });
                         }
                         Err(error) => {
