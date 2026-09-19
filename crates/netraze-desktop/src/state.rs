@@ -229,6 +229,9 @@ pub struct AppState {
     pub selected_module: String,
     pub dragged_module: Option<String>,
     pub credentials: Vec<CredentialRecord>,
+    /// Inline scan credentials are retained only for this app session so
+    /// workspace actions can reuse them after the scan fields change.
+    pub session_credentials: Vec<CredentialRecord>,
     pub selected_cred: Option<usize>,
     pub new_cred_username: String,
     pub new_cred_domain: String,
@@ -280,6 +283,7 @@ impl AppState {
             selected_module: "SMB".to_owned(),
             dragged_module: None,
             credentials: Vec::new(),
+            session_credentials: Vec::new(),
             selected_cred: None,
             new_cred_username: String::new(),
             new_cred_domain: String::new(),
@@ -1175,6 +1179,21 @@ pub struct TargetConfigSave {
 }
 
 impl AppState {
+    /// Retain the credential used for a scan without adding it to the saved
+    /// Credential Manager list. Reusing the same identity updates its secret.
+    pub fn remember_scan_credential(&mut self, credential: CredentialRecord) {
+        let label = cred_label(&credential);
+        if let Some(existing) = self
+            .session_credentials
+            .iter_mut()
+            .find(|existing| cred_label(existing) == label)
+        {
+            *existing = credential;
+        } else {
+            self.session_credentials.push(credential);
+        }
+    }
+
     /// Create a saveable snapshot from current state.
     pub fn to_save(&self) -> WorkspaceSave {
         WorkspaceSave {
@@ -1194,6 +1213,7 @@ impl AppState {
     pub fn load_from(&mut self, save: WorkspaceSave) {
         self.workflow = save.workflow;
         self.credentials = save.credentials;
+        self.session_credentials.clear();
         self.networks = save.networks;
         self.logs = save.logs;
         self.target_config.target = save.target_config.target;
@@ -1574,6 +1594,10 @@ mod user_enum_tests {
         assert_eq!(credential.username, "alice");
         assert_eq!(cred_label(&credential), "EXAMPLE\\alice");
         assert_eq!(credential.cred_type, CredType::Password);
+        state.remember_scan_credential(credential);
+        state.credential_config.username = "OTHER\\bob".to_owned();
+        assert_eq!(state.session_credentials.len(), 1);
+        assert_eq!(state.session_credentials[0].username, "alice");
 
         let workspace = serde_json::to_string(&state.to_save()).unwrap();
         assert!(!workspace.contains("test-only-inline-secret"));
@@ -1587,6 +1611,11 @@ mod user_enum_tests {
                 .unwrap()
                 .contains(&credential.secret)
         );
+
+        let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut loaded = AppState::new(rx);
+        loaded.load_from(state.to_save());
+        assert!(loaded.session_credentials.is_empty());
     }
 
     #[test]
