@@ -35,6 +35,9 @@ pub struct HostRecord {
     pub shares: Vec<String>,
     pub admin: bool,
     pub users: Vec<String>,
+    /// Credential label only; the secret remains in Credential Manager.
+    #[serde(default)]
+    pub logged_in_cred: Option<String>,
 }
 
 /// A scan result subnet with discovered hosts.
@@ -129,6 +132,45 @@ pub struct CredentialConfig {
     pub password: String,
     pub ntlm_hash: String,
     pub kerberos_ticket: String,
+}
+
+impl CredentialConfig {
+    /// Build a scan-only credential from the fields in the configuration panel.
+    /// The returned record is never added to the persisted credential list.
+    pub fn as_record(&self) -> Result<Option<CredentialRecord>, String> {
+        if !self.kerberos_ticket.trim().is_empty() {
+            return Err(
+                "Kerberos ticket authentication is not available for these scans".to_owned(),
+            );
+        }
+        let entered = self.username.trim();
+        if entered.is_empty() {
+            if self.password.is_empty() && self.ntlm_hash.trim().is_empty() {
+                return Ok(None);
+            }
+            return Err("Enter a username for the supplied password or NT hash".to_owned());
+        }
+        let (domain, username) = entered
+            .split_once('\\')
+            .map_or(("", entered), |(domain, username)| (domain, username));
+        if username.is_empty() {
+            return Err("Enter a username after the domain separator".to_owned());
+        }
+        let (secret, cred_type) = if self.ntlm_hash.trim().is_empty() {
+            (self.password.clone(), CredType::Password)
+        } else {
+            let hash = self.ntlm_hash.trim();
+            netraze_protocols::smb::SmbCredential::with_hash(username, domain, hash)?;
+            (hash.to_owned(), CredType::Hash)
+        };
+        Ok(Some(CredentialRecord {
+            username: username.to_owned(),
+            domain: domain.to_owned(),
+            secret,
+            cred_type,
+            ..anonymous_record()
+        }))
+    }
 }
 
 #[derive(Debug)]
@@ -390,11 +432,13 @@ impl AppState {
                     self.logs.push(LogLine { level, message });
                 }
                 RuntimeEvent::ScanStarted { target_label } => {
-                    // Create/reset the subnet for this scan
-                    if let Some(subnet) = self.networks.iter_mut().find(|n| n.cidr == target_label)
-                    {
+                    // Active scans update the last subnet. Move an existing
+                    // matching subnet there before subsequent events arrive.
+                    if let Some(index) = self.networks.iter().position(|n| n.cidr == target_label) {
+                        let mut subnet = self.networks.remove(index);
                         subnet.hosts.clear();
                         subnet.expanded = true;
+                        self.networks.push(subnet);
                     } else {
                         self.networks.push(NetworkSubnet {
                             cidr: target_label,
@@ -415,6 +459,7 @@ impl AppState {
                         shares: Vec::new(),
                         admin: false,
                         users: Vec::new(),
+                        logged_in_cred: None,
                     };
                     if let Some(subnet) = self.networks.last_mut() {
                         if !subnet.hosts.iter().any(|host| host.ip == target) {
@@ -428,7 +473,10 @@ impl AppState {
                         });
                     }
                 }
-                RuntimeEvent::SmbResult(result) => {
+                RuntimeEvent::SmbResult {
+                    result,
+                    credential_label,
+                } => {
                     let hostname = result.hostname.clone().unwrap_or_default();
                     let status = if result.error.is_some() {
                         HostStatus::Unknown
@@ -476,6 +524,7 @@ impl AppState {
                         shares,
                         admin: result.admin,
                         users,
+                        logged_in_cred: credential_label,
                     };
 
                     // Add to the most recent subnet (created by ScanStarted)
@@ -547,6 +596,7 @@ impl AppState {
                     ip,
                     hostname,
                     shares,
+                    error,
                     cred_label,
                 } => {
                     // Sync shares back to networks
@@ -564,12 +614,14 @@ impl AppState {
                             host_ip,
                             hostname: node_hostname,
                             shares: node_shares,
+                            error: node_error,
                             cred_label: node_cred_label,
                         } = node
                         {
                             if *host_ip == ip {
                                 *node_hostname = hostname.clone();
                                 *node_shares = shares.clone();
+                                *node_error = error.clone();
                                 *node_cred_label = cred_label.clone();
                                 updated = true;
                                 break;
@@ -588,6 +640,7 @@ impl AppState {
                                 host_ip: ip,
                                 hostname,
                                 shares,
+                                error,
                                 cred_label,
                             },
                         );
@@ -758,6 +811,7 @@ impl AppState {
                         shares: Vec::new(),
                         admin: false,
                         users: user_names.clone(),
+                        logged_in_cred: result.is_ok().then(|| cred_label.clone()),
                     };
                     if let Some(network) = self.networks.last_mut() {
                         if let Some(existing) = network
@@ -807,7 +861,7 @@ impl AppState {
                                     shares: Vec::new(),
                                     admin: false,
                                     users: user_names.clone(),
-                                    logged_in_cred: Some(cred_label.clone()),
+                                    logged_in_cred: result.is_ok().then(|| cred_label.clone()),
                                 },
                             )
                         });
@@ -827,7 +881,7 @@ impl AppState {
                         *os_info = "Active Directory (LDAP)".to_owned();
                         *node_domain = domain;
                         *users = user_names;
-                        *logged_in_cred = Some(cred_label.clone());
+                        *logged_in_cred = result.is_ok().then(|| cred_label.clone());
                     }
 
                     if let Some((directory_id, node)) = self
@@ -1253,6 +1307,7 @@ mod user_enum_tests {
             Vec::new(),
             false,
             Vec::new(),
+            None,
         );
         let id = state
             .workflow
@@ -1441,6 +1496,7 @@ mod user_enum_tests {
                 ip: "127.0.0.1".to_owned(),
                 hostname: "dc".to_owned(),
                 shares: shares.into_iter().map(str::to_owned).collect(),
+                error: None,
                 cred_label: Some("NETRAZE\\alice".to_owned()),
             })
             .unwrap();
@@ -1458,6 +1514,97 @@ mod user_enum_tests {
             .collect::<Vec<_>>();
         assert_eq!(share_nodes.len(), 1);
         assert_eq!(share_nodes[0], &["DATA [DISK] (RW)".to_owned()]);
+
+        tx.send(RuntimeEvent::ShareEnumResult {
+            host_node_id: host_id,
+            ip: "127.0.0.1".to_owned(),
+            hostname: "dc".to_owned(),
+            shares: Vec::new(),
+            error: Some("access denied".to_owned()),
+            cred_label: Some("NETRAZE\\alice".to_owned()),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert!(state.workflow.snarl.nodes().any(|node| matches!(
+            node,
+            WorkflowNode::SharesNode { shares, error: Some(error), .. }
+                if shares.is_empty() && error == "access denied"
+        )));
+    }
+
+    #[test]
+    fn successful_smb_scan_carries_saved_credential_label_to_host() {
+        let (mut state, _host_id, tx) = state_with_host();
+        tx.send(RuntimeEvent::ScanStarted {
+            target_label: "10.0.0.42".to_owned(),
+        })
+        .unwrap();
+        tx.send(RuntimeEvent::SmbResult {
+            result: Box::new(netraze_protocols::smb::SmbScanResult {
+                target: "10.0.0.42".to_owned(),
+                hostname: Some("dc".to_owned()),
+                os_info: None,
+                signing: None,
+                smb_version: None,
+                shares: Vec::new(),
+                users: Vec::new(),
+                admin: false,
+                error: None,
+            }),
+            credential_label: Some("EXAMPLE\\alice".to_owned()),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert_eq!(
+            state.networks[0].hosts[0].logged_in_cred.as_deref(),
+            Some("EXAMPLE\\alice")
+        );
+        let serialized = serde_json::to_string(&state.to_save()).unwrap();
+        assert!(serialized.contains("EXAMPLE\\\\alice"));
+        assert!(!serialized.contains("test-only-password"));
+    }
+
+    #[test]
+    fn inline_scan_credentials_are_available_without_workspace_persistence() {
+        let (mut state, _host_id, _tx) = state_with_host();
+        state.credential_config.username = "EXAMPLE\\alice".to_owned();
+        state.credential_config.password = "test-only-inline-secret".to_owned();
+        let credential = state.credential_config.as_record().unwrap().unwrap();
+        assert_eq!(credential.domain, "EXAMPLE");
+        assert_eq!(credential.username, "alice");
+        assert_eq!(cred_label(&credential), "EXAMPLE\\alice");
+        assert_eq!(credential.cred_type, CredType::Password);
+
+        let workspace = serde_json::to_string(&state.to_save()).unwrap();
+        assert!(!workspace.contains("test-only-inline-secret"));
+
+        state.credential_config.ntlm_hash = "[REMOVED_NTLM_HASH]".to_owned();
+        let credential = state.credential_config.as_record().unwrap().unwrap();
+        assert_eq!(credential.cred_type, CredType::Hash);
+        assert_eq!(credential.secret, "[REMOVED_NTLM_HASH]");
+        assert!(
+            !serde_json::to_string(&state.to_save())
+                .unwrap()
+                .contains(&credential.secret)
+        );
+    }
+
+    #[test]
+    fn repeating_a_scan_targets_the_matching_subnet() {
+        let (mut state, _host_id, tx) = state_with_host();
+        for label in ["first", "second", "first"] {
+            tx.send(RuntimeEvent::ScanStarted {
+                target_label: label.to_owned(),
+            })
+            .unwrap();
+        }
+        tx.send(RuntimeEvent::SmbHostDiscovered {
+            target: "10.0.0.42".to_owned(),
+        })
+        .unwrap();
+        state.poll_logs();
+        assert_eq!(state.networks.last().unwrap().cidr, "first");
+        assert_eq!(state.networks.last().unwrap().hosts[0].ip, "10.0.0.42");
     }
 
     #[test]
@@ -1470,6 +1617,7 @@ mod user_enum_tests {
             Vec::new(),
             false,
             Vec::new(),
+            None,
         );
         state.workflow.add_host_node(
             "127.0.0.1:1445".to_owned(),
@@ -1478,6 +1626,7 @@ mod user_enum_tests {
             Vec::new(),
             false,
             Vec::new(),
+            None,
         );
         state.workflow.snarl.insert_node(
             egui::Pos2::ZERO,
@@ -1505,6 +1654,7 @@ mod user_enum_tests {
                     shares: Vec::new(),
                     admin: false,
                     users: Vec::new(),
+                    logged_in_cred: None,
                 })
                 .collect(),
             expanded: true,

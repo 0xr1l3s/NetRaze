@@ -66,6 +66,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         let shares = host.shares.clone();
                         let admin_flag = host.admin;
                         let users = host.users.clone();
+                        let logged_in_cred = host.logged_in_cred.clone();
                         let status = host.status.clone();
 
                         let (status_icon, color) = match status {
@@ -109,6 +110,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         let ctx_os = os_info.clone();
                         let ctx_shares = shares.clone();
                         let ctx_users = users.clone();
+                        let ctx_cred_label = logged_in_cred.clone();
                         resp.context_menu(|ui| {
                             ui.label(
                                 egui::RichText::new(&ctx_ip)
@@ -125,6 +127,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                     ctx_shares.clone(),
                                     admin_flag,
                                     ctx_users.clone(),
+                                    ctx_cred_label.clone(),
                                 );
                                 if added {
                                     state.pending_fingerprints.push(ctx_ip.clone());

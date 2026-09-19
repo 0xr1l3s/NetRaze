@@ -23,6 +23,7 @@ struct FlatHost {
     users_count: usize,
     admin: bool,
     status: HostStatus,
+    logged_in_cred: Option<String>,
 }
 
 pub fn show(ui: &mut Ui, state: &mut AppState) {
@@ -58,6 +59,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     users_count: h.users.len(),
                     admin: h.admin,
                     status: h.status.clone(),
+                    logged_in_cred: h.logged_in_cred.clone(),
                 };
                 // Enrich from workflow nodes
                 for node in state.workflow.snarl.nodes() {
@@ -69,6 +71,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                             admin: na,
                             shares,
                             users,
+                            logged_in_cred,
                             ..
                         } => {
                             if *nip == fh.ip {
@@ -87,6 +90,9 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                                 }
                                 if fh.users_count == 0 && !users.is_empty() {
                                     fh.users_count = users.len();
+                                }
+                                if fh.logged_in_cred.is_none() {
+                                    fh.logged_in_cred.clone_from(logged_in_cred);
                                 }
                             }
                         }
@@ -119,6 +125,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
             admin,
             shares,
             users,
+            logged_in_cred,
             ..
         } = node
         {
@@ -135,6 +142,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     } else {
                         HostStatus::Unknown
                     },
+                    logged_in_cred: logged_in_cred.clone(),
                 });
             }
         }
@@ -432,6 +440,7 @@ pub fn show(ui: &mut Ui, state: &mut AppState) {
                     Vec::new(),
                     h.admin,
                     Vec::new(),
+                    h.logged_in_cred.clone(),
                 );
                 if added {
                     state.pending_fingerprints.push(h.ip.clone());

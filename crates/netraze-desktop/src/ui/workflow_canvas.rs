@@ -4,7 +4,13 @@ use crate::state::AppState;
 use crate::workflow::{WorkflowDocument, WorkflowViewer};
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
-    let mut viewer = WorkflowViewer::new(state.credentials.clone());
+    let mut credentials = state.credentials.clone();
+    if let Ok(Some(inline)) = state.credential_config.as_record() {
+        // The scan panel's credential stays in memory for follow-up node
+        // actions, while WorkspaceSave continues to persist only Manager entries.
+        credentials.insert(0, inline);
+    }
+    let mut viewer = WorkflowViewer::new(credentials);
     let style = WorkflowDocument::snarl_style();
     let response = SnarlWidget::new()
         .id_salt("netraze_snarl_canvas")
