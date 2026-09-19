@@ -171,10 +171,14 @@ pub fn show_right_panel(ctx: &egui::Context, state: &mut AppState, runtime: &Run
 }
 
 pub fn show_bottom_panel(ctx: &egui::Context, state: &mut AppState) {
+    if !state.bottom_panel_open {
+        return;
+    }
+
     egui::TopBottomPanel::bottom("bottom_triptych")
         .resizable(true)
         .default_height(160.0)
-        .height_range(80.0..=400.0)
+        .height_range(110.0..=400.0)
         .frame(egui::Frame {
             fill: theme::CONSOLE_BG,
             inner_margin: egui::Margin::same(4),
@@ -182,6 +186,24 @@ pub fn show_bottom_panel(ctx: &egui::Context, state: &mut AppState) {
             ..Default::default()
         })
         .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("PANELS")
+                        .small()
+                        .strong()
+                        .color(TEXT_DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Close bottom panels")
+                        .clicked()
+                    {
+                        state.bottom_panel_open = false;
+                    }
+                });
+            });
+            ui.separator();
             ui.columns(3, |cols| {
                 cols[0].group(|ui| {
                     network_view::show(ui, state);
@@ -238,6 +260,16 @@ pub fn show_status_bar(ctx: &egui::Context, state: &mut AppState) {
                     ))
                     .size(11.0).monospace().color(TEXT_DIM),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if state.bottom_panel_open {
+                        "⌄ Hide panels"
+                    } else {
+                        "⌃ Show panels"
+                    };
+                    if ui.small_button(label).clicked() {
+                        state.bottom_panel_open = !state.bottom_panel_open;
+                    }
+                });
             });
         });
 }

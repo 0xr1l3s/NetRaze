@@ -245,6 +245,9 @@ pub struct AppState {
     pub target_config: TargetConfig,
     pub credential_config: CredentialConfig,
     pub status_text: String,
+    /// Visibility of the resizable Network / Credentials / Progress dock.
+    /// Layout preferences are local to the current app session.
+    pub bottom_panel_open: bool,
     pub is_running: bool,
     pub threads: usize,
     pub timeout_seconds: u64,
@@ -304,6 +307,7 @@ impl AppState {
                 kerberos_ticket: String::new(),
             },
             status_text: "Idle".to_owned(),
+            bottom_panel_open: true,
             is_running: false,
             threads: 16,
             timeout_seconds: 20,
