@@ -15,7 +15,7 @@ in CI.
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Spins up `servercontainers/samba:smbd-only-latest` on `127.0.0.1:1445` (port 445 is usually taken by the OS SMB client). |
+| `docker-compose.yml` | Spins up `ghcr.io/servercontainers/samba:smbd-only-latest` on `127.0.0.1:1445` (port 445 is usually taken by the OS SMB client). |
 | `smb.conf` | Pinned share inventory. Share names and `comment =` values are load-bearing — Rust tests assert on them. |
 
 The container provisions a single user, `alice` / `wonderland`, in the
@@ -49,12 +49,16 @@ the tests don't race the daemon's startup.
 
 ### Run the Rust integration tests
 
-All suites live in `crates/netraze-protocols/tests/` and are `#[ignore]` by
-default — you need to pass `--ignored` to run them. The easiest way to run
-everything:
+SMB suites live in `crates/netraze-protocols/tests/` and are `#[ignore]` by
+default. Select them explicitly so the separate `ldap_samba_ad` suite does
+not run against an AD DC that has not been started:
 
 ```shell
-cargo test -p netraze-protocols -- --ignored --test-threads=1
+cargo test -p netraze-protocols \
+  --test samba_integration --test rpc_channel_samba --test shares_rpc_samba \
+  --test info_rpc_samba --test users_rpc_samba --test browser_ops_samba \
+  --test exec_samba --test enum_av_samba --test anonymous_samba \
+  -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` is belt-and-braces: Samba handles concurrent sessions
@@ -146,7 +150,11 @@ paths:
 
 ```shell
 docker compose -f tests/samba/docker-compose.yml up -d --wait
-cargo test -p netraze-protocols -- --ignored --test-threads=1
+cargo test -p netraze-protocols \
+  --test samba_integration --test rpc_channel_samba --test shares_rpc_samba \
+  --test info_rpc_samba --test users_rpc_samba --test browser_ops_samba \
+  --test exec_samba --test enum_av_samba --test anonymous_samba \
+  -- --ignored --test-threads=1
 ```
 
 The Impacket-pinned byte fixtures in `netraze-dcerpc` catch most
