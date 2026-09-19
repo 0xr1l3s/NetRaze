@@ -66,6 +66,8 @@ pub enum WorkflowNode {
         host_ip: String,
         hostname: String,
         shares: Vec<String>,
+        #[serde(default)]
+        error: Option<String>,
         /// Label of the credential that enumerated these shares
         /// (`DOMAIN\user` / `.\user`) — resolved back to a full
         /// `CredentialRecord` at click time. Only the label is stored: snarl
@@ -285,6 +287,7 @@ impl WorkflowDocument {
         shares: Vec<String>,
         admin: bool,
         users: Vec<String>,
+        cred_label: Option<String>,
     ) -> bool {
         // Check if host already exists
         for node in self.snarl.nodes() {
@@ -313,7 +316,7 @@ impl WorkflowDocument {
                 shares,
                 admin,
                 users,
-                logged_in_cred: None,
+                logged_in_cred: cred_label,
             },
         );
         true
@@ -393,6 +396,24 @@ impl WorkflowViewer {
             }
         }
         None
+    }
+
+    fn resolve_readonly_cred(
+        &mut self,
+        label: &Option<String>,
+        host: &str,
+    ) -> Option<CredentialRecord> {
+        if label.is_none() {
+            return Some(crate::state::anonymous_record());
+        }
+        let credential = self.resolve_cred(label);
+        if credential.is_none() {
+            self.menu_errors.push(format!(
+                "Cannot enumerate {host}: credential {} is no longer available",
+                label.as_deref().unwrap_or_default()
+            ));
+        }
+        credential
     }
 }
 
@@ -1081,11 +1102,10 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     ..
                 } = &snarl[node]
                 {
-                    let cred = self
-                        .resolve_cred(logged_in_cred)
-                        .unwrap_or_else(crate::state::anonymous_record);
-                    self.shares_requests
-                        .push((node, ip.clone(), hostname.clone(), cred));
+                    if let Some(cred) = self.resolve_readonly_cred(logged_in_cred, ip) {
+                        self.shares_requests
+                            .push((node, ip.clone(), hostname.clone(), cred));
+                    }
                 }
                 ui.close();
             }
@@ -1101,11 +1121,10 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     ..
                 } = &snarl[node]
                 {
-                    let cred = self
-                        .resolve_cred(logged_in_cred)
-                        .unwrap_or_else(crate::state::anonymous_record);
-                    self.users_requests
-                        .push((node, ip.clone(), hostname.clone(), cred));
+                    if let Some(cred) = self.resolve_readonly_cred(logged_in_cred, ip) {
+                        self.users_requests
+                            .push((node, ip.clone(), hostname.clone(), cred));
+                    }
                 }
                 ui.close();
             }

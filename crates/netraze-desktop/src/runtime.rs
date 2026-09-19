@@ -28,7 +28,10 @@ pub enum RuntimeEvent {
         level: LogLevel,
         message: String,
     },
-    SmbResult(Box<SmbScanResult>),
+    SmbResult {
+        result: Box<SmbScanResult>,
+        credential_label: Option<String>,
+    },
     ScanProgress {
         done: usize,
         total: usize,
@@ -53,6 +56,7 @@ pub enum RuntimeEvent {
         ip: String,
         hostname: String,
         shares: Vec<String>,
+        error: Option<String>,
         /// Label of the credential that ran the enumeration — stored on the
         /// SharesNode so later Browse clicks can resolve it back.
         cred_label: Option<String>,
@@ -143,6 +147,7 @@ impl RuntimeServices {
         &self,
         raw_targets: Vec<String>,
         credential: Option<SmbCredential>,
+        credential_label: Option<String>,
         threads: usize,
         timeout_seconds: u64,
     ) {
@@ -207,9 +212,10 @@ impl RuntimeServices {
                         if open {
                             live_hosts.push(ip.clone());
                             let _ = tx.send(RuntimeEvent::SmbHostDiscovered { target: ip.clone() });
+                            let endpoint = netraze_protocols::targets::with_default_port(&ip, 445);
                             let _ = tx.send(RuntimeEvent::Log {
                                 level: LogLevel::Success,
-                                message: format!("  ✓ {} port 445 ouvert", ip),
+                                message: format!("  ✓ {endpoint} TCP ouvert"),
                             });
                         }
                         let _ = tx.send(RuntimeEvent::ScanProgress {
@@ -223,7 +229,7 @@ impl RuntimeServices {
             let _ = tx.send(RuntimeEvent::Log {
                 level: LogLevel::Info,
                 message: format!(
-                    "Pré-scan terminé: {}/{} hôte(s) avec port 445 ouvert",
+                    "Pré-scan terminé: {}/{} endpoint(s) TCP ouvert(s)",
                     live_hosts.len(),
                     total_ips
                 ),
@@ -306,7 +312,10 @@ impl RuntimeServices {
                         admin: false,
                         error: Some(err),
                     };
-                    let _ = tx.send(RuntimeEvent::SmbResult(Box::new(result)));
+                    let _ = tx.send(RuntimeEvent::SmbResult {
+                        result: Box::new(result),
+                        credential_label: None,
+                    });
                     step += 4;
                     let _ = tx.send(RuntimeEvent::ScanProgress {
                         done: step,
@@ -340,7 +349,16 @@ impl RuntimeServices {
                     level: LogLevel::Info,
                     message: format!("{}: énumération des partages...", target),
                 });
-                let shares = client.enum_shares_with_access().await.unwrap_or_default();
+                let shares = match client.enum_shares_with_access().await {
+                    Ok(shares) => shares,
+                    Err(error) => {
+                        let _ = tx.send(RuntimeEvent::Log {
+                            level: LogLevel::Warning,
+                            message: format!("{target}: share enumeration failed: {error}"),
+                        });
+                        Vec::new()
+                    }
+                };
                 step += 1;
                 let _ = tx.send(RuntimeEvent::ScanProgress {
                     done: step,
@@ -375,7 +393,16 @@ impl RuntimeServices {
                         level: LogLevel::Success,
                         message: format!("{}: Pwn3d! (accès admin)", target),
                     });
-                    users = client.enum_users().await.unwrap_or_default();
+                    users = match client.enum_users().await {
+                        Ok(users) => users,
+                        Err(error) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Warning,
+                                message: format!("{target}: user enumeration failed: {error}"),
+                            });
+                            Vec::new()
+                        }
+                    };
                     for user in &users {
                         let utag = if user.disabled {
                             "DISABLED"
@@ -420,7 +447,10 @@ impl RuntimeServices {
                     admin,
                     error: None,
                 };
-                let _ = tx.send(RuntimeEvent::SmbResult(Box::new(result)));
+                let _ = tx.send(RuntimeEvent::SmbResult {
+                    result: Box::new(result),
+                    credential_label: credential_label.clone(),
+                });
             }
 
             let _ = tx.send(RuntimeEvent::Log {
@@ -670,7 +700,7 @@ impl RuntimeServices {
         let cred_label = crate::state::cred_label(&cred);
         self.runtime.spawn(async move {
             let mut client = SmbClient::new(&ip_clone).with_credential(smb_cred);
-            let shares = match client.connect().await {
+            let (shares, error) = match client.connect().await {
                 Ok(()) => match client.enum_shares_with_access().await {
                     Ok(shares) => {
                         let formatted: Vec<String> = shares
@@ -689,7 +719,7 @@ impl RuntimeServices {
                             message: format!("{ip_clone}: {} share(s) trouvé(s)", formatted.len()),
                         });
                         client.disconnect().await;
-                        formatted
+                        (formatted, None)
                     }
                     Err(e) => {
                         let _ = tx.send(RuntimeEvent::Log {
@@ -697,7 +727,7 @@ impl RuntimeServices {
                             message: format!("{ip_clone}: erreur enum shares: {e}"),
                         });
                         client.disconnect().await;
-                        Vec::new()
+                        (Vec::new(), Some(e.to_string()))
                     }
                 },
                 Err(error) => {
@@ -705,7 +735,7 @@ impl RuntimeServices {
                         level: LogLevel::Error,
                         message: format!("{ip_clone}: connexion échouée pour enum shares: {error}"),
                     });
-                    Vec::new()
+                    (Vec::new(), Some(error.to_string()))
                 }
             };
 
@@ -714,6 +744,7 @@ impl RuntimeServices {
                 ip: ip_clone,
                 hostname: hostname_clone,
                 shares,
+                error,
                 cred_label: Some(cred_label),
             });
         });
@@ -736,16 +767,11 @@ impl RuntimeServices {
         let hostname_clone = hostname.clone();
         let smb_cred = cred_to_smb(&cred);
         self.runtime.spawn(async move {
-            // Keep an explicitly typed port (e.g. a container harness on
-            // :1445); default to 445 only for bare hosts.
+            // Keep an explicitly typed SMB port (e.g. a container harness on
+            // :1445); the common dispatcher derives port 389 for LDAP and
+            // falls back to SAMR when LDAP is unavailable.
             let target = netraze_protocols::targets::with_default_port(&ip_clone, 445);
-            let result = netraze_protocols::smb::users::enum_users(&target, &smb_cred)
-                .await
-                .map(|users| netraze_protocols::users::UserEnumerationOutcome {
-                    users,
-                    source: netraze_core::UserEnumerationSource::Samr,
-                    fallback_used: false,
-                });
+            let result = netraze_protocols::users::enum_users_detailed(&target, &smb_cred).await;
 
             match &result {
                 Ok(outcome) => {

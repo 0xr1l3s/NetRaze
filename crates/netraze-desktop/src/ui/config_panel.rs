@@ -82,45 +82,49 @@ fn show_default_config(
     );
     ui.add_space(2.0);
 
-    if state.target_config.protocol == "LDAP" {
-        show_ldap_credential_selector(ui, state);
-    } else {
-        ui.label(egui::RichText::new("Username").small().color(LABEL_COLOR));
-        ui.add(
-            egui::TextEdit::singleline(&mut state.credential_config.username)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace),
-        );
-        ui.add_space(2.0);
+    ui.label(egui::RichText::new("Username").small().color(LABEL_COLOR));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.credential_config.username)
+            .desired_width(f32::INFINITY)
+            .font(egui::TextStyle::Monospace),
+    );
+    ui.add_space(2.0);
 
-        ui.label(egui::RichText::new("Password").small().color(LABEL_COLOR));
-        ui.add(
-            egui::TextEdit::singleline(&mut state.credential_config.password)
-                .desired_width(f32::INFINITY)
-                .password(true),
-        );
-        ui.add_space(2.0);
+    ui.label(egui::RichText::new("Password").small().color(LABEL_COLOR));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.credential_config.password)
+            .desired_width(f32::INFINITY)
+            .password(true),
+    );
+    ui.add_space(2.0);
 
-        ui.label(egui::RichText::new("NTLM Hash").small().color(LABEL_COLOR));
-        ui.add(
-            egui::TextEdit::singleline(&mut state.credential_config.ntlm_hash)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace),
-        );
-        ui.add_space(2.0);
+    ui.label(egui::RichText::new("NTLM Hash").small().color(LABEL_COLOR));
+    ui.add(
+        egui::TextEdit::singleline(&mut state.credential_config.ntlm_hash)
+            .desired_width(f32::INFINITY)
+            .font(egui::TextStyle::Monospace),
+    );
+    ui.add_space(2.0);
 
+    ui.label(
+        egui::RichText::new("Kerberos Ticket")
+            .small()
+            .color(LABEL_COLOR),
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut state.credential_config.kerberos_ticket)
+            .desired_width(f32::INFINITY)
+            .font(egui::TextStyle::Monospace),
+    );
+    if state.target_config.protocol == "SMB" || state.target_config.protocol == "LDAP" {
         ui.label(
-            egui::RichText::new("Kerberos Ticket")
+                egui::RichText::new(
+                    "Use DOMAIN\\username when a domain is needed. NT hash takes priority over Password. Kerberos tickets are not supported yet.",
+                )
                 .small()
                 .color(LABEL_COLOR),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut state.credential_config.kerberos_ticket)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace),
-        );
+            );
     }
-
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(4.0);
@@ -202,11 +206,7 @@ fn show_default_config(
 
         match state.target_config.protocol.as_str() {
             "LDAP" => {
-                let credential = state
-                    .selected_cred
-                    .and_then(|index| state.credentials.get(index))
-                    .filter(|credential| credential.active)
-                    .cloned();
+                let credential = state.credential_config.as_record().ok().flatten();
                 if let Some(credential) = credential {
                     runtime.spawn_ldap_scan(
                         targets,
@@ -217,22 +217,23 @@ fn show_default_config(
                 } else {
                     state.is_running = false;
                     state.status_text = "Idle".to_owned();
-                    runtime.emit_error(
-                        "LDAP requires an active saved credential selected in Credential Manager",
-                    );
+                    runtime.emit_error("LDAP requires a username and a password or NT hash");
                 }
             }
             "SMB" => {
-                let credential = if !state.credential_config.username.is_empty() {
-                    Some(netraze_protocols::smb::SmbCredential::new(
-                        &state.credential_config.username,
-                        "",
-                        &state.credential_config.password,
-                    ))
-                } else {
-                    None
-                };
-                runtime.spawn_smb_scan(targets, credential, state.threads, state.timeout_seconds);
+                let record = state.credential_config.as_record().ok().flatten();
+                let credential_label = record
+                    .as_ref()
+                    .map(crate::state::cred_label)
+                    .or_else(|| Some("(anonymous)".to_owned()));
+                let credential = record.as_ref().map(crate::runtime::cred_to_smb);
+                runtime.spawn_smb_scan(
+                    targets,
+                    credential,
+                    credential_label,
+                    state.threads,
+                    state.timeout_seconds,
+                );
             }
             protocol => {
                 state.is_running = false;
@@ -256,71 +257,21 @@ fn show_default_config(
     }
 }
 
-fn show_ldap_credential_selector(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.label(
-        egui::RichText::new("Saved NTLM credential")
-            .small()
-            .color(LABEL_COLOR),
-    );
-    let selected_text = state
-        .selected_cred
-        .and_then(|index| state.credentials.get(index))
-        .filter(|credential| credential.active)
-        .map_or_else(
-            || "Select an active credential".to_owned(),
-            |credential| {
-                let kind = match credential.cred_type {
-                    crate::state::CredType::Password => "password",
-                    crate::state::CredType::Hash => "NT hash",
-                };
-                format!("{} ({kind})", crate::state::cred_label(credential))
-            },
-        );
-    egui::ComboBox::from_id_salt("ldap_saved_credential")
-        .selected_text(selected_text)
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            for (index, credential) in state.credentials.iter().enumerate() {
-                if !credential.active {
-                    continue;
-                }
-                let kind = match credential.cred_type {
-                    crate::state::CredType::Password => "password",
-                    crate::state::CredType::Hash => "NT hash",
-                };
-                ui.selectable_value(
-                    &mut state.selected_cred,
-                    Some(index),
-                    format!("{} ({kind})", crate::state::cred_label(credential)),
-                );
-            }
-        });
-    ui.label(
-        egui::RichText::new(
-            "LDAP uses NTLMv2 SASL with signing and sealing; secrets stay in Credential Manager.",
-        )
-        .small()
-        .color(LABEL_COLOR),
-    );
-}
-
 fn scan_validation_error(state: &AppState) -> Option<String> {
     if state.target_config.target.trim().is_empty() {
         return Some("Enter at least one host, range, or CIDR target".to_owned());
     }
     match state.target_config.protocol.as_str() {
-        "SMB" => None,
+        "SMB" => state.credential_config.as_record().err(),
         "LDAP" => {
-            let Some(credential) = state
-                .selected_cred
-                .and_then(|index| state.credentials.get(index))
-            else {
-                return Some("Select a saved credential for LDAP".to_owned());
+            let credential = match state.credential_config.as_record() {
+                Ok(Some(credential)) => credential,
+                Ok(None) => {
+                    return Some("Enter a username and password or NT hash for LDAP".to_owned());
+                }
+                Err(error) => return Some(error),
             };
-            if !credential.active {
-                return Some("The selected LDAP credential is inactive".to_owned());
-            }
-            crate::runtime::cred_to_ntlm(credential)
+            crate::runtime::cred_to_ntlm(&credential)
                 .map(|_| ())
                 .map_err(|error| format!("Invalid LDAP credential: {error}"))
                 .err()
@@ -456,9 +407,17 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
             host_ip,
             hostname,
             shares,
+            error,
             cred_label,
         } => {
-            show_shares_panel(ui, &host_ip, &hostname, &shares, cred_label.as_deref());
+            show_shares_panel(
+                ui,
+                &host_ip,
+                &hostname,
+                &shares,
+                error.as_deref(),
+                cred_label.as_deref(),
+            );
         }
         WorkflowNode::UsersNode { .. } => unreachable!("users are rendered by reference above"),
         WorkflowNode::DirectoryNode { .. } => {
@@ -648,6 +607,7 @@ fn show_shares_panel(
     host_ip: &str,
     hostname: &str,
     shares: &[String],
+    error: Option<&str>,
     cred_label: Option<&str>,
 ) {
     panel_header(ui, "📂", host_ip, hostname, "Shares");
@@ -658,6 +618,11 @@ fn show_shares_panel(
             ui.label(egui::RichText::new(c).small().monospace().color(theme::INFO));
         });
         ui.add_space(4.0);
+    }
+
+    if let Some(error) = error {
+        ui.label(egui::RichText::new(error).small().color(theme::ERROR));
+        return;
     }
 
     if shares.is_empty() {
@@ -963,7 +928,6 @@ fn parse_share_string(s: &str) -> (&str, &str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{CredType, CredentialRecord, anonymous_record};
 
     fn ldap_state() -> AppState {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -973,49 +937,27 @@ mod tests {
         state
     }
 
-    fn password_credential() -> CredentialRecord {
-        CredentialRecord {
-            username: "alice".to_owned(),
-            domain: "EXAMPLE".to_owned(),
-            secret: "test-only-password".to_owned(),
-            ..anonymous_record()
-        }
-    }
-
     #[test]
-    fn ldap_run_requires_an_active_valid_saved_credential() {
+    fn ldap_run_accepts_inline_password_and_rejects_missing_secret() {
         let mut state = ldap_state();
         assert_eq!(
             scan_validation_error(&state).as_deref(),
-            Some("Select a saved credential for LDAP")
+            Some("Enter a username and password or NT hash for LDAP")
         );
-
-        let mut credential = password_credential();
-        credential.active = false;
-        state.credentials.push(credential);
-        state.selected_cred = Some(0);
-        assert_eq!(
-            scan_validation_error(&state).as_deref(),
-            Some("The selected LDAP credential is inactive")
-        );
-
-        state.credentials[0].active = true;
+        state.credential_config.username = "EXAMPLE\\alice".to_owned();
+        assert!(scan_validation_error(&state).is_some());
+        state.credential_config.password = "test-only-password".to_owned();
         assert!(scan_validation_error(&state).is_none());
     }
 
     #[test]
-    fn ldap_run_rejects_malformed_saved_nt_hashes() {
+    fn ldap_run_rejects_malformed_inline_nt_hashes() {
         let mut state = ldap_state();
-        let credential = CredentialRecord {
-            cred_type: CredType::Hash,
-            secret: "not-an-nt-hash".to_owned(),
-            ..password_credential()
-        };
-        state.credentials.push(credential);
-        state.selected_cred = Some(0);
+        state.credential_config.username = "EXAMPLE\\alice".to_owned();
+        state.credential_config.ntlm_hash = "not-an-nt-hash".to_owned();
         assert!(
             scan_validation_error(&state)
-                .is_some_and(|error| error.starts_with("Invalid LDAP credential:"))
+                .is_some_and(|error| error.starts_with("NT hash must be 32 hex chars"))
         );
     }
 }
