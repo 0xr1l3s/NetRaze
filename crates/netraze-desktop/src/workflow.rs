@@ -91,6 +91,18 @@ pub enum WorkflowNode {
         #[serde(default)]
         cred_label: Option<String>,
     },
+    DirectoryNode {
+        endpoint: String,
+        hostname: String,
+        #[serde(default)]
+        inventory: Option<Box<netraze_core::DirectoryInventory>>,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(skip)]
+        loading: bool,
+        #[serde(default)]
+        cred_label: Option<String>,
+    },
     DumpNode {
         host_ip: String,
         hostname: String,
@@ -180,6 +192,22 @@ impl WorkflowNode {
                     hostname.as_str()
                 };
                 format!("👥 Users ({}) — {host}", users.len())
+            }
+            WorkflowNode::DirectoryNode {
+                endpoint,
+                hostname,
+                inventory,
+                ..
+            } => {
+                let host = if hostname.is_empty() {
+                    endpoint.as_str()
+                } else {
+                    hostname.as_str()
+                };
+                let users = inventory
+                    .as_ref()
+                    .map_or(0, |value| value.users.items.len());
+                format!("📚 AD Directory ({users} users) — {host}")
             }
             WorkflowNode::DumpNode {
                 host_ip,
@@ -384,6 +412,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. } => 0,
             WorkflowNode::SharesNode { .. } => 1,
             WorkflowNode::UsersNode { .. } => 1,
+            WorkflowNode::DirectoryNode { .. } => 1,
             WorkflowNode::DumpNode { .. } => 1,
             WorkflowNode::EnumAvNode { .. } => 1,
         }
@@ -400,6 +429,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. } => 1,
             WorkflowNode::SharesNode { .. } => 0,
             WorkflowNode::UsersNode { .. } => 0,
+            WorkflowNode::DirectoryNode { .. } => 0,
             WorkflowNode::DumpNode { .. } => 0,
             WorkflowNode::EnumAvNode { .. } => 0,
         }
@@ -435,6 +465,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             }
             WorkflowNode::SharesNode { .. }
             | WorkflowNode::UsersNode { .. }
+            | WorkflowNode::DirectoryNode { .. }
             | WorkflowNode::DumpNode { .. }
             | WorkflowNode::EnumAvNode { .. } => {
                 // Circular nodes — content is in the config panel, not the pin row.
@@ -444,6 +475,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             &snarl[pin.id.node],
             WorkflowNode::SharesNode { .. }
                 | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DirectoryNode { .. }
                 | WorkflowNode::DumpNode { .. }
                 | WorkflowNode::EnumAvNode { .. }
         );
@@ -496,6 +528,10 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 ui.label("-");
                 PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
             }
+            WorkflowNode::DirectoryNode { .. } => {
+                ui.label("-");
+                PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
+            }
             WorkflowNode::DumpNode { .. } => {
                 ui.label("-");
                 PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
@@ -532,6 +568,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. }
                 | WorkflowNode::SharesNode { .. }
                 | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DirectoryNode { .. }
                 | WorkflowNode::DumpNode { .. }
                 | WorkflowNode::EnumAvNode { .. }
         );
@@ -559,6 +596,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             // stays centred.
             WorkflowNode::SharesNode { .. }
             | WorkflowNode::UsersNode { .. }
+            | WorkflowNode::DirectoryNode { .. }
             | WorkflowNode::DumpNode { .. }
             | WorkflowNode::EnumAvNode { .. } => NodeLayout {
                 kind: NodeLayoutKind::Sandwich,
@@ -575,6 +613,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. }
                 | WorkflowNode::SharesNode { .. }
                 | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DirectoryNode { .. }
                 | WorkflowNode::DumpNode { .. }
                 | WorkflowNode::EnumAvNode { .. }
         )
@@ -631,8 +670,43 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 };
                 Some(("👥", label, border))
             }
-            WorkflowNode::DumpNode { host_ip, hostname, dump_type, entries, error, .. } => {
-                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+            WorkflowNode::DirectoryNode {
+                endpoint,
+                hostname,
+                inventory,
+                loading,
+                error,
+                ..
+            } => {
+                let label = if hostname.is_empty() {
+                    endpoint.clone()
+                } else {
+                    hostname.clone()
+                };
+                let border = if *loading {
+                    theme::WARNING
+                } else if error.is_some() {
+                    theme::ERROR
+                } else if inventory.is_some() {
+                    theme::INFO
+                } else {
+                    theme::MUTED
+                };
+                Some(("📚", label, border))
+            }
+            WorkflowNode::DumpNode {
+                host_ip,
+                hostname,
+                dump_type,
+                entries,
+                error,
+                ..
+            } => {
+                let label = if hostname.is_empty() {
+                    host_ip.clone()
+                } else {
+                    hostname.clone()
+                };
                 let icon: &'static str = if dump_type == "SAM" { "🔑" } else { "🔓" };
                 let border = if error.is_some() {
                     theme::ERROR
@@ -818,6 +892,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. }
                 | WorkflowNode::SharesNode { .. }
                 | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DirectoryNode { .. }
                 | WorkflowNode::DumpNode { .. }
                 | WorkflowNode::EnumAvNode { .. }
         );
@@ -848,6 +923,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
             WorkflowNode::HostNode { .. }
                 | WorkflowNode::SharesNode { .. }
                 | WorkflowNode::UsersNode { .. }
+                | WorkflowNode::DirectoryNode { .. }
                 | WorkflowNode::DumpNode { .. }
                 | WorkflowNode::EnumAvNode { .. }
         );
