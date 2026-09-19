@@ -1,6 +1,6 @@
 use netraze_core::UserEnumerationSource;
 use netraze_protocols::{
-    ldap::{self, LdapClient, LdapClientConfig},
+    ldap::{self, LdapClient, LdapClientConfig, LdapError},
     ntlm::{NtlmCredential, nt_hash_from_password},
 };
 
@@ -152,6 +152,94 @@ async fn full_inventory_covers_directory_structure_and_security_sections() {
     ] {
         assert!(error.is_none(), "{name} inventory was partial: {error:?}");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the local tests/samba-ad Docker harness"]
+async fn anonymous_bind_can_read_root_dse_without_ntlm_credentials() {
+    let mut client = LdapClient::connect(LdapClientConfig::new(LDAP_ENDPOINT))
+        .await
+        .expect("failed to connect to the local Samba AD LDAP endpoint");
+    client
+        .bind_anonymous()
+        .await
+        .expect("anonymous LDAP bind was refused");
+
+    let root_dse = client.root_dse().await.expect("anonymous RootDSE failed");
+    assert_eq!(
+        root_dse.first_utf8("defaultNamingContext"),
+        Some("DC=netraze,DC=test")
+    );
+    client.unbind().await.expect("anonymous LDAP unbind failed");
+}
+
+#[tokio::test]
+#[ignore = "requires the local tests/samba-ad Docker harness"]
+async fn wrong_password_and_guest_do_not_authorize_ldap_searches() {
+    for (username, password) in [(TEST_USER, "not-the-test-password"), ("Guest", "")] {
+        let mut client = LdapClient::connect(LdapClientConfig::new(LDAP_ENDPOINT))
+            .await
+            .expect("failed to connect to the local Samba AD LDAP endpoint");
+        assert!(
+            client
+                .bind_ntlm(
+                    username,
+                    TEST_DOMAIN,
+                    NtlmCredential::Password(password.to_owned()),
+                )
+                .await
+                .is_err(),
+            "{username} unexpectedly established an NTLM LDAP session"
+        );
+        assert!(
+            matches!(client.root_dse().await, Err(LdapError::State(_))),
+            "{username} must not be authorized for searches after a failed bind"
+        );
+        let _ = client.unbind().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the local tests/samba-ad Docker harness"]
+async fn protected_search_supports_compound_escaped_filter_and_base_scope() {
+    let mut client = connect(NtlmCredential::Password(TEST_PASSWORD.into()), 1).await;
+    let base = client
+        .root_dse()
+        .await
+        .expect("RootDSE search failed")
+        .first_utf8("defaultNamingContext")
+        .expect("default naming context missing")
+        .to_owned();
+
+    let outcome = client
+        .search(
+            &base,
+            "(&(objectClass=user)(sAMAccountName=al\\69ce))",
+            &["sAMAccountName"],
+        )
+        .await
+        .expect("compound and escaped LDAP search failed");
+    assert_eq!(outcome.entries.len(), 1);
+    let alice = &outcome.entries[0];
+    assert_eq!(alice.first_utf8("sAMAccountName"), Some(TEST_USER));
+    // Samba AD advertises other naming contexts while searching the
+    // domain NC. The client must return those referrals, not follow them.
+    assert!(
+        outcome.referrals.iter().any(|referral| {
+            referral == "ldap://netraze.test/CN=Configuration,DC=netraze,DC=test"
+        })
+    );
+
+    let base_result = client
+        .search_base(&alice.dn, "(objectClass=*)", &["sAMAccountName"])
+        .await
+        .expect("base-object LDAP search failed");
+    assert_eq!(base_result.entries.len(), 1);
+    assert_eq!(
+        base_result.entries[0].first_utf8("sAMAccountName"),
+        Some(TEST_USER)
+    );
+    client.unbind().await.expect("LDAP unbind failed");
 }
 
 async fn connect(credential: NtlmCredential, page_size: u32) -> LdapClient {
