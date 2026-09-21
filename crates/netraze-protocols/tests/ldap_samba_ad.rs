@@ -1,3 +1,5 @@
+mod support;
+
 use netraze_core::UserEnumerationSource;
 use netraze_protocols::{
     ldap::{self, LdapClient, LdapClientConfig, LdapError},
@@ -7,12 +9,15 @@ use netraze_protocols::{
 const LDAP_ENDPOINT: &str = "127.0.0.1:1389";
 const TEST_DOMAIN: &str = "NETRAZE";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
+
+fn test_password() -> String {
+    support::required_env("NETRAZE_SAMBA_AD_PASSWORD")
+}
 
 #[tokio::test]
 #[ignore = "requires the local tests/samba-ad Docker harness"]
 async fn password_bind_discovers_root_dse_and_enumerates_users() {
-    let mut client = connect(NtlmCredential::Password(TEST_PASSWORD.into()), 1000).await;
+    let mut client = connect(NtlmCredential::Password(test_password()), 1000).await;
 
     let root_dse = client.root_dse().await.expect("RootDSE search failed");
     assert_eq!(
@@ -38,7 +43,7 @@ async fn password_bind_discovers_root_dse_and_enumerates_users() {
 #[tokio::test]
 #[ignore = "requires the local tests/samba-ad Docker harness"]
 async fn nt_hash_bind_enumerates_multiple_pages_in_stable_order() {
-    let hash = nt_hash_from_password(TEST_PASSWORD);
+    let hash = nt_hash_from_password(&test_password());
     let mut client = connect(NtlmCredential::NtHash(hash), 2).await;
 
     let users = client
@@ -72,7 +77,7 @@ async fn full_inventory_covers_directory_structure_and_security_sections() {
         config,
         TEST_USER,
         TEST_DOMAIN,
-        NtlmCredential::Password(TEST_PASSWORD.into()),
+        NtlmCredential::Password(test_password()),
     )
     .await
     .expect("full local AD inventory failed");
@@ -176,7 +181,8 @@ async fn anonymous_bind_can_read_root_dse_without_ntlm_credentials() {
 #[tokio::test]
 #[ignore = "requires the local tests/samba-ad Docker harness"]
 async fn wrong_password_and_guest_do_not_authorize_ldap_searches() {
-    for (username, password) in [(TEST_USER, "not-the-test-password"), ("Guest", "")] {
+    let wrong_password = format!("{}-invalid", test_password());
+    for (username, password) in [(TEST_USER, wrong_password.as_str()), ("Guest", "")] {
         let mut client = LdapClient::connect(LdapClientConfig::new(LDAP_ENDPOINT))
             .await
             .expect("failed to connect to the local Samba AD LDAP endpoint");
@@ -202,7 +208,7 @@ async fn wrong_password_and_guest_do_not_authorize_ldap_searches() {
 #[tokio::test]
 #[ignore = "requires the local tests/samba-ad Docker harness"]
 async fn protected_search_supports_compound_escaped_filter_and_base_scope() {
-    let mut client = connect(NtlmCredential::Password(TEST_PASSWORD.into()), 1).await;
+    let mut client = connect(NtlmCredential::Password(test_password()), 1).await;
     let base = client
         .root_dse()
         .await

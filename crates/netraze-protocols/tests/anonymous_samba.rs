@@ -22,6 +22,8 @@
 //!     --ignored --test-threads=1
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -243,7 +245,11 @@ async fn guest_user_enumeration_lists_accounts() {
 #[ignore = "requires Samba container on NETRAZE_SAMBA_ADDR (default 127.0.0.1:1445)"]
 async fn secret_carrying_wrong_password_still_rejected() {
     require_samba();
-    let bad_cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, "definitely-not-the-password");
+    let bad_password = format!(
+        "{}-invalid",
+        support::required_env("NETRAZE_SAMBA_PASSWORD")
+    );
+    let bad_cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, &bad_password);
     let res = browser::list_directory(&samba_addr(), &bad_cred, GUEST_SHARE, "").await;
     match res {
         Err(e) => assert!(

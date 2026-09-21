@@ -14,15 +14,19 @@ services:
       - "127.0.0.1:1389:389"
       - "127.0.0.1:2445:445"
     environment:
-      SAMBACC_CONFIG: /config/domain.json
+      SAMBACC_CONFIG_TEMPLATE: /config/domain.json
       SAMBA_CONTAINER_ID: netraze-ad
+      NETRAZE_SAMBA_AD_ADMIN_PASSWORD: ${NETRAZE_SAMBA_AD_ADMIN_PASSWORD:?set NETRAZE_SAMBA_AD_ADMIN_PASSWORD}
+      NETRAZE_SAMBA_AD_PASSWORD: ${NETRAZE_SAMBA_AD_PASSWORD:?set NETRAZE_SAMBA_AD_PASSWORD}
     volumes:
       - ./domain.json:/config/domain.json:ro
+      - ./inject-secrets.py:/config/inject-secrets.py:ro
       - samba-ad-state:/var/lib/samba
+    entrypoint: ["python3", "/config/inject-secrets.py"]
     healthcheck:
       test:
         - CMD-SHELL
-        - samba-tool user list -H ldap://127.0.0.1 -U'Administrator%[REMOVED_TEST_PASSWORD]' >/dev/null 2>&1
+        - samba-tool user list -H ldap://127.0.0.1 -U Administrator --password="$${NETRAZE_SAMBA_AD_ADMIN_PASSWORD}" >/dev/null 2>&1
       interval: 5s
       timeout: 5s
       retries: 30

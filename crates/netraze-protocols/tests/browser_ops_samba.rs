@@ -22,6 +22,8 @@
 //!     --ignored --test-threads=1
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -30,7 +32,6 @@ use netraze_protocols::smb::connection::SmbCredential;
 
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE";
 /// Writable share pinned in `tests/samba/smb.conf` (alice, `read only = no`).
 const WRITABLE_SHARE: &str = "private";
@@ -52,7 +53,11 @@ fn samba_reachable() -> bool {
 }
 
 fn cred() -> SmbCredential {
-    SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+    SmbCredential::new(
+        TEST_USER,
+        TEST_DOMAIN,
+        &support::required_env("NETRAZE_SAMBA_PASSWORD"),
+    )
 }
 
 fn require_samba() {

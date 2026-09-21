@@ -25,8 +25,8 @@ services:
       - "127.0.0.1:1445:445"
     environment:
       # ── Account ────────────────────────────────────────────────────────
-      # Test-only credentials, published openly in tests/samba/README.md.
-      ACCOUNT_alice: [REMOVED_TEST_PASSWORD]
+      # The password is supplied by the caller and never stored in Git.
+      ACCOUNT_alice: ${NETRAZE_SAMBA_PASSWORD:?set NETRAZE_SAMBA_PASSWORD}
       UID_alice: "1000"
 
       # ── Global settings (mirror of smb.conf [global]) ──────────────────

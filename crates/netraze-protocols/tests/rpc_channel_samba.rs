@@ -9,7 +9,7 @@
 //!
 //! What this test exercises end-to-end on the wire:
 //!
-//! 1. SMB2 Negotiate + NTLMv2 Session Setup (NT-hash of `[REMOVED_TEST_PASSWORD]`)
+//! 1. SMB2 Negotiate + NTLMv2 Session Setup using the configured test secret
 //! 2. Tree Connect to `\\server\IPC$`
 //! 3. SMB2 CREATE on `\PIPE\srvsvc`
 //! 4. DCE/RPC v5 Bind PDU with NTLMSSP NEGOTIATE in the auth_verifier
@@ -35,6 +35,8 @@
 //!     --ignored --test-threads=1
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,10 +53,7 @@ use netraze_protocols::smb::smb2::Smb2Session;
 /// setups (CI service container, dev box's native Samba, …).
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 
-/// Credentials baked into the Samba container — published in
-/// `tests/samba/docker-compose.yml`. Test-only; do not reuse anywhere real.
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE";
 
 fn samba_addr() -> String {
@@ -77,10 +76,14 @@ fn samba_reachable() -> bool {
     }
 }
 
-/// Build the test credential with the password path — `build_binder` will
-/// derive the NT-hash internally via MD4(UTF-16LE("[REMOVED_TEST_PASSWORD]")).
+/// Build the test credential with the password path — `build_binder` derives
+/// the NT hash internally from the environment-provided fixture password.
 fn test_credential() -> SmbCredential {
-    SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+    SmbCredential::new(
+        TEST_USER,
+        TEST_DOMAIN,
+        &support::required_env("NETRAZE_SAMBA_PASSWORD"),
+    )
 }
 
 /// End-to-end: bind SRVSVC over a sealed NTLMSSP channel and enumerate

@@ -24,6 +24,8 @@
 //! cargo test -p netraze-protocols --test enum_av_samba -- --ignored
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -33,7 +35,6 @@ use netraze_protocols::smb::enum_av;
 
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE";
 
 fn samba_addr() -> String {
@@ -53,7 +54,11 @@ fn samba_reachable() -> bool {
 }
 
 fn cred() -> SmbCredential {
-    SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+    SmbCredential::new(
+        TEST_USER,
+        TEST_DOMAIN,
+        &support::required_env("NETRAZE_SAMBA_PASSWORD"),
+    )
 }
 
 /// The full enum_av chain against Samba. With the minimal

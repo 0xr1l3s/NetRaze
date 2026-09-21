@@ -21,6 +21,8 @@
 //!     --ignored --test-threads=1
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -29,8 +31,15 @@ use netraze_protocols::smb::connection::SmbCredential;
 
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE";
+
+fn test_credential() -> SmbCredential {
+    SmbCredential::new(
+        TEST_USER,
+        TEST_DOMAIN,
+        &support::required_env("NETRAZE_SAMBA_PASSWORD"),
+    )
+}
 
 fn samba_addr() -> String {
     std::env::var("NETRAZE_SAMBA_ADDR").unwrap_or_else(|_| DEFAULT_SAMBA_ADDR.to_owned())
@@ -68,7 +77,7 @@ async fn info_rpc_returns_samba_server_info() {
         );
     }
 
-    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let cred = test_credential();
     let info = fetch_info(&samba_addr(), &cred)
         .await
         .expect("get_server_info against live Samba");
@@ -140,7 +149,11 @@ async fn info_rpc_rejects_bad_password() {
     // Harness maps bad passwords to guest — the strict path rejects the
     // GUEST downgrade, so this still surfaces as an error (not a silent
     // guest session).
-    let bad_cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, "definitely-not-the-password");
+    let bad_password = format!(
+        "{}-invalid",
+        support::required_env("NETRAZE_SAMBA_PASSWORD")
+    );
+    let bad_cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, &bad_password);
     let res = fetch_info(&samba_addr(), &bad_cred).await;
     assert!(
         res.is_err(),

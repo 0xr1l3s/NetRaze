@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The server pins a known inventory (see `tests/samba/smb.conf`):
-//! - user `alice` / password `[REMOVED_TEST_PASSWORD]` — the only authenticated account
+//! - user `alice` with a password supplied through the test environment
 //! - share `private` — STYPE_DISKTREE, authenticated-only, comment
 //!   "Alice's private share"
 //! - share `public` — STYPE_DISKTREE, guest-readable, comment
@@ -26,7 +26,7 @@
 //! Covers:
 //! - SMB2 Negotiate (dialect, caps, security mode echoed back)
 //! - NTLMSSP Negotiate → Challenge → Authenticate dance against real Samba
-//! - NTLMv2 response computed from the NT-hash of `"[REMOVED_TEST_PASSWORD]"` is accepted
+//! - NTLMv2 response computed from the configured password is accepted
 //! - Tree Connect to `\\server\IPC$` (the RPC-named-pipe entrypoint)
 //! - **Phase 3**: SMB2 CREATE / IOCTL (FSCTL_PIPE_TRANSCEIVE) / CLOSE on
 //!   `\PIPE\srvsvc`, with a hand-rolled DCE/RPC Bind PDU pushed through the
@@ -34,6 +34,8 @@
 //!   that every Phase 4-6 RPC interface will ride on actually works.
 //! - **Phase 4**: Authenticated DCE/RPC bind (NTLMSSP PKT_PRIVACY) followed by
 //!   a sealed `NetrShareEnum` request/response over the same pipe.
+
+mod support;
 
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -73,30 +75,25 @@ fn samba_reachable() -> bool {
     }
 }
 
-/// The `alice` / `[REMOVED_TEST_PASSWORD]` credentials baked into the Samba container.
-/// Test-only — not a secret, published in `tests/samba/docker-compose.yml`.
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE"; // matches `workgroup =` in smb.conf
+
+fn test_password() -> String {
+    support::required_env("NETRAZE_SAMBA_PASSWORD")
+}
+
+fn test_credential() -> SmbCredential {
+    SmbCredential::new(TEST_USER, TEST_DOMAIN, &test_password())
+}
 
 /// Sanity check that the NT-hash-from-password helper produces a
 /// 16-byte MD4. Doesn't need Samba to run — it's a precondition for the
 /// auth tests below, so having it here makes failures easier to localize.
 #[test]
-fn nt_hash_of_[REMOVED_TEST_PASSWORD]_is_md4_of_utf16le() {
-    let hash = ntlm::nt_hash_from_password(TEST_PASSWORD).expect("hash");
+#[ignore = "requires NETRAZE_SAMBA_PASSWORD"]
+fn configured_password_produces_an_nt_hash() {
+    let hash = ntlm::nt_hash_from_password(&test_password()).expect("hash");
     assert_eq!(hash.len(), 16);
-    // NT-hash("[REMOVED_TEST_PASSWORD]") — precomputed reference via pycryptodome:
-    //   from Crypto.Hash import MD4
-    //   h = MD4.new(); h.update("[REMOVED_TEST_PASSWORD]".encode("utf-16le")); h.hexdigest()
-    //   → [REMOVED_NTLM_HASH]
-    // (Python 3.11's stdlib hashlib dropped MD4 because OpenSSL did — use
-    // pycryptodome or `openssl dgst -md4` if you need to regenerate.)
-    let expected = [
-        [REMOVED_NTLM_HASH_BYTES]
-        0x35,
-    ];
-    assert_eq!(hash, expected, "NT-hash([REMOVED_TEST_PASSWORD]) drifted");
 }
 
 // ─── Phase 1: basic SMB2 session setup against Samba ──────────────────────
@@ -114,7 +111,7 @@ fn negotiate_sessionsetup_treeconnect_to_ipc() {
     }
     let addr = samba_addr();
     let mut session =
-        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, &test_password())
             .expect("session_setup must succeed against live Samba");
     let host_only = addr.split(':').next().unwrap_or(&addr);
     let ipc = session
@@ -140,12 +137,9 @@ fn bad_password_is_rejected() {
             samba_addr()
         );
     }
-    let res = Smb2Session::connect_with_password(
-        &samba_addr(),
-        TEST_USER,
-        TEST_DOMAIN,
-        "definitely-not-the-password",
-    );
+    let bad_password = format!("{}-invalid", test_password());
+    let res =
+        Smb2Session::connect_with_password(&samba_addr(), TEST_USER, TEST_DOMAIN, &bad_password);
     match res {
         Err(e) => assert!(
             e.contains("downgraded to GUEST"),
@@ -233,7 +227,7 @@ fn pipe_transceive_drives_srvsvc_bind_to_bindack() {
 
     let addr = samba_addr();
     let mut session =
-        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, &test_password())
             .expect("session_setup must succeed against live Samba");
 
     let host_only = addr.split(':').next().unwrap_or(&addr);
@@ -294,7 +288,7 @@ async fn srvsvc_authenticated_share_enum() {
 
     let addr = samba_addr();
     let mut session =
-        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, TEST_PASSWORD)
+        Smb2Session::connect_with_password(&addr, TEST_USER, TEST_DOMAIN, &test_password())
             .expect("session_setup must succeed against live Samba");
 
     let host_only = addr.split(':').next().unwrap_or(&addr);
@@ -307,7 +301,7 @@ async fn srvsvc_authenticated_share_enum() {
         SmbPipeTransport::open(Arc::clone(&session_arc), ipc, "srvsvc").expect("open srvsvc pipe");
     let pipe_handle = *transport.handle();
 
-    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let cred = test_credential();
     let binder = netraze_protocols::smb::rpc::build_binder(&cred, 0);
     let transport_arc: Arc<dyn netraze_dcerpc::transport::RpcTransport> = Arc::new(transport);
 

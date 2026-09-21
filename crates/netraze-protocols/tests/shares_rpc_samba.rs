@@ -29,6 +29,8 @@
 //!     --ignored --test-threads=1
 //! ```
 
+mod support;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -37,8 +39,15 @@ use netraze_protocols::smb::shares::{ShareAccess, ShareInfo, ShareType};
 
 const DEFAULT_SAMBA_ADDR: &str = "127.0.0.1:1445";
 const TEST_USER: &str = "alice";
-const TEST_PASSWORD: &str = "[REMOVED_TEST_PASSWORD]";
 const TEST_DOMAIN: &str = "NETRAZE";
+
+fn test_credential() -> SmbCredential {
+    SmbCredential::new(
+        TEST_USER,
+        TEST_DOMAIN,
+        &support::required_env("NETRAZE_SAMBA_PASSWORD"),
+    )
+}
 
 fn samba_addr() -> String {
     std::env::var("NETRAZE_SAMBA_ADDR").unwrap_or_else(|_| DEFAULT_SAMBA_ADDR.to_owned())
@@ -72,7 +81,7 @@ async fn shares_rpc_lists_pinned_samba_shares() {
         );
     }
 
-    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let cred = test_credential();
     let shares = netraze_protocols::smb::shares::enum_shares(&samba_addr(), &cred)
         .await
         .expect("enum_shares against live Samba");
@@ -143,7 +152,7 @@ async fn shares_rpc_classifies_per_share_access() {
         );
     }
 
-    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let cred = test_credential();
     let shares = netraze_protocols::smb::shares::enum_shares_with_access(&samba_addr(), &cred)
         .await
         .expect("enum_shares_with_access against live Samba");
@@ -189,7 +198,7 @@ async fn shares_rpc_admin_share_check() {
     }
 
     // alice is in `admin users` for ADMIN$ in smb.conf — must succeed.
-    let cred = SmbCredential::new(TEST_USER, TEST_DOMAIN, TEST_PASSWORD);
+    let cred = test_credential();
     let granted =
         netraze_protocols::smb::shares::can_access_admin_share(&samba_addr(), &cred).await;
     assert!(
@@ -199,7 +208,11 @@ async fn shares_rpc_admin_share_check() {
 
     // A bogus password path must NOT grant admin — gates a regression where
     // we'd silently treat any session-setup failure as `false`.
-    let bad = SmbCredential::new(TEST_USER, TEST_DOMAIN, "definitely-not-the-password");
+    let bad_password = format!(
+        "{}-invalid",
+        support::required_env("NETRAZE_SAMBA_PASSWORD")
+    );
+    let bad = SmbCredential::new(TEST_USER, TEST_DOMAIN, &bad_password);
     let denied = netraze_protocols::smb::shares::can_access_admin_share(&samba_addr(), &bad).await;
     assert!(
         !denied,

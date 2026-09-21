@@ -157,13 +157,14 @@ Python scripts in `crates/netraze-dcerpc/tests/` (e.g., `gen_srvs_fixture.py`) a
 Directory: `tests/samba/`
 
 - `docker-compose.yml` spins `ghcr.io/servercontainers/samba:smbd-only-latest` on `127.0.0.1:1445` (high port to avoid colliding with the host OS SMB client).
-- `smb.conf` defines a pinned share inventory with user `alice` / `[REMOVED_TEST_PASSWORD]` in workgroup `NETRAZE`. Wrong passwords map onto the guest account (`map to guest = Bad Password`), which is what exercises the guest paths. Share names and comments are **load-bearing** — Rust tests assert on them exactly.
+- `smb.conf` defines a pinned share inventory with user `alice` in workgroup `NETRAZE`. `NETRAZE_SAMBA_PASSWORD` must be generated in the caller's environment and is shared by Compose and the Rust tests. Wrong passwords map onto the guest account (`map to guest = Bad Password`), which is what exercises the guest paths. Share names and comments are **load-bearing** — Rust tests assert on them exactly.
 - SMB integration tests live in `crates/netraze-protocols/tests/` (`samba_integration`, `rpc_channel_samba`, `shares_rpc_samba`, `info_rpc_samba`, `users_rpc_samba`, `browser_ops_samba`, `exec_samba`, `enum_av_samba`, `anonymous_samba`) and are `#[ignore]` by default.
 
 Run locally:
 
 ```bash
 # Start the container
+export NETRAZE_SAMBA_PASSWORD="$(openssl rand -hex 24)"
 docker compose -f tests/samba/docker-compose.yml up -d --wait
 
 # Select only the nine SMB suites; the separate LDAP suite needs a different DC
@@ -185,11 +186,13 @@ Environment variable `NETRAZE_SAMBA_ADDR` defaults to `127.0.0.1:1445` and can b
 
 Directory: `tests/samba-ad/` (separate from the SMB fixture).
 
-- The digest-pinned Samba AD DC exposes LDAP on `127.0.0.1:1389` and SMB on `127.0.0.1:2445`; test accounts and domain data are disposable, published fixtures.
+- The digest-pinned Samba AD DC exposes LDAP on `127.0.0.1:1389` and SMB on `127.0.0.1:2445`; test accounts and domain data are disposable fixtures, while passwords are injected from `NETRAZE_SAMBA_AD_ADMIN_PASSWORD` and `NETRAZE_SAMBA_AD_PASSWORD` at runtime.
 - `ldap_samba_ad` is ignored by default. Its six tests exercise NTLM password and NT-hash bind, required sign-and-seal, RootDSE, multi-page users, and the complete read-only inventory (groups, computers, OUs, topology, privileged principals, SPNs, reported security settings). They also check anonymous RootDSE access, wrong-password and Guest rejection, protected escaped-filter search, and returned referrals.
 - It has a fixed loopback endpoint and no environment override. Anonymous bind is covered by both a loopback mock-server test and a live RootDSE assertion against the local Samba AD DC; anonymous domain-wide enumeration is not asserted. Do not add real-environment credentials or targets to tests.
 
 ```bash
+export NETRAZE_SAMBA_AD_ADMIN_PASSWORD="Aa1!$(openssl rand -hex 20)"
+export NETRAZE_SAMBA_AD_PASSWORD="Aa1!$(openssl rand -hex 20)"
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
 cargo test -p netraze-protocols --test ldap_samba_ad -- --ignored --test-threads=1
 docker compose -f tests/samba-ad/docker-compose.yml down -v
@@ -240,7 +243,7 @@ The fmt / clippy / test gates are not enforced by CI today — run them locally 
 
 1. **This is offensive security software.** It is intended exclusively for authorized security assessments — your own infrastructure, engagements covered by a signed statement of work, or purpose-built lab environments. Running it against systems you do not own or do not have explicit written permission to test is illegal.
 
-2. **Test credentials are published openly.** The Samba integration harness uses `alice` / `[REMOVED_TEST_PASSWORD]` in workgroup `NETRAZE`. These are test-only and must never be reused in any real environment.
+2. **Test credentials are ephemeral.** Both Samba harnesses require caller-generated passwords through environment variables and store no working password in Git. Never reuse those generated values outside their disposable loopback harness.
 
 3. **No `unsafe` Rust policy:** There is no project-wide ban on `unsafe`, but the wire-protocol crates (`netraze-dcerpc`, `netraze-protocols::smb2`) are written entirely in safe Rust. Any introduction of `unsafe` should be justified and documented.
 
@@ -319,6 +322,7 @@ cargo fmt --all --check
 cargo clippy -p netraze-dcerpc --all-targets -- -D warnings
 
 # Samba integration (requires Docker)
+export NETRAZE_SAMBA_PASSWORD="$(openssl rand -hex 24)"
 docker compose -f tests/samba/docker-compose.yml up -d --wait
 cargo test -p netraze-protocols \
   --test samba_integration --test rpc_channel_samba --test shares_rpc_samba \
@@ -328,6 +332,8 @@ cargo test -p netraze-protocols \
 docker compose -f tests/samba/docker-compose.yml down -v
 
 # LDAP/NTLM integration (separate local Samba AD DC)
+export NETRAZE_SAMBA_AD_ADMIN_PASSWORD="Aa1!$(openssl rand -hex 20)"
+export NETRAZE_SAMBA_AD_PASSWORD="Aa1!$(openssl rand -hex 20)"
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
 cargo test -p netraze-protocols --test ldap_samba_ad -- --ignored --test-threads=1
 docker compose -f tests/samba-ad/docker-compose.yml down -v

@@ -17,7 +17,8 @@ publishes LDAP and SMB only on the loopback interface.
 | File | Role |
 |---|---|
 | `docker-compose.yml` | Starts the digest-pinned `quay.io/samba.org/samba-ad-server` on loopback ports 1389 (LDAP) and 2445 (SMB). The healthcheck waits for a directory query to succeed. |
-| `domain.json` | Provisions the fixed test realm, users, groups, and domain controller. Names and credentials are load-bearing test fixtures. |
+| `domain.json` | Password-free template that provisions the fixed test realm, users, groups, and domain controller. |
+| `inject-secrets.py` | Injects required environment-provided passwords into a mode-0600 runtime configuration inside the container, then replaces itself with Samba. |
 | `crates/netraze-protocols/tests/ldap_samba_ad.rs` | Six ignored, fixed-endpoint integration tests for binds, searches, paging, referrals, and inventory. |
 
 The container runs privileged because Samba AD provisioning needs filesystem
@@ -31,14 +32,14 @@ extended attributes. Do not run it on an untrusted Docker host.
 | SMB endpoint | `127.0.0.1:2445` |
 | Realm | `NETRAZE.TEST` |
 | NetBIOS domain | `NETRAZE` |
-| Administrator password | `[REMOVED_TEST_PASSWORD]` |
-| LDAP test account | `alice` / `[REMOVED_TEST_PASSWORD]` |
-| Additional users | `bob` / `[REMOVED_TEST_PASSWORD]`, `carol` / `[REMOVED_TEST_PASSWORD]` |
+| Administrator password | Runtime-only `NETRAZE_SAMBA_AD_ADMIN_PASSWORD` |
+| LDAP test account | `alice` / runtime-only `NETRAZE_SAMBA_AD_PASSWORD` |
+| Additional users | `bob`, `carol` (same runtime-only test password) |
 | Provisioned groups | `interns`, `operators` |
 | Domain controller | `dc1` (`DC1$` in computer enumeration) |
 
-Every credential above is public test data. Never reuse it outside this
-disposable harness.
+Generate fresh passwords for each run and never reuse them outside this
+disposable harness. Neither password has a repository default.
 
 ---
 
@@ -47,11 +48,14 @@ disposable harness.
 ### Start the domain controller
 
 ```shell
+export NETRAZE_SAMBA_AD_ADMIN_PASSWORD="Aa1!$(openssl rand -hex 20)"
+export NETRAZE_SAMBA_AD_PASSWORD="Aa1!$(openssl rand -hex 20)"
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
 ```
 
 `--wait` blocks until the container's LDAP healthcheck passes. The first
-provisioning run can take longer than subsequent starts.
+provisioning run can take longer than subsequent starts. Run Cargo in the same
+shell so the test client receives the provisioned account password.
 
 ### Run the LDAP/NTLM integration tests
 
@@ -80,6 +84,7 @@ server-managed logon metadata.
 
 ```shell
 docker compose -f tests/samba-ad/docker-compose.yml down -v
+unset NETRAZE_SAMBA_AD_ADMIN_PASSWORD NETRAZE_SAMBA_AD_PASSWORD
 ```
 
 `-v` removes the disposable `samba-ad-state` volume and its provisioned
@@ -138,6 +143,8 @@ and reprovision:
 
 ```shell
 docker compose -f tests/samba-ad/docker-compose.yml down -v
+export NETRAZE_SAMBA_AD_ADMIN_PASSWORD="Aa1!$(openssl rand -hex 20)"
+export NETRAZE_SAMBA_AD_PASSWORD="Aa1!$(openssl rand -hex 20)"
 docker compose -f tests/samba-ad/docker-compose.yml up -d --wait
 ```
 

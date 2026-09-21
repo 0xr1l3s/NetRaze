@@ -10,8 +10,7 @@
   "domain_settings": {
     "netraze": {
       "realm": "NETRAZE.TEST",
-      "short_domain": "NETRAZE",
-      "admin_password": "[REMOVED_TEST_PASSWORD]"
+      "short_domain": "NETRAZE"
     }
   },
   "domain_groups": {
@@ -24,21 +23,18 @@
     "netraze": [
       {
         "name": "alice",
-        "password": "[REMOVED_TEST_PASSWORD]",
         "given_name": "Alice",
         "surname": "Liddell",
         "member_of": ["interns"]
       },
       {
         "name": "bob",
-        "password": "[REMOVED_TEST_PASSWORD]",
         "given_name": "Bob",
         "surname": "Builder",
         "member_of": ["operators"]
       },
       {
         "name": "carol",
-        "password": "[REMOVED_TEST_PASSWORD]",
         "given_name": "Carol",
         "surname": "Danvers",
         "member_of": ["operators"]
