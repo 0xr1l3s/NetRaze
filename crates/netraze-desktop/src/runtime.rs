@@ -1414,6 +1414,12 @@ mod ldap_runtime_tests {
     use super::*;
     use crate::state::{CredType, anonymous_record};
 
+    fn synthetic_nt_hash_hex() -> String {
+        (0_u8..16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    }
+
     #[test]
     fn converts_saved_password_and_hash_credentials_strictly() {
         let password = CredentialRecord {
@@ -1427,9 +1433,10 @@ mod ldap_runtime_tests {
             Ok(netraze_protocols::ntlm::NtlmCredential::Password(_))
         ));
 
+        let hash = synthetic_nt_hash_hex();
         let valid_hash = CredentialRecord {
             cred_type: CredType::Hash,
-            secret: "[REMOVED_NTLM_HASH]".to_owned(),
+            secret: hash,
             ..password.clone()
         };
         assert!(matches!(
@@ -1487,12 +1494,8 @@ mod ldap_runtime_tests {
             redact_secret("bind rejected test-only-password", "test-only-password"),
             "bind rejected <redacted>"
         );
-        assert_eq!(
-            redact_secret(
-                "hash [REMOVED_NTLM_HASH] rejected",
-                "[REMOVED_NTLM_HASH]"
-            ),
-            "hash <redacted> rejected"
-        );
+        let hash = synthetic_nt_hash_hex();
+        let error = format!("hash {} rejected", hash.to_ascii_uppercase());
+        assert_eq!(redact_secret(&error, &hash), "hash <redacted> rejected");
     }
 }

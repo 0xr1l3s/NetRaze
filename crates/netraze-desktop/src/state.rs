@@ -1477,6 +1477,12 @@ mod user_enum_tests {
     use netraze_core::{UserEnumerationSource, UserInfo};
     use netraze_protocols::users::UserEnumerationOutcome;
 
+    fn synthetic_nt_hash_hex() -> String {
+        (0_u8..16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    }
+
     fn state_with_host() -> (
         AppState,
         usize,
@@ -1649,7 +1655,7 @@ mod user_enum_tests {
         )));
         let serialized = serde_json::to_string(&state.to_save()).unwrap();
         assert!(!serialized.contains("test-only-ldap-secret"));
-        assert!(!serialized.contains("[REMOVED_NTLM_HASH]"));
+        assert!(!serialized.contains(&synthetic_nt_hash_hex()));
         assert!(!serialized.contains("\"loading\""));
     }
 
@@ -1769,10 +1775,11 @@ mod user_enum_tests {
         let workspace = serde_json::to_string(&state.to_save()).unwrap();
         assert!(workspace.contains("test-only-inline-secret"));
 
-        state.credential_config.ntlm_hash = "[REMOVED_NTLM_HASH]".to_owned();
+        let hash = synthetic_nt_hash_hex();
+        state.credential_config.ntlm_hash = hash.clone();
         let mut credential = state.credential_config.as_record().unwrap().unwrap();
         assert_eq!(credential.cred_type, CredType::Hash);
-        assert_eq!(credential.secret, "[REMOVED_NTLM_HASH]");
+        assert_eq!(credential.secret, hash);
         credential.protocol = "LDAP".to_owned();
         credential.username = "ALICE".to_owned();
         state.credentials[0].valid = Some(true);
@@ -1788,10 +1795,7 @@ mod user_enum_tests {
         loaded.load_from(state.to_save());
         assert!(loaded.session_credentials.is_empty());
         assert_eq!(loaded.credentials.len(), 1);
-        assert_eq!(
-            loaded.credentials[0].secret,
-            "[REMOVED_NTLM_HASH]"
-        );
+        assert_eq!(loaded.credentials[0].secret, synthetic_nt_hash_hex());
     }
 
     #[test]

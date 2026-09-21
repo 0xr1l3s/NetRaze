@@ -574,16 +574,15 @@ mod tests {
 
     #[test]
     fn parses_nt_hash_hex_strictly() {
-        let credential =
-            NtlmCredential::from_nt_hash_hex("[REMOVED_NTLM_HASH]").unwrap();
-        assert_eq!(
-            credential.nt_hash().unwrap(),
-            [
-                [REMOVED_NTLM_HASH_BYTES]
-                0x58, 0x6c,
-            ]
-        );
+        let expected = core::array::from_fn::<_, 16, _>(|index| index as u8);
+        let encoded = expected
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let credential = NtlmCredential::from_nt_hash_hex(&encoded).unwrap();
+        assert_eq!(credential.nt_hash().unwrap(), expected);
         assert!(NtlmCredential::from_nt_hash_hex("00").is_err());
-        assert!(NtlmCredential::from_nt_hash_hex("[REMOVED_INVALID_HASH_FIXTURE]").is_err());
+        let invalid = format!("z{}", &encoded[1..]);
+        assert!(NtlmCredential::from_nt_hash_hex(&invalid).is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Smoke-test the pure-Rust SAMR + WINREG paths against a live target.
 //!
 //! Usage:
-//!   cargo run -p netraze-protocols --example test_target -- 192.0.2.10 example-user [REMOVED_PASSWORD]
+//!   cargo run -p netraze-protocols --example test_target -- <target> <user> <password> [domain]
 
 use netraze_protocols::smb::connection::SmbCredential;
 use netraze_protocols::smb::dump::remote_dump_sam;
