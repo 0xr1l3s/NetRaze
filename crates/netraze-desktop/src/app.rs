@@ -58,6 +58,10 @@ impl eframe::App for NetRazeDesktopApp {
             match dump_type.as_str() {
                 "SAM" => self.runtime.spawn_dump_sam(node_id, ip, hostname, cred),
                 "LSA" => self.runtime.spawn_dump_lsa(node_id, ip, hostname, cred),
+                dt if dt.starts_with("NANODUMP:") => {
+                    let bin = dt.trim_start_matches("NANODUMP:").to_owned();
+                    self.runtime.spawn_dump_nanodump(node_id, ip, hostname, cred, bin);
+                }
                 _ => {}
             }
         }

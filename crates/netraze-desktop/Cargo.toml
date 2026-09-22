@@ -25,3 +25,4 @@ tracing.workspace = true
 # alone only propagates `wgpu/wgsl`. See workspace Cargo.toml for the
 # full rationale (and the list of backends enabled here).
 wgpu.workspace = true
+rfd = "0.15"

