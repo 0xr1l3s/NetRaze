@@ -13,7 +13,7 @@
 - **Memory-safe wire protocols** — SMB2, NTLMSSP, and DCE/RPC are re-implemented in Rust and validated byte-for-byte against Impacket-generated fixtures. No FFI to Impacket or Samba libraries.
 - **Cross-platform attacker OS** — Linux and Windows are equally capable attacker platforms. The cross-platform portage is complete: every SMB capability is pure Rust, and the `windows` crate is no longer a dependency of any protocol crate.
 
-**Status:** Alpha. SMB2 + NTLMv2 (including anonymous null sessions and guest access) are the most mature protocols; the SMB post-exploitation surface (share/user enumeration, file browser, smbexec, SAM/LSA dump, AV enum) is fully ported and covered by the Samba integration harness. LDAP now supports NTLMv2 SASL sign-and-seal, anonymous bind, RootDSE, paged AD user enumeration, and read-only directory inventory. Kerberos and deeper LDAP security probes remain future work (see `docs/protocol-stack-plan.md`).
+**Status:** Alpha. SMB2 + NTLMv2 (including anonymous null sessions and guest access) are the most mature protocols; the SMB post-exploitation surface (share/user enumeration, file browser, smbexec, SAM/LSA dump, AV enum) is fully ported and covered by the Samba integration harness. LDAP now supports NTLMv2 SASL sign-and-seal, anonymous bind, RootDSE, paged AD user enumeration, read-only directory inventory, and BloodHound Community Edition schema-v6 JSON/ZIP export. Kerberos and deeper LDAP security probes remain future work (see `docs/protocol-stack-plan.md`).
 
 **License:** BSD-2-Clause.
 
@@ -30,6 +30,7 @@
 - **Diagnostics:** `tracing` + `tracing-subscriber`.
 - **Crypto:** `aes`, `cbc`, `cipher`, `des`, `hmac`, `md-5`, `md4`, `rand`.
 - **Graph / workflow UI:** `egui-snarl` (node graph), `egui_graphs`, `petgraph`.
+- **BloodHound CE adapter:** `rusthound-ce` 2.5.14 with `nogssapi`; NetRaze supplies the LDAP/NTLM transport and uses the dependency for CE object/relationship parsing and schema-v6 output.
 
 ---
 
@@ -45,7 +46,7 @@ This is a Cargo workspace with 14 members (13 application crates + `xtask`).
 | `netraze-app` | Composition root / service wiring. | The only crate allowed to know almost everything. Bootstraps registries, storage, output, config, and runtime. |
 | `netraze-cli` | Thin CLI binary (`clap`). | **Must contain zero protocol logic.** Entry point for headless use. |
 | `netraze-desktop` | `egui`/`eframe` GUI with node-graph workflow canvas. | Binary crate. Uses `wgpu` backend and `egui-snarl` for visual workflows. |
-| `netraze-protocols` | Wire-level protocol handlers. | SMB and LDAP are implemented in pure Rust. LDAP/NTLM code lives under this crate, not in separate workspace crates. SSH, WinRM, RDP, FTP, MSSQL, NFS, VNC, and WMI remain scaffold-only. |
+| `netraze-protocols` | Wire-level protocol handlers. | SMB and LDAP are implemented in pure Rust. LDAP/NTLM and the BloodHound CE adapter live under this crate, not in separate workspace crates. SSH, WinRM, RDP, FTP, MSSQL, NFS, VNC, and WMI remain scaffold-only. |
 | `netraze-dcerpc` | Pure-Rust DCE/RPC v5 stack. | NDR20, PDU framing, NTLMSSP auth verifier, interfaces: SRVSVC, SAMR, WINREG, SCMR. No `cfg(windows)` allowed inside this crate. |
 | `netraze-modules` | Post-exploitation module registry. | Categories: `active_directory`, `credentials`, `reconnaissance`. |
 | `netraze-auth` | Credential types and authentication methods. | `CredentialSet`, `SecretMaterial`, `AuthMethod`. |
@@ -187,7 +188,7 @@ Environment variable `NETRAZE_SAMBA_ADDR` defaults to `127.0.0.1:1445` and can b
 Directory: `tests/samba-ad/` (separate from the SMB fixture).
 
 - The digest-pinned Samba AD DC exposes LDAP on `127.0.0.1:1389` and SMB on `127.0.0.1:2445`; test accounts and domain data are disposable fixtures, while passwords are injected from `NETRAZE_SAMBA_AD_ADMIN_PASSWORD` and `NETRAZE_SAMBA_AD_PASSWORD` at runtime.
-- `ldap_samba_ad` is ignored by default. Its six tests exercise NTLM password and NT-hash bind, required sign-and-seal, RootDSE, multi-page users, and the complete read-only inventory (groups, computers, OUs, topology, privileged principals, SPNs, reported security settings). They also check anonymous RootDSE access, wrong-password and Guest rejection, protected escaped-filter search, and returned referrals.
+- `ldap_samba_ad` is ignored by default. Its seven tests exercise NTLM password and NT-hash bind, required sign-and-seal, RootDSE, multi-page users, the complete read-only inventory (groups, computers, OUs, topology, privileged principals, SPNs, reported security settings), and BloodHound CE schema-v6 JSON/ZIP export. They also check anonymous RootDSE access, wrong-password and Guest rejection, protected escaped-filter search, and returned referrals.
 - It has a fixed loopback endpoint and no environment override. Anonymous bind is covered by both a loopback mock-server test and a live RootDSE assertion against the local Samba AD DC; anonymous domain-wide enumeration is not asserted. Do not add real-environment credentials or targets to tests.
 
 ```bash
@@ -291,6 +292,7 @@ a dependency of `netraze-protocols`:
 | `docs/architecture.md` | Target architecture (in French). Dependency rules and evolution plan. |
 | `docs/migration-roadmap.md` | Detailed structural roadmap + the (now complete) cross-platform portage plan. |
 | `docs/protocol-stack-plan.md` | Operational inventory of every protocol interface NetRaze needs — the "what do we attack next" table. |
+| `crates/netraze-protocols/src/ldap/bloodhound.rs` | NetRaze LDAP-to-RustHound adapter and the public BloodHound CE export API. |
 | `tests/samba/README.md` | Operator guide for the live integration harness (suite list, known Samba limits). |
 | `tests/samba-ad/README.md` | Fixed-loopback LDAP/NTLM AD harness and test-data guide. |
 | `crates/netraze-dcerpc/tests/gen_srvs_fixture.py` | Pattern for Impacket-pinned byte fixtures. |
@@ -310,6 +312,8 @@ cargo build --release
 cargo run -p netraze-cli -- protocols
 cargo run -p netraze-cli -- modules
 cargo run -p netraze-cli -- plan smb 10.10.10.0/24 --module shares
+# BloodHound CE: see README.md for password/hash environment-variable usage
+cargo run -p netraze-cli -- bloodhound-ce --help
 
 # Run the GUI
 cargo run -p netraze-desktop

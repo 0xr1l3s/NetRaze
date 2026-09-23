@@ -120,7 +120,7 @@ est limité à la lecture de RootDSE, sans assertion d'énumération du domaine.
 | `bind::sasl_gss_spnego` (NTLMSSP wrapped) | ✅ | NTLMv2 mot de passe/hash, MIC, sign-and-seal |
 | `search::request` + `search::result_entry` | ✅ | RFC 4511 §4.5, framing borné |
 | `controls::paged_results` (1.2.840.113556.1.4.319) | ✅ | Cookies itérés avec détection des répétitions |
-| `controls::sd_flags` (security descriptor) | ⚪ | Pour ACL enum (BloodHound-equivalent) |
+| `controls::sd_flags` (security descriptor) | ✅ | Contrôle AD SD Flags utilisé par l'export BloodHound CE, avec Show Deleted et pagination |
 | `client::LdapClient` (TCP + bind + search loop) | ✅ | Async, tokio, délais de 5 s/20 s, plafond 16 Mio, IDs de message corrélés ; referrals retournés sans suivi automatique |
 | `inventory` (RootDSE + sections AD) | ✅ | Utilisateurs, groupes, ordinateurs, OU/conteneurs, topologie, privilèges, SPN et politiques rapportées ; erreurs partielles exposées |
 
@@ -137,6 +137,14 @@ est limité à la lecture de RootDSE, sans assertion d'énumération du domaine.
 | `find_asreproastable` | 🔜 | Filtre `(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304))` — alimente `netraze-protocols::kerberos::asreproast` |
 | Indicateurs de délégation | ✅ | Bits UAC exposés dans l'inventaire utilisateur/ordinateur ; pas encore de module d'exploitation dédié |
 | RootDSE fetch (defaultNamingContext) | ✅ | Préliminaire à toute search |
+| Export BloodHound Community Edition | ✅ | Collecte des contextes Schema et domaine par le transport LDAP/NTLM NetRaze, conversion via `rusthound-ce` 2.5.14, JSON schéma v6 et archive ZIP ; disponible en CLI et dans le nœud AD Directory du desktop |
+
+L'export BloodHound actuel est volontairement limité au graphe LDAP CE obtenu
+depuis le contexte Schema et le contexte de domaine par défaut. Il ne collecte
+pas encore AD CS, les sessions interactives, les groupes locaux, SYSVOL ni les
+relations dépendant de Kerberos. LDAPS et le suivi des referrals restent hors
+périmètre ; les referrals sont rapportés sans transfert automatique des
+identifiants.
 
 ### Smart `enum_users` orchestration (livrée)
 
@@ -243,15 +251,16 @@ Statut **module-level** — peut composer plusieurs interfaces RPC.
 
 L'ordre **chronologique** dans lequel je recommande d'avancer.
 Les chantiers 1–4 et 8 (SMB2 file ops, `exec_rpc`, `browser_rpc`, LDAP,
-SMB signing) sont **faits** ; le chantier LDAP est validé contre le
-harness Samba AD local. Reste, chaque ligne débloquant les suivantes :
+SMB signing) sont **faits** ; le chantier LDAP et son export BloodHound CE
+sont validés contre le harness Samba AD local. Reste, chaque ligne débloquant
+les suivantes :
 
 | # | Chantier | Coût | Débloque |
 |---|---|---|---|
 | ~~1~~ | ~~**Phase D.1** — SMB2 file ops~~ | ✅ fait | write/delete/query_directory/create_directory — live Samba (browser_ops) |
 | ~~2~~ | ~~**Phase D.3** — `exec_rpc` via SCMR~~ | ✅ fait | smbexec complet (create/start/stop/delete) — wire-smoke Samba OK |
 | ~~3~~ | ~~**Phase D.4** — `browser_rpc`~~ | ✅ fait | browser cross-platform + suites browser_ops |
-| ~~4~~ | ~~**Module `netraze-protocols::ldap`** — BER, bind SASL/NTLMSSP, recherche paginée et inventaire AD~~ | ✅ fait | Utilisateurs, groupes, ordinateurs, OU, topologie, privilèges, SPN et politiques rapportées |
+| ~~4~~ | ~~**Module `netraze-protocols::ldap`** — BER, bind SASL/NTLMSSP, recherche paginée, inventaire AD et export BloodHound CE~~ | ✅ fait | Utilisateurs, groupes, ordinateurs, OU, topologie, privilèges, SPN, politiques rapportées et JSON/ZIP CE schéma v6 |
 | 5 | **Module `netraze-protocols::kerberos`** — ASN.1 Kerberos + AS-REQ/REP + TGS-REQ/REP + RC4/AES decrypt | 8j | AS-REProast + Kerberoast |
 | 6 | `dcerpc.lsarpc` — OpenPolicy2 + LookupSids/Names | 3j | Account naming dans LSA dump |
 | 7 | `dcerpc.drsuapi` — DRSBind + DRSGetNCChanges | 10j | **DCSync** = NTDS.dit complet sans toucher disque |
