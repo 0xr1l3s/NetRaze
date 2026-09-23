@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinSet;
@@ -81,6 +82,14 @@ pub enum RuntimeEvent {
         endpoint: String,
         cred_label: String,
         result: Box<Result<netraze_core::DirectoryInventory, String>>,
+    },
+    BloodHoundProgress {
+        endpoint: String,
+        progress: netraze_protocols::ldap::BloodHoundCeProgress,
+    },
+    BloodHoundResult {
+        endpoint: String,
+        result: Result<netraze_protocols::ldap::BloodHoundCeArtifacts, String>,
     },
     DumpResult {
         host_node_id: usize,
@@ -622,6 +631,78 @@ impl RuntimeServices {
                 }
             }
             let _ = tx.send(RuntimeEvent::ScanFinished);
+        });
+    }
+
+    /// Collect a fresh LDAP graph and export BloodHound Community Edition data.
+    pub fn spawn_bloodhound_ce_export(
+        &self,
+        endpoint: String,
+        credential: CredentialRecord,
+        output_directory: PathBuf,
+        timeout_seconds: u64,
+    ) {
+        let tx = self.log_tx.clone();
+        self.runtime.spawn(async move {
+            let credential_label = crate::state::cred_label(&credential);
+            let authentication = match cred_to_ldap_auth(&credential) {
+                Ok(authentication) => authentication,
+                Err(error) => {
+                    let _ = tx.send(RuntimeEvent::Log {
+                        level: LogLevel::Error,
+                        message: format!("{endpoint}: BloodHound CE export skipped: {error}"),
+                    });
+                    let _ = tx.send(RuntimeEvent::BloodHoundResult {
+                        endpoint,
+                        result: Err(error),
+                    });
+                    return;
+                }
+            };
+            let secret = credential.secret;
+            let _ = tx.send(RuntimeEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "{endpoint}: starting BloodHound CE LDAP collection as {credential_label}"
+                ),
+            });
+
+            let timeout = Duration::from_secs(timeout_seconds.max(1));
+            let mut config = netraze_protocols::ldap::LdapClientConfig::new(&endpoint);
+            config.connect_timeout = timeout;
+            config.operation_timeout = timeout;
+            let progress_tx = tx.clone();
+            let progress_endpoint = endpoint.clone();
+            let result = netraze_protocols::ldap::collect_and_export_ce_with_progress(
+                config,
+                authentication,
+                netraze_protocols::ldap::BloodHoundCeExportOptions::new(output_directory),
+                move |progress| {
+                    let _ = progress_tx.send(RuntimeEvent::BloodHoundProgress {
+                        endpoint: progress_endpoint.clone(),
+                        progress,
+                    });
+                },
+            )
+            .await
+            .map_err(|error| redact_secret(&error.to_string(), &secret));
+
+            let (level, message) = match &result {
+                Ok(artifacts) => (
+                    LogLevel::Success,
+                    format!(
+                        "{endpoint}: BloodHound CE export completed ({} objects, {})",
+                        artifacts.exported_object_count,
+                        artifacts.zip_file.display()
+                    ),
+                ),
+                Err(error) => (
+                    LogLevel::Error,
+                    format!("{endpoint}: BloodHound CE export failed: {error}"),
+                ),
+            };
+            let _ = tx.send(RuntimeEvent::Log { level, message });
+            let _ = tx.send(RuntimeEvent::BloodHoundResult { endpoint, result });
         });
     }
 
