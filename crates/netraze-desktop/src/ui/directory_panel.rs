@@ -15,6 +15,23 @@ const LABEL_COLOR: egui::Color32 = theme::MUTED;
 const ACCENT: egui::Color32 = theme::ACC;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum DirectoryAction {
+    #[default]
+    None,
+    ExportBloodHoundCe,
+}
+
+pub(super) struct BloodHoundExportView<'a> {
+    pub running: bool,
+    pub phase: &'a str,
+    pub output_directory: Option<&'a std::path::Path>,
+    pub exported_object_count: usize,
+    pub json_file_count: usize,
+    pub zip_file: Option<&'a std::path::Path>,
+    pub error: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum DirectoryTab {
     #[default]
     Overview,
@@ -49,22 +66,24 @@ pub(super) struct DirectoryView<'a> {
     pub error: Option<&'a str>,
     pub loading: bool,
     pub cred_label: Option<&'a str>,
+    pub bloodhound_export: Option<BloodHoundExportView<'a>>,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, node_key: usize, view: DirectoryView<'_>) {
+pub(super) fn show(ui: &mut egui::Ui, node_key: usize, view: DirectoryView<'_>) -> DirectoryAction {
     header(ui, view.endpoint, view.hostname, view.cred_label);
+    let action = show_bloodhound_export(ui, view.loading, view.bloodhound_export);
     if view.loading {
         ui.spinner();
         ui.label("Discovering the directory…");
-        return;
+        return action;
     }
     if let Some(error) = view.error {
         ui.colored_label(theme::ERROR, format!("LDAP discovery failed: {error}"));
-        return;
+        return action;
     }
     let Some(inventory) = view.inventory else {
         ui.colored_label(theme::WARNING, "No directory inventory is available");
-        return;
+        return action;
     };
 
     let tab_id = egui::Id::new(("directory-tab", node_key));
@@ -108,6 +127,93 @@ pub(super) fn show(ui: &mut egui::Ui, node_key: usize, view: DirectoryView<'_>) 
         DirectoryTab::Services => show_services(ui, inventory, &query),
         DirectoryTab::Security => show_security(ui, inventory),
     }
+    action
+}
+
+fn show_bloodhound_export(
+    ui: &mut egui::Ui,
+    directory_loading: bool,
+    export: Option<BloodHoundExportView<'_>>,
+) -> DirectoryAction {
+    ui.group(|ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("BloodHound CE")
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+            if export.as_ref().is_some_and(|state| state.running) {
+                ui.spinner();
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Collect a fresh read-only LDAP graph and write schema-v6 JSON plus ZIP.",
+            )
+            .small()
+            .color(LABEL_COLOR),
+        );
+
+        if let Some(state) = &export {
+            if !state.phase.is_empty() {
+                ui.label(egui::RichText::new(state.phase).small().color(
+                    if state.error.is_some() {
+                        theme::ERROR
+                    } else if state.running {
+                        theme::INFO
+                    } else {
+                        theme::SUCCESS
+                    },
+                ));
+            }
+            if state.exported_object_count > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} graph objects • {} JSON collections",
+                        state.exported_object_count, state.json_file_count
+                    ))
+                    .small()
+                    .color(LABEL_COLOR),
+                );
+            }
+            if let Some(path) = state.zip_file {
+                ui.label(
+                    egui::RichText::new(path.display().to_string())
+                        .monospace()
+                        .small()
+                        .color(theme::SUCCESS),
+                );
+            } else if let Some(path) = state.output_directory {
+                ui.label(
+                    egui::RichText::new(format!("Output: {}", path.display()))
+                        .monospace()
+                        .small()
+                        .color(LABEL_COLOR),
+                );
+            }
+            if let Some(error) = state.error {
+                ui.colored_label(theme::ERROR, error);
+            }
+        }
+
+        let running = export.as_ref().is_some_and(|state| state.running);
+        ui.add_enabled_ui(!directory_loading && !running, |ui| {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::Button::new("Export BloodHound CE…"),
+                )
+                .clicked()
+            {
+                DirectoryAction::ExportBloodHoundCe
+            } else {
+                DirectoryAction::None
+            }
+        })
+        .inner
+    })
+    .inner
 }
 
 fn header(ui: &mut egui::Ui, endpoint: &str, hostname: &str, cred_label: Option<&str>) {

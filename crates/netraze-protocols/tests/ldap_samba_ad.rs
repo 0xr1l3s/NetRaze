@@ -1,8 +1,13 @@
 mod support;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use netraze_core::UserEnumerationSource;
 use netraze_protocols::{
-    ldap::{self, LdapClient, LdapClientConfig, LdapError},
+    ldap::{
+        self, BloodHoundCeExportOptions, LdapAuthentication, LdapClient, LdapClientConfig,
+        LdapError,
+    },
     ntlm::{NtlmCredential, nt_hash_from_password},
 };
 
@@ -246,6 +251,73 @@ async fn protected_search_supports_compound_escaped_filter_and_base_scope() {
         Some(TEST_USER)
     );
     client.unbind().await.expect("LDAP unbind failed");
+}
+
+#[tokio::test]
+#[ignore = "requires the local tests/samba-ad Docker harness"]
+async fn bloodhound_ce_export_writes_schema_v6_json_and_zip() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock predates the Unix epoch")
+        .as_nanos();
+    let output = std::env::temp_dir().join(format!(
+        "netraze-bloodhound-samba-ad-{}-{nonce}",
+        std::process::id()
+    ));
+    let mut config = LdapClientConfig::new(LDAP_ENDPOINT);
+    config.page_size = 2;
+    let artifacts = ldap::collect_and_export_ce(
+        config,
+        LdapAuthentication::Ntlm {
+            username: TEST_USER.to_owned(),
+            domain: TEST_DOMAIN.to_owned(),
+            credential: NtlmCredential::Password(test_password()),
+        },
+        BloodHoundCeExportOptions::new(&output),
+    )
+    .await
+    .expect("BloodHound CE export against the local Samba AD failed");
+
+    assert_eq!(artifacts.domain, "netraze.test");
+    assert!(artifacts.ldap_entry_count > 3);
+    assert!(artifacts.exported_object_count > 3);
+    assert!(artifacts.collection_counts["users"] >= 3);
+    assert!(artifacts.collection_counts["groups"] >= 2);
+    assert!(artifacts.collection_counts["computers"] >= 1);
+    assert!(artifacts.collection_counts["domains"] >= 1);
+    assert!(artifacts.zip_file.is_file());
+    assert!(std::fs::metadata(&artifacts.zip_file).unwrap().len() > 0);
+    assert!(!artifacts.json_files.is_empty());
+
+    let mut found_configuration_container = false;
+    for path in &artifacts.json_files {
+        let document = std::fs::read_to_string(path).expect("failed to read exported CE JSON");
+        let document: serde_json::Value =
+            serde_json::from_str(&document).expect("exported CE document is not valid JSON");
+        let data = document["data"]
+            .as_array()
+            .expect("CE data field is not an array");
+        let meta = &document["meta"];
+        assert_eq!(meta["version"], 6);
+        assert_eq!(meta["count"].as_u64(), Some(data.len() as u64));
+        assert!(meta["type"].as_str().is_some_and(|value| !value.is_empty()));
+        if meta["type"].as_str() == Some("containers") {
+            found_configuration_container = data.iter().any(|object| {
+                object["Properties"]["distinguishedname"]
+                    .as_str()
+                    .is_some_and(|dn| {
+                        dn.to_ascii_lowercase()
+                            .contains("cn=configuration,dc=netraze,dc=test")
+                    })
+            });
+        }
+    }
+    assert!(
+        found_configuration_container,
+        "CE export omitted objects from configurationNamingContext"
+    );
+
+    std::fs::remove_dir_all(output).expect("failed to remove temporary CE export");
 }
 
 async fn connect(credential: NtlmCredential, page_size: u32) -> LdapClient {

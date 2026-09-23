@@ -19,7 +19,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
             .is_some();
 
         if exists {
-            show_node_panel(ui, state, raw_id);
+            show_node_panel(ui, state, runtime, raw_id);
             return;
         } else {
             // Node was removed — clear selection and fall through to default config.
@@ -302,7 +302,12 @@ fn scan_validation_error(state: &AppState) -> Option<String> {
 
 // ── Per-node detail panel ─────────────────────────────────────────────────────
 
-fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
+fn show_node_panel(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    runtime: &RuntimeServices,
+    raw_id: usize,
+) {
     let node_id = NodeId(raw_id);
 
     if let WorkflowNode::DirectoryNode {
@@ -314,7 +319,8 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
         cred_label,
     } = &state.workflow.snarl[node_id]
     {
-        super::directory_panel::show(
+        let export = state.bloodhound_exports.get(endpoint);
+        let action = super::directory_panel::show(
             ui,
             raw_id,
             super::directory_panel::DirectoryView {
@@ -324,8 +330,24 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
                 error: error.as_deref(),
                 loading: *loading,
                 cred_label: cred_label.as_deref(),
+                bloodhound_export: export.map(|export| {
+                    super::directory_panel::BloodHoundExportView {
+                        running: export.running,
+                        phase: &export.phase,
+                        output_directory: export.output_directory.as_deref(),
+                        exported_object_count: export.exported_object_count,
+                        json_file_count: export.json_files.len(),
+                        zip_file: export.zip_file.as_deref(),
+                        error: export.error.as_deref(),
+                    }
+                }),
             },
         );
+        let endpoint = endpoint.clone();
+        let cred_label = cred_label.clone();
+        if action == super::directory_panel::DirectoryAction::ExportBloodHoundCe {
+            start_bloodhound_export(state, runtime, endpoint, cred_label);
+        }
         return;
     }
 
@@ -468,6 +490,55 @@ fn show_node_panel(ui: &mut egui::Ui, state: &mut AppState, raw_id: usize) {
         }
         _ => {}
     }
+}
+
+fn start_bloodhound_export(
+    state: &mut AppState,
+    runtime: &RuntimeServices,
+    endpoint: String,
+    directory_cred_label: Option<String>,
+) {
+    let Some(output_directory) = rfd::FileDialog::new()
+        .set_title("Select BloodHound CE output directory")
+        .set_directory(".")
+        .pick_folder()
+    else {
+        return;
+    };
+
+    let login_label = state.host_login_label(&endpoint).or(directory_cred_label);
+    let credential = match login_label.as_deref() {
+        None | Some("(anonymous)") => crate::state::anonymous_record(),
+        Some(label) => match state.resolve_scan_login(label) {
+            Ok(credential) => credential,
+            Err(error) => {
+                state.add_log(
+                    crate::runtime::LogLevel::Error,
+                    format!("Cannot export BloodHound CE for {endpoint}: {error}"),
+                );
+                return;
+            }
+        },
+    };
+    if let Err(error) = crate::runtime::cred_to_ldap_auth(&credential) {
+        state.add_log(
+            crate::runtime::LogLevel::Error,
+            format!("Cannot export BloodHound CE for {endpoint}: {error}"),
+        );
+        return;
+    }
+
+    state.bloodhound_exports.insert(
+        endpoint.clone(),
+        crate::state::BloodHoundExportState::queued(output_directory.clone()),
+    );
+    state.bottom_panel_open = true;
+    runtime.spawn_bloodhound_ce_export(
+        endpoint,
+        credential,
+        output_directory,
+        state.timeout_seconds,
+    );
 }
 
 fn panel_header(ui: &mut egui::Ui, icon: &str, host_ip: &str, hostname: &str, section: &str) {

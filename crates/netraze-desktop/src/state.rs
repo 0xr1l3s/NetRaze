@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -220,6 +221,29 @@ pub struct CredentialManagerState {
     // pub export_path: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BloodHoundExportState {
+    pub running: bool,
+    pub phase: String,
+    pub output_directory: Option<PathBuf>,
+    pub ldap_entry_count: usize,
+    pub exported_object_count: usize,
+    pub json_files: Vec<PathBuf>,
+    pub zip_file: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
+impl BloodHoundExportState {
+    pub fn queued(output_directory: PathBuf) -> Self {
+        Self {
+            running: true,
+            phase: "Queued".to_owned(),
+            output_directory: Some(output_directory),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for CredentialManagerState {
     fn default() -> Self {
         Self {
@@ -278,6 +302,9 @@ pub struct AppState {
     pub workspace_path: String,
     pub progress: f32,
     pub progress_message: String,
+    /// Transient BloodHound exports keyed by LDAP endpoint. Secrets and export
+    /// state are deliberately excluded from workspace serialization.
+    pub bloodhound_exports: HashMap<String, BloodHoundExportState>,
     pub pending_logins: Vec<(String, CredentialRecord)>,
     /// (host_node_id_raw, ip, hostname, credential)
     pub pending_share_enums: Vec<(usize, String, String, CredentialRecord)>,
@@ -338,6 +365,7 @@ impl AppState {
             workspace_path: "workspace_netraze.json".to_owned(),
             progress: 0.0,
             progress_message: String::new(),
+            bloodhound_exports: HashMap::new(),
             pending_logins: Vec::new(),
             pending_share_enums: Vec::new(),
             pending_user_enums: Vec::new(),
@@ -1006,6 +1034,57 @@ impl AppState {
                         self.selected_workflow_node = Some(directory_id.0);
                     }
                 }
+                RuntimeEvent::BloodHoundProgress { endpoint, progress } => {
+                    let export = self.bloodhound_exports.entry(endpoint.clone()).or_default();
+                    export.running = true;
+                    export.error = None;
+                    export.phase = match progress {
+                        netraze_protocols::ldap::BloodHoundCeProgress::Connecting => {
+                            "Connecting to LDAP".to_owned()
+                        }
+                        netraze_protocols::ldap::BloodHoundCeProgress::Binding => {
+                            "Authenticating with NTLM SASL".to_owned()
+                        }
+                        netraze_protocols::ldap::BloodHoundCeProgress::Collecting => {
+                            "Collecting directory records".to_owned()
+                        }
+                        netraze_protocols::ldap::BloodHoundCeProgress::Parsing { ldap_entries } => {
+                            export.ldap_entry_count = ldap_entries;
+                            format!("Building graph from {ldap_entries} LDAP records")
+                        }
+                        netraze_protocols::ldap::BloodHoundCeProgress::Writing {
+                            graph_objects,
+                        } => {
+                            export.exported_object_count = graph_objects;
+                            format!("Writing {graph_objects} graph objects")
+                        }
+                        netraze_protocols::ldap::BloodHoundCeProgress::Complete { json_files } => {
+                            format!("Finalizing {json_files} JSON collections")
+                        }
+                    };
+                    self.logs.push(LogLine {
+                        level: LogLevel::Info,
+                        message: format!("{endpoint}: BloodHound CE — {}", export.phase),
+                    });
+                }
+                RuntimeEvent::BloodHoundResult { endpoint, result } => {
+                    let export = self.bloodhound_exports.entry(endpoint.clone()).or_default();
+                    export.running = false;
+                    match result {
+                        Ok(artifacts) => {
+                            export.phase = "Complete".to_owned();
+                            export.ldap_entry_count = artifacts.ldap_entry_count;
+                            export.exported_object_count = artifacts.exported_object_count;
+                            export.json_files = artifacts.json_files;
+                            export.zip_file = Some(artifacts.zip_file);
+                            export.error = None;
+                        }
+                        Err(error) => {
+                            export.phase = "Failed".to_owned();
+                            export.error = Some(error);
+                        }
+                    }
+                }
                 RuntimeEvent::DumpResult {
                     host_node_id,
                     ip,
@@ -1232,7 +1311,7 @@ pub struct TargetConfigSave {
 }
 
 impl AppState {
-    fn host_login_label(&self, target: &str) -> Option<String> {
+    pub(crate) fn host_login_label(&self, target: &str) -> Option<String> {
         let key = scan_host_key(target);
         self.workflow
             .snarl
@@ -1346,7 +1425,7 @@ impl AppState {
         ScanCredentialPlan::ByHost(hosts)
     }
 
-    fn resolve_scan_login(&self, label: &str) -> Result<CredentialRecord, String> {
+    pub(crate) fn resolve_scan_login(&self, label: &str) -> Result<CredentialRecord, String> {
         if label == "(anonymous)" {
             return Ok(anonymous_record());
         }
@@ -1378,6 +1457,7 @@ impl AppState {
         self.workflow = save.workflow;
         self.credentials = save.credentials;
         self.session_credentials.clear();
+        self.bloodhound_exports.clear();
         self.networks = save.networks;
         self.logs = save.logs;
         self.target_config.target = save.target_config.target;
@@ -1657,6 +1737,49 @@ mod user_enum_tests {
         assert!(!serialized.contains("test-only-ldap-secret"));
         assert!(!serialized.contains(&synthetic_nt_hash_hex()));
         assert!(!serialized.contains("\"loading\""));
+    }
+
+    #[test]
+    fn bloodhound_progress_and_artifacts_remain_transient() {
+        let (mut state, _host_id, tx) = state_with_host();
+        let endpoint = "127.0.0.1:389".to_owned();
+        let output = std::env::temp_dir().join("netraze-bloodhound-ui-test");
+        state.bloodhound_exports.insert(
+            endpoint.clone(),
+            BloodHoundExportState::queued(output.clone()),
+        );
+        tx.send(RuntimeEvent::BloodHoundProgress {
+            endpoint: endpoint.clone(),
+            progress: netraze_protocols::ldap::BloodHoundCeProgress::Writing {
+                graph_objects: 42,
+            },
+        })
+        .unwrap();
+        tx.send(RuntimeEvent::BloodHoundResult {
+            endpoint: endpoint.clone(),
+            result: Ok(netraze_protocols::ldap::BloodHoundCeArtifacts {
+                domain: "example.test".to_owned(),
+                ldap_entry_count: 50,
+                exported_object_count: 42,
+                collection_counts: std::collections::BTreeMap::new(),
+                json_files: vec![output.join("users.json")],
+                zip_file: output.join("netraze.zip"),
+                referrals: Vec::new(),
+            }),
+        })
+        .unwrap();
+        state.poll_logs();
+
+        let export = &state.bloodhound_exports[&endpoint];
+        assert!(!export.running);
+        assert_eq!(export.phase, "Complete");
+        assert_eq!(export.ldap_entry_count, 50);
+        assert_eq!(export.exported_object_count, 42);
+        assert_eq!(export.json_files.len(), 1);
+        assert_eq!(export.zip_file.as_deref(), Some(output.join("netraze.zip").as_path()));
+
+        let workspace = serde_json::to_string(&state.to_save()).unwrap();
+        assert!(!workspace.contains("netraze-bloodhound-ui-test"));
     }
 
     #[test]

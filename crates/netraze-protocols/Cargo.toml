@@ -16,6 +16,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 rasn = { workspace = true }
 rasn-ldap = { workspace = true }
+rusthound-ce = { workspace = true }
 
 # Pure-Rust crypto stack — replaces `windows::Win32::Security::Cryptography::BCrypt*`.
 # See crates/netraze-protocols/src/smb/crypto.rs for the consumers.
@@ -24,7 +25,11 @@ cbc = { workspace = true }
 cipher = { workspace = true }
 des = { workspace = true }
 hmac = { workspace = true }
+log = { workspace = true }
 md-5 = { workspace = true }
 md4 = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

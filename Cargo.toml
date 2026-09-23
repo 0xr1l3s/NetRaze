@@ -68,12 +68,14 @@ egui = "0.32"
 egui-snarl = { version = "0.8", features = ["serde"] }
 egui_graphs = "0.27"
 hmac = "0.12"
+log = "0.4"
 md-5 = "0.10"
 md4 = "0.10"
 petgraph = "0.8"
 rasn = "0.28"
 rasn-ldap = "=0.28.14"
 rand = "0.8"
+rusthound-ce = { version = "=2.5.14", default-features = false, features = ["nogssapi"] }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 serde_json = "1.0"

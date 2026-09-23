@@ -19,7 +19,7 @@ publishes LDAP and SMB only on the loopback interface.
 | `docker-compose.yml` | Starts the digest-pinned `quay.io/samba.org/samba-ad-server` on loopback ports 1389 (LDAP) and 2445 (SMB). The healthcheck waits for a directory query to succeed. |
 | `domain.json` | Password-free template that provisions the fixed test realm, users, groups, and domain controller. |
 | `inject-secrets.py` | Injects required environment-provided passwords into a mode-0600 runtime configuration inside the container, then replaces itself with Samba. |
-| `crates/netraze-protocols/tests/ldap_samba_ad.rs` | Six ignored, fixed-endpoint integration tests for binds, searches, paging, referrals, and inventory. |
+| `crates/netraze-protocols/tests/ldap_samba_ad.rs` | Seven ignored, fixed-endpoint integration tests for binds, searches, paging, referrals, inventory, and BloodHound CE export. |
 
 The container runs privileged because Samba AD provisioning needs filesystem
 extended attributes. Do not run it on an untrusted Docker host.
@@ -73,6 +73,7 @@ the shared directory fixture is exercised sequentially during local runs.
 | `password_bind_discovers_root_dse_and_enumerates_users` | GSS-SPNEGO/NTLMv2 password bind, protected RootDSE, `defaultNamingContext`, and LDAP-source user records. |
 | `nt_hash_bind_enumerates_multiple_pages_in_stable_order` | Pass-the-hash bind, page size two, all provisioned users, and deterministic case-insensitive order. |
 | `full_inventory_covers_directory_structure_and_security_sections` | Paged read-only inventory of users, groups, computers, OUs/containers, topology, privileged principals, SPNs, and reported domain/LDAP policy; no partial-section error. |
+| `bloodhound_ce_export_writes_schema_v6_json_and_zip` | NetRaze LDAP collection of Schema, default-domain, and Configuration naming contexts through the RustHound-CE parser; requires a Configuration container, schema-v6 metadata and object counts in every loose JSON file, plus a non-empty CE ZIP archive. Output is written to a unique temporary directory and removed by the test. |
 | `anonymous_bind_can_read_root_dse_without_ntlm_credentials` | Empty-name/empty-password anonymous bind, unprotected RootDSE read, and Unbind. |
 | `wrong_password_and_guest_do_not_authorize_ldap_searches` | Wrong-password and empty-password `Guest` NTLM attempts are rejected and do not authorize a subsequent search. |
 | `protected_search_supports_compound_escaped_filter_and_base_scope` | Signed/sealed compound search with a hex-escaped assertion, base-object lookup, and returned referrals. |
@@ -131,7 +132,7 @@ cargo test -p netraze-protocols --lib
 cargo test -p netraze-protocols --test ldap_samba_ad
 ```
 
-The second command compiles the live suite but leaves its six tests ignored.
+The second command compiles the live suite but leaves its seven tests ignored.
 
 ---
 
