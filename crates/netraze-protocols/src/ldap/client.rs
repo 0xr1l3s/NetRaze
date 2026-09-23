@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use super::message::{
-    AuthenticationChoice, BindRequest, BindResponse, LdapMessage, LdapString, ProtocolOp,
+    AuthenticationChoice, BindRequest, BindResponse, Control, LdapMessage, LdapString, ProtocolOp,
     ResultCode, SaslCredentials, SearchRequest, SearchRequestDerefAliases, SearchRequestScope,
     SearchResultEntry, UnbindRequest,
 };
@@ -246,6 +246,7 @@ impl LdapClient {
                 ],
                 SearchRequestScope::BaseObject,
                 false,
+                &[],
             )
             .await?;
         if outcome.entries.len() != 1 {
@@ -269,6 +270,7 @@ impl LdapClient {
             attributes,
             SearchRequestScope::WholeSubtree,
             true,
+            &[],
         )
         .await
     }
@@ -286,6 +288,31 @@ impl LdapClient {
             attributes,
             SearchRequestScope::BaseObject,
             false,
+            &[],
+        )
+        .await
+    }
+
+    /// Perform a paged subtree search with caller-supplied LDAP controls.
+    ///
+    /// This is crate-visible because controls such as AD's SD-flags and
+    /// show-deleted extensions are collection policy, not part of the small
+    /// public LDAP interface. The paged-results control is appended on every
+    /// page and cannot be overridden by callers.
+    pub(crate) async fn search_with_controls(
+        &mut self,
+        base_dn: &str,
+        filter: &str,
+        attributes: &[&str],
+        additional_controls: &[Control],
+    ) -> Result<SearchOutcome, LdapError> {
+        self.search_with_scope(
+            base_dn,
+            filter,
+            attributes,
+            SearchRequestScope::WholeSubtree,
+            true,
+            additional_controls,
         )
         .await
     }
@@ -301,6 +328,7 @@ impl LdapClient {
         attributes: &[&str],
         scope: SearchRequestScope,
         paged: bool,
+        additional_controls: &[Control],
     ) -> Result<SearchOutcome, LdapError> {
         if !self.anonymous_bound && self.security_context.is_none() {
             return Err(LdapError::State("search requires a successful bind".into()));
@@ -327,11 +355,15 @@ impl LdapClient {
             );
             let message_id = self.allocate_message_id();
             let mut message = LdapMessage::new(message_id, ProtocolOp::SearchRequest(request));
+            let mut request_controls = additional_controls.to_vec();
             if paged {
-                message.controls = Some(vec![
+                request_controls.push(
                     controls::paged_results_control(self.config.page_size, &cookie)
                         .map_err(LdapError::Ber)?,
-                ]);
+                );
+            }
+            if !request_controls.is_empty() {
+                message.controls = Some(request_controls);
             }
             let (entries, referrals, next_cookie) = self.search_page(message_id, message).await?;
             let complete = !paged || next_cookie.is_empty();

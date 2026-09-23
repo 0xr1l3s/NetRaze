@@ -3,6 +3,7 @@
 //! The public API deliberately hides the `rasn-ldap` wire model.
 
 mod ad;
+pub mod bloodhound;
 pub mod client;
 mod controls;
 mod directory;
