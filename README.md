@@ -273,11 +273,12 @@ and writes loose schema-v6 JSON plus a ZIP archive. The bottom
 Network/Credentials/Progress dock can be closed with `×` and reopened from the
 status bar without clearing its contents.
 
-The current BloodHound collector covers the schema and default domain naming
-contexts over NetRaze's LDAP/NTLM transport. It does not yet collect AD CS,
-interactive sessions, local groups, SYSVOL data, or Kerberos-only relationships;
-LDAPS and referral chasing also remain out of scope. LDAP referrals are returned
-to the caller and never followed with credentials.
+The current BloodHound collector covers the schema, default domain, and
+Configuration naming contexts over NetRaze's LDAP/NTLM transport, including
+parser-supported AD CS directory objects. It does not yet collect interactive
+sessions, local groups, SYSVOL data, or Kerberos-only relationships; LDAPS and
+referral chasing also remain out of scope. LDAP referrals are returned to the
+caller and never followed with credentials.
 
 **Workspace files contain Credential Manager secrets** (passwords and NT
 hashes) in their saved JSON. Treat them as sensitive files and do not

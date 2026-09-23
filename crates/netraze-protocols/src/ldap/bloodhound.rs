@@ -16,7 +16,9 @@ use rusthound_ce::utils::date::return_current_fulldate;
 use thiserror::Error;
 
 use super::controls::{security_descriptor_flags_control, show_deleted_control};
-use super::{LdapAuthentication, LdapClient, LdapClientConfig, LdapEntry, LdapError};
+use super::{
+    LdapAuthentication, LdapClient, LdapClientConfig, LdapEntry, LdapError, SearchOutcome,
+};
 
 const BLOODHOUND_ATTRIBUTES: &[&str] = &[
     "*",
@@ -180,11 +182,16 @@ where
     Ok(artifacts)
 }
 
-/// Collect the schema and default domain naming contexts in parser-safe order.
+/// Collect the schema, default domain, and Configuration naming contexts.
+///
+/// RustHound parses Configuration objects into container ACL relationships and,
+/// when present, AD CS graph objects. Schema records must remain first and the
+/// domain root must precede every other principal-bearing object.
 async fn collect_entries(client: &mut LdapClient) -> Result<EntryCollection, LdapError> {
     let root = client.root_dse().await?;
     let default_context = required_root_attribute(&root, "defaultNamingContext")?;
     let schema_context = required_root_attribute(&root, "schemaNamingContext")?;
+    let configuration_context = required_root_attribute(&root, "configurationNamingContext")?;
     let controls = [security_descriptor_flags_control(), show_deleted_control()];
 
     let schema = client
@@ -203,11 +210,28 @@ async fn collect_entries(client: &mut LdapClient) -> Result<EntryCollection, Lda
             &controls,
         )
         .await?;
+    let configuration = client
+        .search_with_controls(
+            &configuration_context,
+            "(objectClass=*)",
+            BLOODHOUND_ATTRIBUTES,
+            &controls,
+        )
+        .await?;
 
+    assemble_entries(&default_context, schema, directory, configuration)
+}
+
+fn assemble_entries(
+    default_context: &str,
+    schema: SearchOutcome,
+    directory: SearchOutcome,
+    configuration: SearchOutcome,
+) -> Result<EntryCollection, LdapError> {
     let mut domain_entry = None;
     let mut remaining = Vec::with_capacity(directory.entries.len().saturating_sub(1));
     for entry in directory.entries {
-        if domain_entry.is_none() && entry.dn.eq_ignore_ascii_case(&default_context) {
+        if domain_entry.is_none() && entry.dn.eq_ignore_ascii_case(default_context) {
             domain_entry = Some(entry);
         } else {
             remaining.push(entry);
@@ -219,20 +243,24 @@ async fn collect_entries(client: &mut LdapClient) -> Result<EntryCollection, Lda
         ))
     })?;
 
-    let mut entries = Vec::with_capacity(schema.entries.len() + remaining.len() + 1);
+    let mut entries = Vec::with_capacity(
+        schema.entries.len() + remaining.len() + configuration.entries.len() + 1,
+    );
     entries.extend(schema.entries.into_iter().map(adapt_entry));
     entries.push(adapt_entry(domain_entry));
     entries.extend(remaining.into_iter().map(adapt_entry));
+    entries.extend(configuration.entries.into_iter().map(adapt_entry));
 
     let mut referrals = schema.referrals;
     referrals.extend(directory.referrals);
+    referrals.extend(configuration.referrals);
     referrals.sort();
     referrals.dedup();
 
     Ok(EntryCollection {
         entries,
         referrals,
-        domain: domain_from_naming_context(&default_context)?,
+        domain: domain_from_naming_context(default_context)?,
     })
 }
 
@@ -472,6 +500,59 @@ mod tests {
         assert!(!options.kerberos);
         assert!(options.username.is_none());
         assert!(options.password.is_none());
+    }
+
+    #[test]
+    fn assembly_keeps_parser_order_and_configuration_objects() {
+        fn entry(dn: &str) -> LdapEntry {
+            LdapEntry {
+                dn: dn.to_owned(),
+                attributes: BTreeMap::new(),
+            }
+        }
+
+        let default_context = "DC=example,DC=test";
+        let collection = assemble_entries(
+            default_context,
+            SearchOutcome {
+                entries: vec![entry(
+                    "CN=User,CN=Schema,CN=Configuration,DC=example,DC=test",
+                )],
+                referrals: vec!["ldap://schema".to_owned()],
+            },
+            SearchOutcome {
+                entries: vec![entry("CN=Alice,DC=example,DC=test"), entry(default_context)],
+                referrals: vec!["ldap://domain".to_owned()],
+            },
+            SearchOutcome {
+                entries: vec![entry(
+                    "CN=Public Key Services,CN=Services,CN=Configuration,DC=example,DC=test",
+                )],
+                referrals: vec![
+                    "ldap://configuration".to_owned(),
+                    "ldap://domain".to_owned(),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            collection
+                .entries
+                .iter()
+                .map(|entry| entry.dn.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "CN=User,CN=Schema,CN=Configuration,DC=example,DC=test",
+                default_context,
+                "CN=Alice,DC=example,DC=test",
+                "CN=Public Key Services,CN=Services,CN=Configuration,DC=example,DC=test",
+            ]
+        );
+        assert_eq!(
+            collection.referrals,
+            ["ldap://configuration", "ldap://domain", "ldap://schema"]
+        );
     }
 
     #[test]

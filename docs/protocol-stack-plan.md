@@ -137,14 +137,14 @@ est limité à la lecture de RootDSE, sans assertion d'énumération du domaine.
 | `find_asreproastable` | 🔜 | Filtre `(&(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=4194304))` — alimente `netraze-protocols::kerberos::asreproast` |
 | Indicateurs de délégation | ✅ | Bits UAC exposés dans l'inventaire utilisateur/ordinateur ; pas encore de module d'exploitation dédié |
 | RootDSE fetch (defaultNamingContext) | ✅ | Préliminaire à toute search |
-| Export BloodHound Community Edition | ✅ | Collecte des contextes Schema et domaine par le transport LDAP/NTLM NetRaze, conversion via `rusthound-ce` 2.5.14, JSON schéma v6 et archive ZIP ; disponible en CLI et dans le nœud AD Directory du desktop |
+| Export BloodHound Community Edition | ✅ | Collecte des contextes Schema, domaine et Configuration par le transport LDAP/NTLM NetRaze, conversion via `rusthound-ce` 2.5.14, JSON schéma v6 et archive ZIP ; disponible en CLI et dans le nœud AD Directory du desktop |
 
-L'export BloodHound actuel est volontairement limité au graphe LDAP CE obtenu
-depuis le contexte Schema et le contexte de domaine par défaut. Il ne collecte
-pas encore AD CS, les sessions interactives, les groupes locaux, SYSVOL ni les
-relations dépendant de Kerberos. LDAPS et le suivi des referrals restent hors
-périmètre ; les referrals sont rapportés sans transfert automatique des
-identifiants.
+L'export BloodHound actuel produit le graphe LDAP CE obtenu depuis les contextes
+Schema, domaine par défaut et Configuration, y compris les objets AD CS pris en
+charge par le parseur. Il ne collecte pas encore les sessions interactives, les
+groupes locaux, SYSVOL ni les relations dépendant de Kerberos. LDAPS et le suivi
+des referrals restent hors périmètre ; les referrals sont rapportés sans
+transfert automatique des identifiants.
 
 ### Smart `enum_users` orchestration (livrée)
 

@@ -289,6 +289,7 @@ async fn bloodhound_ce_export_writes_schema_v6_json_and_zip() {
     assert!(std::fs::metadata(&artifacts.zip_file).unwrap().len() > 0);
     assert!(!artifacts.json_files.is_empty());
 
+    let mut found_configuration_container = false;
     for path in &artifacts.json_files {
         let document = std::fs::read_to_string(path).expect("failed to read exported CE JSON");
         let document: serde_json::Value =
@@ -300,7 +301,21 @@ async fn bloodhound_ce_export_writes_schema_v6_json_and_zip() {
         assert_eq!(meta["version"], 6);
         assert_eq!(meta["count"].as_u64(), Some(data.len() as u64));
         assert!(meta["type"].as_str().is_some_and(|value| !value.is_empty()));
+        if meta["type"].as_str() == Some("containers") {
+            found_configuration_container = data.iter().any(|object| {
+                object["Properties"]["distinguishedname"]
+                    .as_str()
+                    .is_some_and(|dn| {
+                        dn.to_ascii_lowercase()
+                            .contains("cn=configuration,dc=netraze,dc=test")
+                    })
+            });
+        }
     }
+    assert!(
+        found_configuration_container,
+        "CE export omitted objects from configurationNamingContext"
+    );
 
     std::fs::remove_dir_all(output).expect("failed to remove temporary CE export");
 }
