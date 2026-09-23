@@ -25,6 +25,7 @@ cbc = { workspace = true }
 cipher = { workspace = true }
 des = { workspace = true }
 hmac = { workspace = true }
+log = { workspace = true }
 md-5 = { workspace = true }
 md4 = { workspace = true }
 rand = { workspace = true }

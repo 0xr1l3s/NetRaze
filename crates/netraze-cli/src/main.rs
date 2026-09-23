@@ -3,9 +3,14 @@ use clap::{Parser, Subcommand};
 use netraze_app::NetRazeApp;
 use netraze_config::AppConfig;
 use netraze_core::ScanRequest;
+use netraze_protocols::ldap::{
+    BloodHoundCeExportOptions, BloodHoundCeProgress, LdapAuthentication, LdapClientConfig,
+    collect_and_export_ce_with_progress,
+};
+use netraze_protocols::ntlm::NtlmCredential;
 use netraze_protocols::smb::{remote_lsass_dump, secrets_dump, secrets_dump_nanodump};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -64,6 +69,36 @@ enum Command {
         /// NanoDump technique: fork, dup, snapshot…
         #[arg(long, default_value = "fork")]
         technique: String,
+    },
+    /// Collect LDAP relationships and export BloodHound Community Edition schema-v6 data.
+    BloodhoundCe {
+        /// Domain controller address, with optional port (defaults to 389).
+        #[arg(long)]
+        endpoint: String,
+        /// NTLM domain supplied during LDAP SASL authentication.
+        #[arg(short, long)]
+        domain: String,
+        #[arg(short, long)]
+        username: String,
+        /// Name of an environment variable containing the password.
+        #[arg(
+            long,
+            value_name = "ENV",
+            required_unless_present = "nt_hash_env",
+            conflicts_with = "nt_hash_env"
+        )]
+        password_env: Option<String>,
+        /// Name of an environment variable containing a 32-character NT hash.
+        #[arg(
+            long,
+            value_name = "ENV",
+            required_unless_present = "password_env",
+            conflicts_with = "password_env"
+        )]
+        nt_hash_env: Option<String>,
+        /// Directory for loose JSON files and the ZIP archive.
+        #[arg(short, long, default_value = "bloodhound-ce")]
+        output: PathBuf,
     },
 }
 
@@ -201,15 +236,86 @@ async fn main() -> Result<()> {
             println!("[+] {} → {}", result.summary, output.display());
             parse_with_pypykatz(&output);
         }
+        Command::BloodhoundCe {
+            endpoint,
+            domain,
+            username,
+            password_env,
+            nt_hash_env,
+            output,
+        } => {
+            let credential = credential_from_environment(password_env, nt_hash_env)?;
+            let artifacts = collect_and_export_ce_with_progress(
+                LdapClientConfig::new(endpoint),
+                LdapAuthentication::Ntlm {
+                    username,
+                    domain,
+                    credential,
+                },
+                BloodHoundCeExportOptions::new(&output),
+                print_bloodhound_progress,
+            )
+            .await?;
+            println!(
+                "[+] Exported {} graph objects for {} into {} JSON files",
+                artifacts.exported_object_count,
+                artifacts.domain,
+                artifacts.json_files.len()
+            );
+            println!("[+] ZIP archive: {}", artifacts.zip_file.display());
+            if !artifacts.referrals.is_empty() {
+                println!(
+                    "[!] LDAP returned {} referral(s); they were reported but not followed",
+                    artifacts.referrals.len()
+                );
+            }
+        }
     }
 
     Ok(())
 }
 
+fn credential_from_environment(
+    password_env: Option<String>,
+    nt_hash_env: Option<String>,
+) -> Result<NtlmCredential> {
+    match (password_env, nt_hash_env) {
+        (Some(name), None) => std::env::var(&name)
+            .map(NtlmCredential::Password)
+            .map_err(|_| anyhow::anyhow!("credential environment variable {name} is not set")),
+        (None, Some(name)) => {
+            let hash = std::env::var(&name).map_err(|_| {
+                anyhow::anyhow!("credential environment variable {name} is not set")
+            })?;
+            NtlmCredential::from_nt_hash_hex(&hash).map_err(anyhow::Error::from)
+        }
+        _ => Err(anyhow::anyhow!(
+            "provide exactly one of --password-env or --nt-hash-env"
+        )),
+    }
+}
+
+fn print_bloodhound_progress(progress: BloodHoundCeProgress) {
+    match progress {
+        BloodHoundCeProgress::Connecting => println!("[*] Connecting to LDAP"),
+        BloodHoundCeProgress::Binding => println!("[*] Authenticating with NTLM SASL"),
+        BloodHoundCeProgress::Collecting => println!("[*] Collecting directory records"),
+        BloodHoundCeProgress::Parsing { ldap_entries } => {
+            println!("[*] Building the CE graph from {ldap_entries} LDAP records");
+        }
+        BloodHoundCeProgress::Writing { graph_objects } => {
+            println!("[*] Writing {graph_objects} graph objects");
+        }
+        BloodHoundCeProgress::Complete { json_files } => {
+            println!("[*] Finished {json_files} JSON collections");
+        }
+    }
+}
+
 /// Try to parse a minidump with pypykatz and print the output.
 /// Tries the `pypykatz` command first, then `python -m pypykatz`.
 /// Non-fatal: if pypykatz is unavailable, we just tell the user how to parse.
-fn parse_with_pypykatz(dmp_path: &PathBuf) {
+fn parse_with_pypykatz(dmp_path: &Path) {
     let path_str = match dmp_path.to_str() {
         Some(s) => s.to_owned(),
         None => return,
@@ -252,4 +358,37 @@ fn parse_with_pypykatz(dmp_path: &PathBuf) {
          pypykatz lsa minidump {path_str}\n    \
          mimikatz.exe \"sekurlsa::minidump {path_str}\" \"sekurlsa::logonPasswords full\" exit"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bloodhound_cli_requires_exactly_one_secret_environment_variable() {
+        let base = [
+            "netraze",
+            "bloodhound-ce",
+            "--endpoint",
+            "dc.example.test",
+            "--domain",
+            "EXAMPLE",
+            "--username",
+            "alice",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+
+        let mut both = base.to_vec();
+        both.extend([
+            "--password-env",
+            "NETRAZE_PASSWORD",
+            "--nt-hash-env",
+            "NETRAZE_NT_HASH",
+        ]);
+        assert!(Cli::try_parse_from(both).is_err());
+
+        let mut password = base.to_vec();
+        password.extend(["--password-env", "NETRAZE_PASSWORD"]);
+        assert!(Cli::try_parse_from(password).is_ok());
+    }
 }

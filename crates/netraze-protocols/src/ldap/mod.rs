@@ -11,6 +11,10 @@ mod inventory;
 mod message;
 mod search;
 
+pub use bloodhound::{
+    BloodHoundCeArtifacts, BloodHoundCeError, BloodHoundCeExportOptions, BloodHoundCeProgress,
+    collect_and_export_ce, collect_and_export_ce_with_progress,
+};
 pub use client::{LdapClient, LdapClientConfig, LdapEntry, LdapError, SearchOutcome};
 pub use inventory::{
     LdapAuthentication, inventory, inventory_anonymous, inventory_with_authentication,
