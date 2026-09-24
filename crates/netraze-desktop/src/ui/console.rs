@@ -43,7 +43,11 @@ impl ConsoleState {
     }
 
     pub fn push_result(&mut self, command: String, output: String, error: Option<String>) {
-        self.history.push(ConsoleEntry { command, output, error });
+        self.history.push(ConsoleEntry {
+            command,
+            output,
+            error,
+        });
         self.pending = false;
         self.request_focus = true;
     }
@@ -87,11 +91,7 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
         .show(ctx, |ui| {
             // ── Header bar ───────────────────────────────────────────────────
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("●")
-                        .size(9.0)
-                        .color(theme::ACC),
-                );
+                ui.label(egui::RichText::new("●").size(9.0).color(theme::ACC));
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("as").size(11.0).color(theme::MUTED));
                 ui.label(
@@ -178,15 +178,13 @@ pub fn show_console_window(ctx: &egui::Context, console: &mut ConsoleState) -> C
                 let run_clicked = ui
                     .add_enabled(
                         !console.pending && !console.input.trim().is_empty(),
-                        egui::Button::new(
-                            egui::RichText::new("Run").size(12.0).color(theme::FG),
-                        )
-                        .fill(if !console.pending && !console.input.trim().is_empty() {
-                            theme::ACC_DIM
-                        } else {
-                            theme::ELEV_1
-                        })
-                        .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
+                        egui::Button::new(egui::RichText::new("Run").size(12.0).color(theme::FG))
+                            .fill(if !console.pending && !console.input.trim().is_empty() {
+                                theme::ACC_DIM
+                            } else {
+                                theme::ELEV_1
+                            })
+                            .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
                     )
                     .clicked();
 

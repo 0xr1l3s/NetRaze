@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use crate::theme;
 
-const ACCENT:   egui::Color32 = theme::ACC;
+const ACCENT: egui::Color32 = theme::ACC;
 const TEXT_DIM: egui::Color32 = theme::MUTED;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {

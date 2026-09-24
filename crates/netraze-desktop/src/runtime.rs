@@ -1091,7 +1091,8 @@ impl RuntimeServices {
                 });
             });
 
-            let result = remote_lsass_dump(&ip2, &smb_cred, &binary_bytes, "--fork", &*log_fn).await;
+            let result =
+                remote_lsass_dump(&ip2, &smb_cred, &binary_bytes, "--fork", &*log_fn).await;
 
             match result {
                 Ok(r) => {

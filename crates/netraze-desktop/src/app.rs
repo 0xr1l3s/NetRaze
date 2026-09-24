@@ -25,7 +25,6 @@ impl NetRazeDesktopApp {
     }
 }
 
-
 impl eframe::App for NetRazeDesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.state.poll_logs();
@@ -60,7 +59,8 @@ impl eframe::App for NetRazeDesktopApp {
                 "LSA" => self.runtime.spawn_dump_lsa(node_id, ip, hostname, cred),
                 dt if dt.starts_with("NANODUMP:") => {
                     let bin = dt.trim_start_matches("NANODUMP:").to_owned();
-                    self.runtime.spawn_dump_nanodump(node_id, ip, hostname, cred, bin);
+                    self.runtime
+                        .spawn_dump_nanodump(node_id, ip, hostname, cred, bin);
                 }
                 _ => {}
             }

@@ -12,11 +12,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
     // If a workflow node is selected, show its detail panel instead of the config.
     if let Some(raw_id) = state.selected_workflow_node {
         // Verify the node still exists before rendering.
-        let exists = state
-            .workflow
-            .snarl
-            .get_node(NodeId(raw_id))
-            .is_some();
+        let exists = state.workflow.snarl.get_node(NodeId(raw_id)).is_some();
 
         if exists {
             show_node_panel(ui, state, runtime, raw_id);
@@ -32,11 +28,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) 
 
 // ── Default config panel ──────────────────────────────────────────────────────
 
-fn show_default_config(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    runtime: &RuntimeServices,
-) {
+fn show_default_config(ui: &mut egui::Ui, state: &mut AppState, runtime: &RuntimeServices) {
     ui.label(
         egui::RichText::new("⚙ Configuration")
             .size(14.0)
@@ -187,7 +179,11 @@ fn show_default_config(
     } else {
         "▶ Run"
     };
-    let run_color = if state.is_running { theme::ELEV_2 } else { theme::ACC };
+    let run_color = if state.is_running {
+        theme::ELEV_2
+    } else {
+        theme::ACC
+    };
     let run_button = egui::Button::new(
         egui::RichText::new(run_text)
             .strong()
@@ -486,7 +482,14 @@ fn show_node_panel(
             error,
             done,
         } => {
-            show_enumav_panel(ui, &host_ip, &hostname, &products, error.as_deref(), done.clone());
+            show_enumav_panel(
+                ui,
+                &host_ip,
+                &hostname,
+                &products,
+                error.as_deref(),
+                done.clone(),
+            );
         }
         _ => {}
     }
@@ -587,13 +590,21 @@ fn show_host_panel(
     if !os_info.is_empty() {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("OS").small().color(LABEL_COLOR));
-            ui.label(egui::RichText::new(os_info).small().color(egui::Color32::WHITE));
+            ui.label(
+                egui::RichText::new(os_info)
+                    .small()
+                    .color(egui::Color32::WHITE),
+            );
         });
     }
     if !domain.is_empty() {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Domain").small().color(LABEL_COLOR));
-            ui.label(egui::RichText::new(domain).small().color(egui::Color32::WHITE));
+            ui.label(
+                egui::RichText::new(domain)
+                    .small()
+                    .color(egui::Color32::WHITE),
+            );
         });
     }
 
@@ -605,23 +616,36 @@ fn show_host_panel(
         } else {
             "⚡ ADMIN".to_owned()
         };
-        ui.label(egui::RichText::new(badge).small().strong().color(theme::SUCCESS));
+        ui.label(
+            egui::RichText::new(badge)
+                .small()
+                .strong()
+                .color(theme::SUCCESS),
+        );
     } else if let Some(c) = logged_in_cred {
-        ui.label(egui::RichText::new(format!("🔑 {c}")).small().color(theme::WARNING));
+        ui.label(
+            egui::RichText::new(format!("🔑 {c}"))
+                .small()
+                .color(theme::WARNING),
+        );
     }
 
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Signing").small().color(LABEL_COLOR));
         let (lbl, col) = match signing {
-            Some(true)  => ("Yes", theme::SUCCESS),
-            Some(false) => ("No",  theme::WARNING),
-            None        => ("—",   LABEL_COLOR),
+            Some(true) => ("Yes", theme::SUCCESS),
+            Some(false) => ("No", theme::WARNING),
+            None => ("—", LABEL_COLOR),
         };
         ui.label(egui::RichText::new(lbl).small().strong().color(col));
     });
     if matches!(smbv1, Some(true)) {
-        ui.label(egui::RichText::new("⚠ SMBv1 active").small().color(theme::ERROR));
+        ui.label(
+            egui::RichText::new("⚠ SMBv1 active")
+                .small()
+                .color(theme::ERROR),
+        );
     }
 
     if !shares.is_empty() {
@@ -649,14 +673,30 @@ fn show_host_panel(
                     };
                     if let Some(p) = share.rfind('(') {
                         let main = share[..p].trim_end();
-                        let acc  = &share[p..];
+                        let acc = &share[p..];
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.label(egui::RichText::new(main).monospace().size(9.5).color(LABEL_COLOR));
-                            ui.label(egui::RichText::new(acc).monospace().size(9.5).strong().color(acc_color));
+                            ui.label(
+                                egui::RichText::new(main)
+                                    .monospace()
+                                    .size(9.5)
+                                    .color(LABEL_COLOR),
+                            );
+                            ui.label(
+                                egui::RichText::new(acc)
+                                    .monospace()
+                                    .size(9.5)
+                                    .strong()
+                                    .color(acc_color),
+                            );
                         });
                     } else {
-                        ui.label(egui::RichText::new(share.as_str()).monospace().size(9.5).color(LABEL_COLOR));
+                        ui.label(
+                            egui::RichText::new(share.as_str())
+                                .monospace()
+                                .size(9.5)
+                                .color(LABEL_COLOR),
+                        );
                     }
                 }
             });
@@ -678,7 +718,12 @@ fn show_host_panel(
             .max_height(80.0)
             .show(ui, |ui| {
                 for u in users.iter().take(20) {
-                    ui.label(egui::RichText::new(u.as_str()).monospace().size(9.5).color(LABEL_COLOR));
+                    ui.label(
+                        egui::RichText::new(u.as_str())
+                            .monospace()
+                            .size(9.5)
+                            .color(LABEL_COLOR),
+                    );
                 }
                 if users.len() > 20 {
                     ui.label(
@@ -704,7 +749,12 @@ fn show_shares_panel(
     if let Some(c) = cred_label {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Credential").small().color(LABEL_COLOR));
-            ui.label(egui::RichText::new(c).small().monospace().color(theme::INFO));
+            ui.label(
+                egui::RichText::new(c)
+                    .small()
+                    .monospace()
+                    .color(theme::INFO),
+            );
         });
         ui.add_space(4.0);
     }
@@ -715,7 +765,11 @@ fn show_shares_panel(
     }
 
     if shares.is_empty() {
-        ui.label(egui::RichText::new("⚠ No shares found").small().color(theme::WARNING));
+        ui.label(
+            egui::RichText::new("⚠ No shares found")
+                .small()
+                .color(theme::WARNING),
+        );
         return;
     }
 
@@ -736,16 +790,28 @@ fn show_shares_panel(
                 let (name, stype, access) = parse_share_string(share_str);
                 let access_color = match access {
                     "RW" => theme::SUCCESS,
-                    "R"  => theme::INFO,
-                    _    => theme::ERROR,
+                    "R" => theme::INFO,
+                    _ => theme::ERROR,
                 };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(egui::RichText::new("📁").small());
-                    ui.label(egui::RichText::new(name).small().strong().color(egui::Color32::WHITE));
-                    ui.label(egui::RichText::new(format!("[{stype}]")).small().color(LABEL_COLOR));
+                    ui.label(
+                        egui::RichText::new(name)
+                            .small()
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("[{stype}]"))
+                            .small()
+                            .color(LABEL_COLOR),
+                    );
                     let badge = egui::Button::new(
-                        egui::RichText::new(access).small().strong().color(egui::Color32::WHITE),
+                        egui::RichText::new(access)
+                            .small()
+                            .strong()
+                            .color(egui::Color32::WHITE),
                     )
                     .fill(access_color)
                     .corner_radius(egui::CornerRadius::same(3))
@@ -830,18 +896,34 @@ fn show_users_panel(
             for user in &users[rows] {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let icon = if user.privilege_level == 2 { "👑" } else { "👤" };
+                    let icon = if user.privilege_level == 2 {
+                        "👑"
+                    } else {
+                        "👤"
+                    };
                     ui.label(egui::RichText::new(icon).small());
-                    let name_color = if user.disabled { LABEL_COLOR } else { egui::Color32::WHITE };
-                    ui.label(egui::RichText::new(&user.name).small().strong().color(name_color));
+                    let name_color = if user.disabled {
+                        LABEL_COLOR
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    ui.label(
+                        egui::RichText::new(&user.name)
+                            .small()
+                            .strong()
+                            .color(name_color),
+                    );
 
                     let (priv_label, priv_color) = match user.privilege_level {
                         2 => ("ADMIN", theme::ERROR),
-                        1 => ("USER",  theme::INFO),
+                        1 => ("USER", theme::INFO),
                         _ => ("GUEST", LABEL_COLOR),
                     };
                     let badge = egui::Button::new(
-                        egui::RichText::new(priv_label).small().strong().color(egui::Color32::WHITE),
+                        egui::RichText::new(priv_label)
+                            .small()
+                            .strong()
+                            .color(egui::Color32::WHITE),
                     )
                     .fill(priv_color)
                     .corner_radius(egui::CornerRadius::same(3))
@@ -850,7 +932,11 @@ fn show_users_panel(
                     ui.add(badge);
 
                     if user.disabled {
-                        ui.label(egui::RichText::new("DISABLED").small().color(theme::WARNING));
+                        ui.label(
+                            egui::RichText::new("DISABLED")
+                                .small()
+                                .color(theme::WARNING),
+                        );
                     }
                     if user.locked {
                         ui.label(egui::RichText::new("🔒").small());
@@ -873,12 +959,20 @@ fn show_dump_panel(
     panel_header(ui, icon, host_ip, hostname, dump_type);
 
     if let Some(err) = error {
-        ui.label(egui::RichText::new(format!("⚠ {err}")).small().color(theme::WARNING));
+        ui.label(
+            egui::RichText::new(format!("⚠ {err}"))
+                .small()
+                .color(theme::WARNING),
+        );
         ui.add_space(4.0);
     }
 
     if entries.is_empty() && error.is_none() {
-        ui.label(egui::RichText::new("⏳ Dumping...").small().color(LABEL_COLOR));
+        ui.label(
+            egui::RichText::new("⏳ Dumping...")
+                .small()
+                .color(LABEL_COLOR),
+        );
         return;
     }
 
@@ -957,12 +1051,20 @@ fn show_enumav_panel(
     panel_header(ui, "🛡", host_ip, hostname, "AV/EDR");
 
     if let Some(err) = error {
-        ui.label(egui::RichText::new(format!("⚠ {err}")).small().color(theme::WARNING));
+        ui.label(
+            egui::RichText::new(format!("⚠ {err}"))
+                .small()
+                .color(theme::WARNING),
+        );
         ui.add_space(4.0);
     }
 
     if !done && products.is_empty() {
-        ui.label(egui::RichText::new("⏳ Scanning...").small().color(LABEL_COLOR));
+        ui.label(
+            egui::RichText::new("⏳ Scanning...")
+                .small()
+                .color(LABEL_COLOR),
+        );
         return;
     }
 
@@ -993,14 +1095,19 @@ fn show_enumav_panel(
                 let (name, status) = product_line.split_once('|').unwrap_or((product_line, ""));
                 let (dot, color) = match status {
                     "INSTALLED and RUNNING" => ("🟢", theme::SUCCESS),
-                    "RUNNING"               => ("🔵", theme::INFO),
-                    "INSTALLED"             => ("🟡", theme::WARNING),
-                    _                       => ("⚪", LABEL_COLOR),
+                    "RUNNING" => ("🔵", theme::INFO),
+                    "INSTALLED" => ("🟡", theme::WARNING),
+                    _ => ("⚪", LABEL_COLOR),
                 };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(egui::RichText::new(dot).small());
-                    ui.label(egui::RichText::new(name).small().strong().color(egui::Color32::WHITE));
+                    ui.label(
+                        egui::RichText::new(name)
+                            .small()
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
                     ui.label(egui::RichText::new(status).small().color(color));
                 });
             }

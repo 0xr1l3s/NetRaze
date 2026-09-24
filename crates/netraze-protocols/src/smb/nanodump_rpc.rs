@@ -62,7 +62,10 @@ pub async fn remote_lsass_dump(
     }
 
     // ── 1. Upload NanoDump binary ─────────────────────────────────────────
-    log!("uploading NanoDump ({} bytes) → {exe_win}", nanodump_bytes.len());
+    log!(
+        "uploading NanoDump ({} bytes) → {exe_win}",
+        nanodump_bytes.len()
+    );
     {
         let cred2 = cred.clone();
         let target2 = target.to_owned();

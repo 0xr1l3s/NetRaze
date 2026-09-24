@@ -31,17 +31,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 let type_tag = match &cred.cred_type {
                     CredType::Password if cred.secret.is_empty() => "GUEST",
                     CredType::Password => "PWD",
-                    CredType::Hash     => "HASH",
+                    CredType::Hash => "HASH",
                 };
                 let (valid_icon, valid_color) = match cred.valid {
-                    Some(true)  => ("✔", theme::SUCCESS),
+                    Some(true) => ("✔", theme::SUCCESS),
                     Some(false) => ("✘", theme::ERROR),
-                    None        => ("●", theme::MUTED),
+                    None => ("●", theme::MUTED),
                 };
                 let type_color = match &cred.cred_type {
                     CredType::Password if cred.secret.is_empty() => theme::SUCCESS,
                     CredType::Password => theme::INFO,
-                    CredType::Hash     => theme::WARNING,
+                    CredType::Hash => theme::WARNING,
                 };
 
                 let bg = if is_selected {
@@ -132,20 +132,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     });
     ui.horizontal(|ui| {
         let is_hash = state.new_cred_type == CredType::Hash;
-        if ui.add(egui::Button::new("Pwd").selected(!is_hash)).clicked() {
+        if ui
+            .add(egui::Button::new("Pwd").selected(!is_hash))
+            .clicked()
+        {
             state.new_cred_type = CredType::Password;
         }
-        if ui.add(egui::Button::new("Hash").selected(is_hash)).clicked() {
+        if ui
+            .add(egui::Button::new("Hash").selected(is_hash))
+            .clicked()
+        {
             state.new_cred_type = CredType::Hash;
         }
 
         let has_secret = !state.new_cred_secret.is_empty();
         let can_add = !state.new_cred_username.is_empty()
             && (has_secret || state.new_cred_type == CredType::Password);
-        let btn = egui::Button::new(
-            egui::RichText::new("+ Add").small().color(theme::FG),
-        )
-        .fill(if can_add { theme::ACC_DIM } else { theme::ELEV_2 });
+        let btn = egui::Button::new(egui::RichText::new("+ Add").small().color(theme::FG)).fill(
+            if can_add {
+                theme::ACC_DIM
+            } else {
+                theme::ELEV_2
+            },
+        );
         if ui.add(btn).clicked() && can_add {
             state.credentials.push(crate::state::CredentialRecord {
                 username: std::mem::take(&mut state.new_cred_username),
@@ -172,10 +181,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         }
 
         if state.selected_cred.is_some() && state.selected_host.is_some() {
-            let test_btn = egui::Button::new(
-                egui::RichText::new("⚡ Test").small().color(theme::FG),
-            )
-            .fill(theme::ACC_DIM);
+            let test_btn =
+                egui::Button::new(egui::RichText::new("⚡ Test").small().color(theme::FG))
+                    .fill(theme::ACC_DIM);
             if ui.add(test_btn).clicked() {
                 // TODO: wire to runtime test
             }

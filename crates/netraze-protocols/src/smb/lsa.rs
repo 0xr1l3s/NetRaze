@@ -297,7 +297,9 @@ fn get_lsa_key_vista(boot_key: &[u8], security_hive: &Hive) -> Result<Vec<u8>, S
                 while off + 32 <= blob.secret.len() {
                     let candidate = &blob.secret[off..off + 32];
                     let cand_tmp = sha256_1000(candidate, &nlkm_record.encrypted_data[..32]);
-                    if let Ok(pt) = aes_256_lsa_decrypt(&nlkm_record.encrypted_data[32..], &cand_tmp) {
+                    if let Ok(pt) =
+                        aes_256_lsa_decrypt(&nlkm_record.encrypted_data[32..], &cand_tmp)
+                    {
                         if let Ok(nlkm_blob) = parse_lsa_secret_blob(&pt) {
                             if nlkm_blob.secret.len() > 0 && nlkm_blob.secret.len() <= 256 {
                                 return Ok(candidate.to_vec());

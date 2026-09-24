@@ -1750,9 +1750,7 @@ mod user_enum_tests {
         );
         tx.send(RuntimeEvent::BloodHoundProgress {
             endpoint: endpoint.clone(),
-            progress: netraze_protocols::ldap::BloodHoundCeProgress::Writing {
-                graph_objects: 42,
-            },
+            progress: netraze_protocols::ldap::BloodHoundCeProgress::Writing { graph_objects: 42 },
         })
         .unwrap();
         tx.send(RuntimeEvent::BloodHoundResult {
@@ -1776,7 +1774,10 @@ mod user_enum_tests {
         assert_eq!(export.ldap_entry_count, 50);
         assert_eq!(export.exported_object_count, 42);
         assert_eq!(export.json_files.len(), 1);
-        assert_eq!(export.zip_file.as_deref(), Some(output.join("netraze.zip").as_path()));
+        assert_eq!(
+            export.zip_file.as_deref(),
+            Some(output.join("netraze.zip").as_path())
+        );
 
         let workspace = serde_json::to_string(&state.to_save()).unwrap();
         assert!(!workspace.contains("netraze-bloodhound-ui-test"));

@@ -15,10 +15,10 @@ use crate::state::AppState;
 
 use crate::theme;
 
-const ACCENT:    egui::Color32 = theme::ACC;      // #F97D1C orange
-const TEXT_DIM:  egui::Color32 = theme::MUTED;    // #918C85
-const SEPARATOR: egui::Color32 = theme::LINE;     // #2C2B28
-const BAR_BG:    egui::Color32 = theme::PANEL;    // #171716
+const ACCENT: egui::Color32 = theme::ACC; // #F97D1C orange
+const TEXT_DIM: egui::Color32 = theme::MUTED; // #918C85
+const SEPARATOR: egui::Color32 = theme::LINE; // #2C2B28
+const BAR_BG: egui::Color32 = theme::PANEL; // #171716
 
 pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &RuntimeServices) {
     egui::TopBottomPanel::top("top_bar")
@@ -36,11 +36,7 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                     ui.cursor().min + egui::vec2(0.0, 10.0),
                     egui::vec2(7.0, 7.0),
                 );
-                ui.painter().circle_filled(
-                    dot_rect.center(),
-                    3.5,
-                    ACCENT,
-                );
+                ui.painter().circle_filled(dot_rect.center(), 3.5, ACCENT);
                 ui.add_space(11.0);
                 ui.label(
                     egui::RichText::new("NETRAZE DESK")
@@ -59,9 +55,7 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                 for (tab, label) in tabs {
                     let selected = state.nav_tab == tab;
                     let text = if selected {
-                        egui::RichText::new(label)
-                            .size(12.0)
-                            .color(theme::FG)
+                        egui::RichText::new(label).size(12.0).color(theme::FG)
                     } else {
                         egui::RichText::new(label).size(12.0).color(TEXT_DIM)
                     };
@@ -101,14 +95,14 @@ pub fn show_top_bar(ctx: &egui::Context, state: &mut AppState, runtime: &Runtime
                 });
 
                 ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("|")
-                        .color(SEPARATOR)
-                        .size(11.0),
-                );
+                ui.label(egui::RichText::new("|").color(SEPARATOR).size(11.0));
                 ui.add_space(8.0);
 
-                ui.label(egui::RichText::new("workspace").size(11.0).color(MUTED_2_COLOR));
+                ui.label(
+                    egui::RichText::new("workspace")
+                        .size(11.0)
+                        .color(MUTED_2_COLOR),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut state.workspace_path)
                         .desired_width(160.0)
@@ -235,21 +229,36 @@ pub fn show_status_bar(ctx: &egui::Context, state: &mut AppState) {
                     ("○", "inactif", TEXT_DIM)
                 };
                 ui.label(egui::RichText::new(dot).size(8.0).color(color));
-                ui.label(egui::RichText::new(label).size(11.0).monospace().color(TEXT_DIM));
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(11.0)
+                        .monospace()
+                        .color(TEXT_DIM),
+                );
                 sep(ui);
                 ui.label(
                     egui::RichText::new(format!("hôtes  {}", state.discovered_hosts_count()))
-                        .size(11.0).monospace().color(TEXT_DIM),
+                        .size(11.0)
+                        .monospace()
+                        .color(TEXT_DIM),
                 );
                 sep(ui);
                 ui.label(
                     egui::RichText::new(format!("creds  {}", state.credentials_count()))
-                        .size(11.0).monospace().color(TEXT_DIM),
+                        .size(11.0)
+                        .monospace()
+                        .color(TEXT_DIM),
                 );
                 sep(ui);
                 ui.label(
-                    egui::RichText::new(format!("threads  {}/{}", state.threads.min(16), state.threads))
-                        .size(11.0).monospace().color(TEXT_DIM),
+                    egui::RichText::new(format!(
+                        "threads  {}/{}",
+                        state.threads.min(16),
+                        state.threads
+                    ))
+                    .size(11.0)
+                    .monospace()
+                    .color(TEXT_DIM),
                 );
                 sep(ui);
                 ui.label(
@@ -258,7 +267,9 @@ pub fn show_status_bar(ctx: &egui::Context, state: &mut AppState) {
                         state.elapsed_seconds() / 60,
                         state.elapsed_seconds() % 60
                     ))
-                    .size(11.0).monospace().color(TEXT_DIM),
+                    .size(11.0)
+                    .monospace()
+                    .color(TEXT_DIM),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if state.bottom_panel_open {

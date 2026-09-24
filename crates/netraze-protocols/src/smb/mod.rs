@@ -73,10 +73,10 @@ pub use dump::{
 };
 pub use enum_av::{AvProduct, EnumAvResult, enum_av};
 pub use exec::{execute_command, execute_command_live, execute_command_traced};
-pub use nanodump::{LsassDumpResult as NanoDumpResult, remote_lsass_dump};
 pub use fingerprint::{SmbFingerprint, fingerprint as smb_fingerprint};
 pub use info::ServerInfo;
 pub use lsa::LsaDumpResult;
+pub use nanodump::{LsassDumpResult as NanoDumpResult, remote_lsass_dump};
 pub use sam::SamHash;
 pub use shares::{ShareAccess, ShareInfo};
 pub use users::UserInfo;

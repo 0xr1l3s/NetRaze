@@ -3,11 +3,11 @@ use crate::theme;
 use egui::{Color32, Pos2, Rect, Ui};
 
 // Semi-transparent row tints painted over the dot-grid background.
-const ROW_ALT:   Color32 = Color32::from_rgba_premultiplied(25, 24, 23, 110);
+const ROW_ALT: Color32 = Color32::from_rgba_premultiplied(25, 24, 23, 110);
 const ROW_HOVER: Color32 = Color32::from_rgba_premultiplied(36, 35, 33, 170);
-const ROW_SEL:   Color32 = Color32::from_rgba_premultiplied(45, 24, 9,  190);
+const ROW_SEL: Color32 = Color32::from_rgba_premultiplied(45, 24, 9, 190);
 const ROW_H: f32 = 30.0;
-const PAD:   f32 = 20.0;
+const PAD: f32 = 20.0;
 
 pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
@@ -57,11 +57,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 .color(theme::FG),
         );
         ui.add_space(16.0);
-        badge(ui, &total.to_string(),        "total",  theme::MUTED);
+        badge(ui, &total.to_string(), "total", theme::MUTED);
         badge(ui, &active_count.to_string(), "active", theme::SUCCESS);
-        badge(ui, &valid_count.to_string(),  "valid",  theme::INFO);
-        badge(ui, &pwd_count.to_string(),    "pwd",    theme::INFO);
-        badge(ui, &hash_count.to_string(),   "hash",   theme::WARNING);
+        badge(ui, &valid_count.to_string(), "valid", theme::INFO);
+        badge(ui, &pwd_count.to_string(), "pwd", theme::INFO);
+        badge(ui, &hash_count.to_string(), "hash", theme::WARNING);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(PAD);
@@ -128,7 +128,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         if ui
             .add(
                 egui::Button::new(edit_text)
-                    .fill(if can_edit { theme::ACC_DIM } else { Color32::TRANSPARENT })
+                    .fill(if can_edit {
+                        theme::ACC_DIM
+                    } else {
+                        Color32::TRANSPARENT
+                    })
                     .corner_radius(egui::CornerRadius::same(theme::R_BTN))
                     .stroke(egui::Stroke::NONE),
             )
@@ -147,7 +151,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         if ui
             .add(
                 egui::Button::new(del_text)
-                    .fill(if can_del { theme::ERROR_BG } else { Color32::TRANSPARENT })
+                    .fill(if can_del {
+                        theme::ERROR_BG
+                    } else {
+                        Color32::TRANSPARENT
+                    })
                     .corner_radius(egui::CornerRadius::same(theme::R_BTN))
                     .stroke(egui::Stroke::NONE),
             )
@@ -234,7 +242,9 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         ui.add_space(6.0);
         ui.checkbox(
             &mut state.cm_state.filter_active_only,
-            egui::RichText::new("Active only").small().color(theme::MUTED),
+            egui::RichText::new("Active only")
+                .small()
+                .color(theme::MUTED),
         );
         ui.add_space(PAD);
     });
@@ -248,27 +258,27 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
     // ── Column widths ────────────────────────────────────────────────────────
     let tw = (ui.available_width() - PAD * 2.0).max(900.0);
     let c_active = tw * 0.04;
-    let c_user   = tw * 0.13;
+    let c_user = tw * 0.13;
     let c_domain = tw * 0.11;
     let c_secret = tw * 0.16;
-    let c_type   = tw * 0.06;
-    let c_proto  = tw * 0.07;
-    let c_valid  = tw * 0.06;
+    let c_type = tw * 0.06;
+    let c_proto = tw * 0.07;
+    let c_valid = tw * 0.06;
     let c_source = tw * 0.10;
-    let c_notes  = tw * 0.16;
-    let c_tags   = tw * 0.11;
+    let c_notes = tw * 0.16;
+    let c_tags = tw * 0.11;
 
     let col_labels = [
-        ("",       c_active),
-        ("USER",   c_user),
+        ("", c_active),
+        ("USER", c_user),
         ("DOMAIN", c_domain),
         ("SECRET", c_secret),
-        ("TYPE",   c_type),
-        ("PROTO",  c_proto),
-        ("VALID",  c_valid),
+        ("TYPE", c_type),
+        ("PROTO", c_proto),
+        ("VALID", c_valid),
         ("SOURCE", c_source),
-        ("NOTES",  c_notes),
-        ("TAGS",   c_tags),
+        ("NOTES", c_notes),
+        ("TAGS", c_tags),
     ];
 
     // ── Column header row ────────────────────────────────────────────────────
@@ -319,10 +329,10 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 || c.tags
                     .iter()
                     .any(|t| t.to_ascii_lowercase().contains(&query));
-            let matches_type  = filter_type.as_ref().is_none_or(|t| *t == c.cred_type);
+            let matches_type = filter_type.as_ref().is_none_or(|t| *t == c.cred_type);
             let matches_proto = filter_protocol.is_empty()
                 || c.protocol.to_ascii_lowercase().contains(&filter_protocol);
-            let matches_valid  = filter_valid.is_none_or(|v| c.valid == Some(v));
+            let matches_valid = filter_valid.is_none_or(|v| c.valid == Some(v));
             let matches_active = !filter_active_only || c.active;
             matches_search && matches_type && matches_proto && matches_valid && matches_active
         })
@@ -337,7 +347,7 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         .show(ui, |ui| {
             for (row_idx, &cred_idx) in filtered.iter().enumerate() {
                 let c = &state.credentials[cred_idx];
-                let is_alt      = row_idx % 2 == 1;
+                let is_alt = row_idx % 2 == 1;
                 let is_selected = state.cm_state.selected_cred_idx == Some(cred_idx);
 
                 let (row_rect, row_resp) = ui.allocate_exact_size(
@@ -380,8 +390,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 } else {
                     theme::LINE_2
                 };
-                ui.painter()
-                    .rect_filled(active_rect, egui::CornerRadius::same(theme::R_BADGE), active_color);
+                ui.painter().rect_filled(
+                    active_rect,
+                    egui::CornerRadius::same(theme::R_BADGE),
+                    active_color,
+                );
                 if row_resp.clicked()
                     && active_rect
                         .contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default())
@@ -422,9 +435,9 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                     "••••••••".to_string()
                 };
                 let secret_color = match (&c.cred_type, c.secret.is_empty()) {
-                    (CredType::Hash, _)           => theme::WARNING,
-                    (CredType::Password, true)    => theme::SUCCESS,
-                    (CredType::Password, false)   => theme::INFO,
+                    (CredType::Hash, _) => theme::WARNING,
+                    (CredType::Password, true) => theme::SUCCESS,
+                    (CredType::Password, false) => theme::INFO,
                 };
                 ui.painter().text(
                     Pos2::new(x + 4.0, y),
@@ -437,12 +450,13 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
 
                 // ── Type badge ──
                 let (type_label, type_color, type_bg) = match (&c.cred_type, c.secret.is_empty()) {
-                    (CredType::Password, true)  => ("GUEST", theme::SUCCESS, theme::SUCCESS_BG),
-                    (CredType::Password, false) => ("PWD",   theme::INFO,    theme::INFO_BG),
-                    (CredType::Hash, _)         => ("HASH",  theme::WARNING, theme::WARNING_BG),
+                    (CredType::Password, true) => ("GUEST", theme::SUCCESS, theme::SUCCESS_BG),
+                    (CredType::Password, false) => ("PWD", theme::INFO, theme::INFO_BG),
+                    (CredType::Hash, _) => ("HASH", theme::WARNING, theme::WARNING_BG),
                 };
                 let br = Rect::from_min_size(Pos2::new(x + 2.0, y - 9.0), egui::vec2(46.0, 18.0));
-                ui.painter().rect_filled(br, egui::CornerRadius::same(theme::R_BADGE), type_bg);
+                ui.painter()
+                    .rect_filled(br, egui::CornerRadius::same(theme::R_BADGE), type_bg);
                 ui.painter().text(
                     br.center(),
                     egui::Align2::CENTER_CENTER,
@@ -454,7 +468,8 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
 
                 // ── Protocol ──
                 if !c.protocol.is_empty() {
-                    let pr = Rect::from_min_size(Pos2::new(x + 2.0, y - 9.0), egui::vec2(50.0, 18.0));
+                    let pr =
+                        Rect::from_min_size(Pos2::new(x + 2.0, y - 9.0), egui::vec2(50.0, 18.0));
                     ui.painter().rect_filled(
                         pr,
                         egui::CornerRadius::same(theme::R_BADGE),
@@ -472,9 +487,9 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
 
                 // ── Valid ──
                 let (valid_label, valid_color) = match c.valid {
-                    Some(true)  => ("✔", theme::SUCCESS),
+                    Some(true) => ("✔", theme::SUCCESS),
                     Some(false) => ("✘", theme::ERROR),
-                    None        => ("—", theme::MUTED),
+                    None => ("—", theme::MUTED),
                 };
                 ui.painter().text(
                     Pos2::new(x + 4.0, y),
@@ -489,7 +504,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
                 ui.painter().text(
                     Pos2::new(x + 4.0, y),
                     egui::Align2::LEFT_CENTER,
-                    if c.source.is_empty() { "—" } else { &c.source },
+                    if c.source.is_empty() {
+                        "—"
+                    } else {
+                        &c.source
+                    },
                     fs.clone(),
                     theme::MUTED,
                 );
@@ -602,16 +621,16 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
         Some(ToolbarAction::Edit) => {
             if let Some(idx) = state.cm_state.selected_cred_idx {
                 let c = &state.credentials[idx];
-                state.cm_state.form_username  = c.username.clone();
-                state.cm_state.form_domain    = c.domain.clone();
-                state.cm_state.form_secret    = c.secret.clone();
+                state.cm_state.form_username = c.username.clone();
+                state.cm_state.form_domain = c.domain.clone();
+                state.cm_state.form_secret = c.secret.clone();
                 state.cm_state.form_cred_type = c.cred_type.clone();
-                state.cm_state.form_protocol  = c.protocol.clone();
-                state.cm_state.form_source    = c.source.clone();
-                state.cm_state.form_notes     = c.notes.clone();
-                state.cm_state.form_tags      = c.tags.join(", ");
-                state.cm_state.form_active    = c.active;
-                state.cm_state.edit_mode      = true;
+                state.cm_state.form_protocol = c.protocol.clone();
+                state.cm_state.form_source = c.source.clone();
+                state.cm_state.form_notes = c.notes.clone();
+                state.cm_state.form_tags = c.tags.join(", ");
+                state.cm_state.form_active = c.active;
+                state.cm_state.edit_mode = true;
             }
         }
         Some(ToolbarAction::Delete) => {
@@ -662,7 +681,11 @@ pub fn show(ui: &mut Ui, ctx: &egui::Context, state: &mut AppState) {
 
 fn show_edit_window(ctx: &egui::Context, state: &mut AppState) {
     let is_editing = state.cm_state.selected_cred_idx.is_some();
-    let title = if is_editing { "Edit Credential" } else { "Add Credential" };
+    let title = if is_editing {
+        "Edit Credential"
+    } else {
+        "Add Credential"
+    };
     let mut open = true;
     egui::Window::new(title)
         .open(&mut open)
@@ -710,23 +733,27 @@ fn show_edit_window(ctx: &egui::Context, state: &mut AppState) {
                         egui::TextEdit::singleline(&mut state.cm_state.form_secret)
                             .desired_width(f32::INFINITY)
                             .password(!state.cm_state.show_secrets)
-                            .hint_text(if matches!(
-                                state.cm_state.form_cred_type,
-                                CredType::Password
-                            ) {
-                                "empty = guest access"
-                            } else {
-                                "NT hash (32 hex chars)"
-                            })
+                            .hint_text(
+                                if matches!(state.cm_state.form_cred_type, CredType::Password) {
+                                    "empty = guest access"
+                                } else {
+                                    "NT hash (32 hex chars)"
+                                },
+                            )
                             .font(egui::TextStyle::Monospace),
                     );
                     ui.label(egui::RichText::new("Type").small().color(theme::MUTED));
                     ui.horizontal(|ui| {
-                        let pwd_selected = matches!(state.cm_state.form_cred_type, CredType::Password);
+                        let pwd_selected =
+                            matches!(state.cm_state.form_cred_type, CredType::Password);
                         if ui
                             .add(
                                 egui::Button::new(egui::RichText::new("Password").small())
-                                    .fill(if pwd_selected { theme::ACC_DIM } else { Color32::TRANSPARENT })
+                                    .fill(if pwd_selected {
+                                        theme::ACC_DIM
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
                                     .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
                             )
                             .clicked()
@@ -736,7 +763,11 @@ fn show_edit_window(ctx: &egui::Context, state: &mut AppState) {
                         if ui
                             .add(
                                 egui::Button::new(egui::RichText::new("Hash").small())
-                                    .fill(if !pwd_selected { theme::ACC_DIM } else { Color32::TRANSPARENT })
+                                    .fill(if !pwd_selected {
+                                        theme::ACC_DIM
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
                                     .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
                             )
                             .clicked()
@@ -781,10 +812,14 @@ fn show_edit_window(ctx: &egui::Context, state: &mut AppState) {
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new(if is_editing { "💾 Update" } else { "💾 Save" })
-                                    .small()
-                                    .strong()
-                                    .color(theme::FG),
+                                egui::RichText::new(if is_editing {
+                                    "💾 Update"
+                                } else {
+                                    "💾 Save"
+                                })
+                                .small()
+                                .strong()
+                                .color(theme::FG),
                             )
                             .fill(theme::ACC_DIM)
                             .corner_radius(egui::CornerRadius::same(theme::R_BTN)),
@@ -840,10 +875,10 @@ fn save_form(state: &mut AppState) {
 
     if let Some(idx) = cm.selected_cred_idx {
         let old_created = state.credentials[idx].created_at;
-        let old_valid   = state.credentials[idx].valid;
+        let old_valid = state.credentials[idx].valid;
         state.credentials[idx] = record;
         state.credentials[idx].created_at = old_created;
-        state.credentials[idx].valid      = old_valid;
+        state.credentials[idx].valid = old_valid;
     } else {
         state.credentials.push(record);
     }
@@ -883,13 +918,9 @@ fn badge(ui: &mut Ui, value: &str, label: &str, color: Color32) {
     );
     let w = galley.size().x + 14.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
-    let bg = Color32::from_rgba_premultiplied(
-        color.r() / 6,
-        color.g() / 6,
-        color.b() / 6,
-        200,
-    );
-    ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::R_BADGE), bg);
+    let bg = Color32::from_rgba_premultiplied(color.r() / 6, color.g() / 6, color.b() / 6, 200);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(theme::R_BADGE), bg);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -904,8 +935,16 @@ fn badge(ui: &mut Ui, value: &str, label: &str, color: Color32) {
 fn export_csv(state: &AppState, path: &str) -> Result<(), String> {
     let mut wtr = csv::Writer::from_path(path).map_err(|e| e.to_string())?;
     wtr.write_record([
-        "username", "domain", "secret", "cred_type", "protocol",
-        "valid", "active", "source", "notes", "tags",
+        "username",
+        "domain",
+        "secret",
+        "cred_type",
+        "protocol",
+        "valid",
+        "active",
+        "source",
+        "notes",
+        "tags",
     ])
     .map_err(|e| e.to_string())?;
     for c in &state.credentials {
@@ -915,7 +954,7 @@ fn export_csv(state: &AppState, path: &str) -> Result<(), String> {
             c.secret.clone(),
             match c.cred_type {
                 CredType::Password => "password".to_string(),
-                CredType::Hash     => "hash".to_string(),
+                CredType::Hash => "hash".to_string(),
             },
             c.protocol.clone(),
             c.valid.map_or(String::new(), |v| v.to_string()),
@@ -933,20 +972,30 @@ fn export_csv(state: &AppState, path: &str) -> Result<(), String> {
 fn import_csv(state: &mut AppState, path: &str) -> Result<(usize, usize, usize), String> {
     let mut rdr = csv::Reader::from_path(path).map_err(|e| e.to_string())?;
     let mut imported = 0usize;
-    let mut skipped  = 0usize;
-    let mut errors   = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
 
     for result in rdr.records() {
         let record = match result {
-            Ok(r)  => r,
-            Err(_) => { errors += 1; continue; }
+            Ok(r) => r,
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
         };
-        if record.len() < 4 { errors += 1; continue; }
-        let username     = record.get(0).unwrap_or("").trim().to_string();
-        let domain       = record.get(1).unwrap_or("").trim().to_string();
-        let secret       = record.get(2).unwrap_or("").trim().to_string();
+        if record.len() < 4 {
+            errors += 1;
+            continue;
+        }
+        let username = record.get(0).unwrap_or("").trim().to_string();
+        let domain = record.get(1).unwrap_or("").trim().to_string();
+        let secret = record.get(2).unwrap_or("").trim().to_string();
         let cred_type_str = record.get(3).unwrap_or("password").trim().to_lowercase();
-        let cred_type    = if cred_type_str == "hash" { CredType::Hash } else { CredType::Password };
+        let cred_type = if cred_type_str == "hash" {
+            CredType::Hash
+        } else {
+            CredType::Password
+        };
         if username.is_empty() || (secret.is_empty() && cred_type == CredType::Hash) {
             errors += 1;
             continue;
@@ -955,14 +1004,22 @@ fn import_csv(state: &mut AppState, path: &str) -> Result<(usize, usize, usize),
             .credentials
             .iter()
             .any(|c| c.username == username && c.domain == domain && c.secret == secret);
-        if is_dup { skipped += 1; continue; }
+        if is_dup {
+            skipped += 1;
+            continue;
+        }
 
         let protocol = record.get(4).unwrap_or("").trim().to_uppercase();
-        let valid    = record.get(5).unwrap_or("").trim().parse::<bool>().ok();
-        let active   = record.get(6).unwrap_or("true").trim().parse::<bool>().unwrap_or(true);
-        let source   = record.get(7).unwrap_or("").trim().to_string();
-        let notes    = record.get(8).unwrap_or("").trim().to_string();
-        let tags     = record
+        let valid = record.get(5).unwrap_or("").trim().parse::<bool>().ok();
+        let active = record
+            .get(6)
+            .unwrap_or("true")
+            .trim()
+            .parse::<bool>()
+            .unwrap_or(true);
+        let source = record.get(7).unwrap_or("").trim().to_string();
+        let notes = record.get(8).unwrap_or("").trim().to_string();
+        let tags = record
             .get(9)
             .unwrap_or("")
             .split('|')
@@ -972,7 +1029,11 @@ fn import_csv(state: &mut AppState, path: &str) -> Result<(usize, usize, usize),
 
         state.credentials.push(crate::state::CredentialRecord {
             username,
-            domain: if domain.is_empty() { ".".to_owned() } else { domain },
+            domain: if domain.is_empty() {
+                ".".to_owned()
+            } else {
+                domain
+            },
             secret,
             cred_type,
             valid,

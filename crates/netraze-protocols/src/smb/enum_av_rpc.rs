@@ -22,9 +22,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use netraze_dcerpc::DceRpcError;
 use netraze_dcerpc::channel::RpcChannel;
 use netraze_dcerpc::interfaces::scmr;
-use netraze_dcerpc::DceRpcError;
 
 use super::connection::SmbCredential;
 use super::rpc::{bind_svcctl_over_smb, connect_session, host_only};
@@ -191,9 +191,7 @@ async fn query_services_on_channel(
         // restriction surfaced at different layers.  All three mean "no SCM phase
         // available" — skip silently; the pipe phase still runs.
         Err(DceRpcError::Fault { status })
-            if status == 0x0000_06E4
-                || status == 0x0000_0005
-                || status == 0x1C01_0002 =>
+            if status == 0x0000_06E4 || status == 0x0000_0005 || status == 0x1C01_0002 =>
         {
             return Ok(vec![]);
         }

@@ -3,17 +3,17 @@ use crate::theme;
 use crate::workflow::WorkflowNode;
 use egui::{Color32, Pos2, Rect, Ui};
 
-const TEXT_DIM:  Color32 = theme::MUTED;
-const ROW_ALT:   Color32 = Color32::from_rgb(27, 26, 25);   // #1B1A19 faint stripe
-const ROW_HOVER: Color32 = Color32::from_rgb(47, 45, 42);   // #2F2D2A
+const TEXT_DIM: Color32 = theme::MUTED;
+const ROW_ALT: Color32 = Color32::from_rgb(27, 26, 25); // #1B1A19 faint stripe
+const ROW_HOVER: Color32 = Color32::from_rgb(47, 45, 42); // #2F2D2A
 const SEPARATOR: Color32 = theme::LINE;
-const GREEN:     Color32 = theme::SUCCESS;
-const BLUE:      Color32 = theme::INFO;
-const YELLOW:    Color32 = theme::WARNING;
-const DOT_COLOR:   Color32 = theme::DOT_COLOR;
+const GREEN: Color32 = theme::SUCCESS;
+const BLUE: Color32 = theme::INFO;
+const YELLOW: Color32 = theme::WARNING;
+const DOT_COLOR: Color32 = theme::DOT_COLOR;
 const DOT_SPACING: f32 = theme::DOT_SPACING;
-const DOT_RADIUS:  f32 = theme::DOT_RADIUS;
-const ROW_H: f32 = 26.0;  // design: interact_size.y = 24
+const DOT_RADIUS: f32 = theme::DOT_RADIUS;
+const ROW_H: f32 = 26.0; // design: interact_size.y = 24
 
 struct FlatHost {
     ip: String,

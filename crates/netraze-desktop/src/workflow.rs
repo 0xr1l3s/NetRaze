@@ -9,20 +9,20 @@ use crate::state::CredentialRecord;
 
 use crate::theme;
 
-const DOT_COLOR:   Color32 = theme::DOT_COLOR;
-const DOT_SPACING: f32     = theme::DOT_SPACING;
-const DOT_RADIUS:  f32     = theme::DOT_RADIUS;
+const DOT_COLOR: Color32 = theme::DOT_COLOR;
+const DOT_SPACING: f32 = theme::DOT_SPACING;
+const DOT_RADIUS: f32 = theme::DOT_RADIUS;
 
 // HostNode card palette — Vantage semantic tokens.
-const HOST_PRIMARY:      Color32 = theme::FG;        // #F5F4F2
-const HOST_OK:           Color32 = theme::SUCCESS;   // #55B77F
-const HOST_WARN:         Color32 = theme::WARNING;   // #E2A44C
-const HOST_BAD:          Color32 = theme::ERROR;     // #E8604C
-const HOST_ADMIN_PURPLE: Color32 = theme::INFO;      // #5F9DE8 (admin = blue info)
+const HOST_PRIMARY: Color32 = theme::FG; // #F5F4F2
+const HOST_OK: Color32 = theme::SUCCESS; // #55B77F
+const HOST_WARN: Color32 = theme::WARNING; // #E2A44C
+const HOST_BAD: Color32 = theme::ERROR; // #E8604C
+const HOST_ADMIN_PURPLE: Color32 = theme::INFO; // #5F9DE8 (admin = blue info)
 
 /// Circle geometry for HostNode (radius, label height, gap between circle and label).
-const HOST_R:         f32 = 28.0;
-const HOST_LABEL_H:   f32 = 13.0;
+const HOST_R: f32 = 28.0;
+const HOST_LABEL_H: f32 = 13.0;
 const HOST_LABEL_GAP: f32 = 5.0;
 /// Total body height allocated in show_body: circle diameter + gap + label.
 const HOST_BODY_H: f32 = HOST_R * 2.0 + HOST_LABEL_GAP + HOST_LABEL_H;
@@ -162,7 +162,6 @@ fn host_status_color(node: &WorkflowNode) -> Option<Color32> {
         _ => None,
     }
 }
-
 
 impl WorkflowNode {
     pub fn label(&self) -> String {
@@ -581,9 +580,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 ui.label(name.clone());
                 PinInfo::triangle().with_fill(Color32::from_rgb(200, 120, 220))
             }
-            WorkflowNode::HostNode { .. } => {
-                PinInfo::circle().with_fill(theme::LINE_2)
-            }
+            WorkflowNode::HostNode { .. } => PinInfo::circle().with_fill(theme::LINE_2),
             WorkflowNode::SharesNode { .. } => {
                 ui.label("-");
                 PinInfo::circle().with_fill(Color32::from_rgb(80, 170, 255))
@@ -694,7 +691,12 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         // Collect all draw parameters as owned values to avoid borrow conflicts
         // with the context_menu closure that needs &mut snarl.
         let draw_params: Option<(&'static str, String, Color32)> = match &snarl[node] {
-            WorkflowNode::HostNode { ip, hostname, admin, .. } => {
+            WorkflowNode::HostNode {
+                ip,
+                hostname,
+                admin,
+                ..
+            } => {
                 let is_admin = *admin;
                 let label = if hostname.is_empty() || hostname == ip.as_str() {
                     ip.clone()
@@ -705,9 +707,22 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 let icon: &'static str = if is_admin { "⚡" } else { "🖥" };
                 Some((icon, label, border))
             }
-            WorkflowNode::SharesNode { host_ip, hostname, shares, .. } => {
-                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
-                let border = if shares.is_empty() { theme::MUTED } else { theme::INFO };
+            WorkflowNode::SharesNode {
+                host_ip,
+                hostname,
+                shares,
+                ..
+            } => {
+                let label = if hostname.is_empty() {
+                    host_ip.clone()
+                } else {
+                    hostname.clone()
+                };
+                let border = if shares.is_empty() {
+                    theme::MUTED
+                } else {
+                    theme::INFO
+                };
                 Some(("📂", label, border))
             }
             WorkflowNode::UsersNode {
@@ -781,8 +796,18 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 };
                 Some((icon, label, border))
             }
-            WorkflowNode::EnumAvNode { host_ip, hostname, products, done, .. } => {
-                let label = if hostname.is_empty() { host_ip.clone() } else { hostname.clone() };
+            WorkflowNode::EnumAvNode {
+                host_ip,
+                hostname,
+                products,
+                done,
+                ..
+            } => {
+                let label = if hostname.is_empty() {
+                    host_ip.clone()
+                } else {
+                    hostname.clone()
+                };
                 let border = if !products.is_empty() {
                     theme::WARNING
                 } else if *done {
@@ -803,7 +828,7 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
                 egui::vec2(PAD_L + HOST_R * 2.0, HOST_BODY_H),
                 egui::Sense::click(),
             );
-            let center  = egui::pos2(rect.left() + PAD_L + HOST_R, rect.top() + HOST_R);
+            let center = egui::pos2(rect.left() + PAD_L + HOST_R, rect.top() + HOST_R);
             let painter = ui.painter();
 
             painter.circle_filled(center, HOST_R, theme::ELEV_1);
@@ -1435,7 +1460,6 @@ impl SnarlViewer<WorkflowNode> for WorkflowViewer {
         }
     }
 }
-
 
 /// Parse share string "NAME [TYPE] (ACCESS)" into (name, type, access).
 fn parse_share_string(s: &str) -> (&str, &str, &str) {

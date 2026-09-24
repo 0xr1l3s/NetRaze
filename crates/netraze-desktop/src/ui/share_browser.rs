@@ -106,14 +106,16 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                 ui.spacing_mut().item_spacing.x = 2.0;
 
                 let can_go_back = !browser.path_stack.is_empty();
-                let back_btn = egui::Button::new(
-                    egui::RichText::new("⬅").color(if can_go_back {
-                        theme::FG
-                    } else {
-                        theme::MUTED_2
-                    }),
-                )
-                .fill(if can_go_back { theme::ACC_DIM } else { theme::ELEV_1 })
+                let back_btn = egui::Button::new(egui::RichText::new("⬅").color(if can_go_back {
+                    theme::FG
+                } else {
+                    theme::MUTED_2
+                }))
+                .fill(if can_go_back {
+                    theme::ACC_DIM
+                } else {
+                    theme::ELEV_1
+                })
                 .corner_radius(egui::CornerRadius::same(theme::R_BADGE));
                 if ui.add(back_btn).clicked() && can_go_back {
                     browser.path_stack.pop();
@@ -209,8 +211,8 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                             if browser.new_folder_name.is_empty() {
                                 resp.request_focus();
                             }
-                            let enter = resp.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let enter =
+                                resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             let create_clicked = ui
                                 .add(
                                     egui::Button::new(
@@ -406,7 +408,10 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                 if *is_dir {
                                     if ui.button("🗑 Delete folder").clicked() {
                                         let rel = browser.child_rel_path(entry_name);
-                                        action = BrowserAction::Delete { rel_path: rel, is_dir: true };
+                                        action = BrowserAction::Delete {
+                                            rel_path: rel,
+                                            is_dir: true,
+                                        };
                                         ui.close();
                                     }
                                 } else {
@@ -420,7 +425,10 @@ pub fn show_browser_window(ctx: &egui::Context, browser: &mut ShareBrowserState)
                                     }
                                     if ui.button("🗑 Delete file").clicked() {
                                         let rel = browser.child_rel_path(entry_name);
-                                        action = BrowserAction::Delete { rel_path: rel, is_dir: false };
+                                        action = BrowserAction::Delete {
+                                            rel_path: rel,
+                                            is_dir: false,
+                                        };
                                         ui.close();
                                     }
                                 }

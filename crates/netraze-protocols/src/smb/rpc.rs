@@ -297,9 +297,8 @@ pub async fn bind_interface_over_smb(
     // because the DCE auth context is a failed login even though the SMB
     // session was guest-mapped. The unauthenticated bind is the only
     // shape the server honors for a guest session.
-    let guest_shape = !cred.username.is_empty()
-        && cred.nt_hash.is_none()
-        && cred.password.is_empty();
+    let guest_shape =
+        !cred.username.is_empty() && cred.nt_hash.is_none() && cred.password.is_empty();
     if cred.username.is_empty() || guest_shape {
         let mode = if guest_shape { "guest" } else { "anonymous" };
         let transport = open_pipe(&session, ipc_tree_id, pipe_name).await?;
@@ -353,11 +352,10 @@ pub async fn bind_samr_over_smb(
         ipc_tree_id: u32,
     ) -> Result<Arc<dyn RpcTransport>, String> {
         let s = Arc::clone(session);
-        let pipe = tokio::task::spawn_blocking(move || {
-            SmbPipeTransport::open(s, ipc_tree_id, "samr")
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking(samr pipe_open): {e}"))??;
+        let pipe =
+            tokio::task::spawn_blocking(move || SmbPipeTransport::open(s, ipc_tree_id, "samr"))
+                .await
+                .map_err(|e| format!("spawn_blocking(samr pipe_open): {e}"))??;
         Ok(Arc::new(pipe))
     }
 
@@ -365,9 +363,8 @@ pub async fn bind_samr_over_smb(
     let version = (1u16, 0u16);
 
     // Guest and null sessions: unauthenticated bind only.
-    let guest_shape = !cred.username.is_empty()
-        && cred.nt_hash.is_none()
-        && cred.password.is_empty();
+    let guest_shape =
+        !cred.username.is_empty() && cred.nt_hash.is_none() && cred.password.is_empty();
     if cred.username.is_empty() || guest_shape {
         let transport = open_samr_pipe(&session, ipc_tree_id).await?;
         return RpcChannel::bind(transport, interface, version)
@@ -428,20 +425,18 @@ pub async fn bind_svcctl_over_smb(
         ipc_tree_id: u32,
     ) -> Result<Arc<dyn RpcTransport>, String> {
         let s = Arc::clone(session);
-        let pipe = tokio::task::spawn_blocking(move || {
-            SmbPipeTransport::open(s, ipc_tree_id, "svcctl")
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking(svcctl pipe_open): {e}"))??;
+        let pipe =
+            tokio::task::spawn_blocking(move || SmbPipeTransport::open(s, ipc_tree_id, "svcctl"))
+                .await
+                .map_err(|e| format!("spawn_blocking(svcctl pipe_open): {e}"))??;
         Ok(Arc::new(pipe))
     }
 
     let interface = scmr::uuid();
     let version = (scmr::VERSION_MAJOR, scmr::VERSION_MINOR);
 
-    let guest_shape = !cred.username.is_empty()
-        && cred.nt_hash.is_none()
-        && cred.password.is_empty();
+    let guest_shape =
+        !cred.username.is_empty() && cred.nt_hash.is_none() && cred.password.is_empty();
     if cred.username.is_empty() || guest_shape {
         let transport = open_svcctl_pipe(&session, ipc_tree_id).await?;
         return RpcChannel::bind(transport, interface, version)
@@ -479,20 +474,18 @@ pub async fn bind_winreg_over_smb(
         ipc_tree_id: u32,
     ) -> Result<Arc<dyn RpcTransport>, String> {
         let s = Arc::clone(session);
-        let pipe = tokio::task::spawn_blocking(move || {
-            SmbPipeTransport::open(s, ipc_tree_id, "winreg")
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking(winreg pipe_open): {e}"))??;
+        let pipe =
+            tokio::task::spawn_blocking(move || SmbPipeTransport::open(s, ipc_tree_id, "winreg"))
+                .await
+                .map_err(|e| format!("spawn_blocking(winreg pipe_open): {e}"))??;
         Ok(Arc::new(pipe))
     }
 
     let interface = winreg::uuid();
     let version = (1u16, 0u16);
 
-    let guest_shape = !cred.username.is_empty()
-        && cred.nt_hash.is_none()
-        && cred.password.is_empty();
+    let guest_shape =
+        !cred.username.is_empty() && cred.nt_hash.is_none() && cred.password.is_empty();
     if cred.username.is_empty() || guest_shape {
         let transport = open_winreg_pipe(&session, ipc_tree_id).await?;
         return RpcChannel::bind(transport, interface, version)

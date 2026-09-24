@@ -135,12 +135,12 @@ pub fn encode_base_reg_query_info_key_request(hkey: &RegHandle) -> Vec<u8> {
     let mut w = NdrWriter::new();
     w.write_context_handle(hkey);
     // lpClassIn: RRP_UNICODE_STRING with 1024-byte output buffer
-    w.write_u16(0);    // Length = 0 (no input content)
+    w.write_u16(0); // Length = 0 (no input content)
     w.write_u16(1024); // MaximumLength = 1024 bytes
     w.write_unique_ptr(true, |w| {
         w.write_u32(512); // MaximumCount = 512 WCHARs
-        w.write_u32(0);   // Offset
-        w.write_u32(0);   // ActualCount = 0 (no input data)
+        w.write_u32(0); // Offset
+        w.write_u32(0); // ActualCount = 0 (no input data)
         // No WCHAR data — ActualCount is 0
     });
     w.finish()

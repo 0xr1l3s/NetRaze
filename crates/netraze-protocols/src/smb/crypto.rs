@@ -5,8 +5,8 @@
 //! (names, signatures, `Result<_, String>`) is preserved so callers in
 //! `sam.rs`, `ntlm.rs`, `dump.rs`, `hive.rs` don't need to change.
 
-use aes::{Aes128, Aes256};
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
+use aes::{Aes128, Aes256};
 use cipher::{BlockDecrypt, KeyInit};
 use des::Des;
 use hmac::{Hmac, Mac};
@@ -102,8 +102,7 @@ pub fn aes_256_cbc_decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<V
             ciphertext.len()
         ));
     }
-    let dec =
-        Aes256CbcDec::new_from_slices(key, iv).map_err(|e| format!("AES-256 init: {e}"))?;
+    let dec = Aes256CbcDec::new_from_slices(key, iv).map_err(|e| format!("AES-256 init: {e}"))?;
     let mut buf = ciphertext.to_vec();
     let pt = dec
         .decrypt_padded_mut::<NoPadding>(&mut buf)

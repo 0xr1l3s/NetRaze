@@ -312,7 +312,7 @@ impl NdrWriter {
         self.write_referent(); // non-zero referent ID, inline
         // Write conformant-varying WCHAR array inline (no deferral)
         self.write_u32(count_with_nul); // MaximumCount
-        self.write_u32(0);              // Offset
+        self.write_u32(0); // Offset
         self.write_u32(count_with_nul); // ActualCount
         for u in &units {
             self.write_u16(*u);
